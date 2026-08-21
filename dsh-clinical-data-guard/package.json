@@ -1,0 +1,57 @@
+{
+  "name": "emerald-clinical-data-guard",
+  "version": "1.0.5",
+  "description": "Emerald Clinical Data Guard — standard DSH/Cordis plugin for clinical data protection",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "scripts": {
+    "test": "python tests/run_all.py",
+    "test:mutation": "python tests/mutation/run_mutation.py",
+    "sync:patterns": "python scripts/sync_patterns.py"
+  },
+  "keywords": [
+    "clinical-trials",
+    "data-security",
+    "CDISC",
+    "pharma",
+    "emerald-clinical"
+  ],
+  "author": "Emerald Clinical Team",
+  "license": "UNLICENSED",
+  "files": [
+    "src/index.js",
+    "src/branding.js",
+    "src/patterns.js",
+    "src/tool-result-guard.js",
+    "assets/branding/favicon.svg",
+    "security/__init__.py",
+    "security/ai_operations_monitor.py",
+    "security/audit_log.py",
+    "security/data_egress_guard.py",
+    "security/egress_authz.py",
+    "security/egress_checkpoint.py",
+    "security/local_data_inspector.py",
+    "security/node_patterns.json",
+    "security/patterns.py",
+    "security/tokenizer.py",
+    "security/worker.py",
+    "excel_header_extractor.py",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-host-webserver": "0.1.0-rc.6"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -1,0 +1,7 @@
+- insert:
+  - id: clinical-data-guard
+    name: emerald-clinical-data-guard
+    config:
+      mode: enforce
+      brandName: Emerald Clinical
+      brandShortName: Emerald

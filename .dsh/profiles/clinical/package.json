@@ -1,0 +1,16 @@
+{
+  "name": "dsh-profile-clinical",
+  "private": true,
+  "dependencies": {
+    "emerald-clinical-data-guard": "link:../../../dsh-clinical-data-guard"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "emerald-clinical-data-guard"
+      ]
+    }
+  }
+}
