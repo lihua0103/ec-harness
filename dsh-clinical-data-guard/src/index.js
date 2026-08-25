@@ -387,7 +387,7 @@ function maskTrustedDocuments(value, token, restored = new Map(), path = []) {
         return { ...value, text: 'trusted local path control metadata' };
       }
     } catch {
-      // 非 canonical JSON 继续进入普通 smart_guard
+      // 非 canonical JSON 不建立豁免，继续走常规出域检查
     }
   }
   return Object.fromEntries(Object.entries(value).map(

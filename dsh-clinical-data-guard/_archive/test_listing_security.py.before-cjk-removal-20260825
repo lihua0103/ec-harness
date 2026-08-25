@@ -20,6 +20,7 @@ from security.header_detect import process_csv, process_xls, process_xlsx
 from security.local_data_inspector import LocalDataInspectionError, inspect_local_data
 from security.listing_data_catalog import DatasetCatalog
 from security.path_policy import PathPolicyError, read_credential, resolve_under_root, safe_extract_zip
+from security.smart_guard import smart_scrub_text
 from security import spec_parser
 from security.spec_parser import find_spec_documents, parse_spec_document
 from security.worker import _handle
@@ -302,6 +303,16 @@ def test_horizontal_header_coordinates_match_across_supported_spreadsheets() -> 
             coordinates = {(cell["row"], cell["col"]) for cell in result["header_cells"]}
             assert {(0, 1), (0, 2)} <= coordinates
             assert (2, 1) not in coordinates and (2, 2) not in coordinates
+
+
+def test_spec_profile_normalizes_cjk_digits_before_release() -> None:
+    """spec 允许保留需求语义，但中文数字不能成为日期和编号的编码绕过。"""
+    source = "方案日期为二零二六年八月十九日，受试者编号一零一零零一。"
+    scrubbed, stats = smart_scrub_text(source, profile="spec")
+    assert source not in scrubbed
+    assert "二零二六年八月十九日" not in scrubbed
+    assert "一零一零零一" not in scrubbed
+    assert stats.tokens_hashed > 0
 
 
 class TestSkipped(Exception):
