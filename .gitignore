@@ -1,6 +1,11 @@
 # 敏感配置与本地运行数据，绝不提交
-.env
-.env.*
+# 2026-08-25：.env / .env.china 为不含真实凭据的配置模板（API Key 行均为
+# 注释占位符），显式放行入库供部署参考。真实密钥一律走本地覆盖或
+# credentials/，绝不写进这两个文件。
+!.env
+!.env.china
+.env.local
+.env.*.local
 !.env.example
 
 # 本地凭据（归档密码等）——原值只在本地工具间流转，绝不入库
