@@ -1,0 +1,44 @@
+# DSH Guard Cordis 配置
+# 文档: https://cordis.js.org/
+
+# 全局配置
+$global:
+  logLevel: info
+
+# 插件列表
+plugins:
+  # 企业认证插件（待开发）
+  - name: '@dsh-guard/enterprise-auth'
+    disabled: true
+    config:
+      enabled: true
+      provider: oauth2
+      oauth2:
+        clientId: ${OAUTH2_CLIENT_ID}
+        clientSecret: ${OAUTH2_CLIENT_SECRET}
+        authorizationUrl: ${OAUTH2_AUTH_URL}
+        tokenUrl: ${OAUTH2_TOKEN_URL}
+        userInfoUrl: ${OAUTH2_USERINFO_URL}
+      sessionTimeout: 3600000
+      mfaEnabled: false
+  
+  # 企业审计插件（待开发）
+  - name: '@dsh-guard/enterprise-audit'
+    disabled: true
+    config:
+      enabled: true
+      logLevel: info
+      storage:
+        type: database
+        connection: ${AUDIT_DB_CONNECTION}
+  
+  # 企业合规插件（待开发）
+  - name: '@dsh-guard/enterprise-compliance'
+    disabled: true
+    config:
+      enabled: true
+      rules:
+        - name: data-retention
+          enabled: true
+        - name: pii-detection
+          enabled: true

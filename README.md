@@ -1,62 +1,180 @@
-# Emerald Clinical Data Guard
+# DSH Guard - 企业级 AI Agent 框架
 
-这是面向本地 DeepSeek Harness（DSH）/ Cordis 的临床试验数据安全项目。源码、DSH runtime、独立 profile、Python 虚拟环境、npm/pnpm 缓存和运行数据全部位于项目根目录；不修改 DSH 原有插件，不修改 `node_modules` 源码，也不启动外置 HTTP 代理或新增插件监听端口。
+基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的轻量级企业扩展。
 
-当前唯一交付边界：
+## 项目特点
 
-```text
-docs/                         主规格与 v2 开发验收计划
-runtime/                      项目内 DSH 0.1.0-rc.6 清单与锁文件
-.dsh/profiles/clinical/       项目内 profile 清单与 pnpm 锁文件
-dsh-clinical-data-guard/      标准插件、Python 安全内核、测试与发布包
+- 🚀 **轻量精简**：只依赖核心框架，不包含冗余代码
+- 🔌 **插件化**：基于 Cordis 框架，一切功能都是插件
+- 🏢 **企业级**：内置企业认证、审计、合规等功能
+- 📦 **pnpm 管理**：使用 pnpm workspace 统一管理
+- ⚡ **快速启动**：安装依赖只需几分钟
+
+## 快速开始
+
+### 环境要求
+
+- Node.js >= 22.19.0 或 >= 24.0.0
+- pnpm >= 11.7.0
+
+### 安装
+
+```bash
+# 安装依赖
+pnpm install
+
+# 构建企业插件
+pnpm build
 ```
 
-Web 工作台通过插件内官方 `webServer` 扩展完成 Emerald Clinical 白标：页面标题、PWA 名称、favicon 与未来出现的可见 `DeepSeek` / `DSH` 文本均替换为 Emerald Clinical 品牌，不修改 DSH 官方包或 `node_modules` 源码。
+### 配置
 
-模型出域边界位于官方 `llm/stream` waterfall：插件会在请求进入模型 adapter 前扫描完整模型请求，并写入无原文的 canonical SHA-256 审计指纹。
-
-## 一键启动
-
-启动前需在系统安装 Node.js 24+（含 npm）与 Python 3.10+；缺失时脚本会终止并提示安装地址，不会把 Node/Python 运行时放进项目。`pnpm` 缺失时会用 npm 安装固定版本 `11.19.0`，已存在则直接复用。首次运行或锁文件变化时，DSH npm 包、Python 依赖和 profile 依赖会安装到项目目录；pnpm 使用 `--prefer-offline` 复用项目内 store：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
+1. 复制环境变量模板：
+```bash
+cp .env.example .env
 ```
 
-脚本会：
-
-1. 使用项目根目录下的 `.dsh` 作为 `DSH_HOME`，禁止落到用户主目录。
-2. 按锁文件安装项目内 DSH runtime。
-3. 基于系统 Python 创建 `.venv` 并按根目录 `requirements.txt` 安装 Python 依赖。
-4. 使用系统或自动安装的 pnpm 按相对路径刷新 `clinical` profile。
-5. 启动 Web 工作台并自动打开 `http://127.0.0.1:3080`。
-
-本地工作台只监听 `http://127.0.0.1:3080`，不启动额外的观察或调试端口。
-
-只做环境和 profile 校验、不启动服务时：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 -Check
+2. 编辑 `.env`，填入你的配置：
+```env
+DEEPSEEK_API_KEY=your-api-key
+OAUTH2_CLIENT_ID=your-client-id
+OAUTH2_CLIENT_SECRET=your-client-secret
 ```
 
-发布包位于：
+3. 编辑 `configs/cordis.yml`，启用需要的插件
 
-```text
-dsh-clinical-data-guard/emerald-clinical-data-guard-1.0.7.tgz
+### 运行
+
+```bash
+# 启动 Web UI（需要先安装 @deepseek-ai/dsh）
+pnpm start
+
+# 或无界面模式
+pnpm start:headless
 ```
 
-SHA-256: `310FA292D2999C7D162D1F4C8D27085E4DF83F9A3F424F8BA0D8A2B10F2BAE67`
+## 项目结构
 
-## 验证
-
-```powershell
-# 从项目根目录执行
-Set-Location .\dsh-clinical-data-guard
-$env:PYTHONIOENCODING='utf-8'
-$env:PYTHONDONTWRITEBYTECODE='1'
-python tests\run_all.py
-python tests\mutation\run_mutation.py
-& ..\.venv\Scripts\python.exe ..\tests\test_project_contract.py
+```
+dsh-guard/
+├── packages/
+│   └── enterprise/          # 企业插件目录
+│       ├── auth/            # 认证插件
+│       ├── audit/           # 审计插件（待开发）
+│       └── compliance/      # 合规插件（待开发）
+├── configs/
+│   └── cordis.yml           # Cordis 配置文件
+├── docs/
+│   └── enterprise/          # 企业文档
+├── scripts/                 # 构建脚本
+├── package.json             # 项目配置
+└── pnpm-workspace.yaml      # pnpm workspace 配置
 ```
 
-详细架构、验收矩阵和仓库纪律见 [EMERALD_CLINICAL_MASTER_SPEC.md](docs/EMERALD_CLINICAL_MASTER_SPEC.md) 与 [EMERALD_DEV_PLAN_v2_20260818.md](docs/EMERALD_DEV_PLAN_v2_20260818.md)。
+## 企业插件
+
+### 已实现
+
+- ✅ [@dsh-guard/enterprise-auth](packages/enterprise/auth/README.md) - 企业认证插件（基础框架）
+
+### 规划中
+
+- 🔄 `@dsh-guard/enterprise-audit` - 安全审计插件
+- 🔄 `@dsh-guard/enterprise-compliance` - 合规检查插件
+- 🔄 `@dsh-guard/enterprise-monitoring` - 监控告警插件
+
+## 开发指南
+
+### 创建新插件
+
+```bash
+# 创建插件目录
+mkdir -p packages/enterprise/my-plugin/src
+
+# 创建 package.json
+cd packages/enterprise/my-plugin
+pnpm init
+
+# 编写代码
+# 参考 packages/enterprise/auth 的结构
+```
+
+详见 [docs/enterprise/PLUGIN_GUIDE.md](docs/enterprise/PLUGIN_GUIDE.md)
+
+### 常用命令
+
+```bash
+# 安装依赖
+pnpm install
+
+# 构建所有插件
+pnpm build
+
+# 运行测试
+pnpm test
+
+# 类型检查
+pnpm typecheck
+
+# 代码检查
+pnpm lint
+
+# 清理构建产物
+pnpm clean
+```
+
+## 为什么选择精简版？
+
+相比完整克隆 DeepSeek Harness：
+
+| 对比项 | 完整克隆 | 精简版（当前） |
+|--------|---------|---------------|
+| 文件数量 | 7000+ | < 100 |
+| 安装时间 | 30-60 分钟 | 2-5 分钟 |
+| 磁盘占用 | 2-3 GB | < 200 MB |
+| 维护成本 | 高（需要同步上游） | 低（npm 更新） |
+| 专注度 | 分散 | 集中（只写企业逻辑） |
+
+## 依赖管理
+
+核心依赖通过 npm 包引入：
+
+```json
+{
+  "dependencies": {
+    "@deepseek-ai/cordis": "^3.20.0",
+    "@deepseek-ai/schemastery": "^16.0.0"
+  }
+}
+```
+
+需要更多功能时，按需添加：
+
+```bash
+# 添加 DSH 核心包（如果需要完整功能）
+pnpm add @deepseek-ai/dsh
+
+# 添加特定功能
+pnpm add @deepseek-ai/dsh-tools
+pnpm add @deepseek-ai/dsh-llm
+```
+
+## 文档
+
+- [企业开发规范](docs/enterprise/DEVELOPMENT_STANDARDS.md)
+- [插件开发指南](docs/enterprise/PLUGIN_GUIDE.md)
+- [精简方案说明](docs/enterprise/SIMPLIFIED_APPROACH.md)
+
+## 贡献
+
+欢迎提交 Issue 和 Pull Request！
+
+## 许可证
+
+MIT License
+
+---
+
+**由 DSH Guard 团队维护**  
+基于 DeepSeek Harness  
+最后更新：2026-08-25

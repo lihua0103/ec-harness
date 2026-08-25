@@ -1,0 +1,32 @@
+{
+  "name": "@dsh-guard/enterprise-auth",
+  "version": "0.1.0",
+  "description": "企业级认证插件 - 支持 LDAP、OAuth2、SAML",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "files": ["lib"],
+  "keywords": ["dsh", "dsh-plugin", "auth", "enterprise"],
+  "author": "DSH Guard Team",
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@types/node": "^22.20.0",
+    "typescript": "^6.0.0",
+    "vitest": "^4.1.8"
+  }
+}

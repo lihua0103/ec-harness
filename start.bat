@@ -1,9 +1,4 @@
 @echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start.ps1" %*
-set "exitCode=%errorlevel%"
-if not "%exitCode%"=="0" (
-    echo.
-    echo Startup failed. See the error above.
-    pause
-)
-exit /b %exitCode%
+REM DSH Guard ???? (Windows)
+echo Starting DSH Guard...
+node node_modules/@deepseek-ai/dsh/lib/bin.js web --config configs/cordis.yml

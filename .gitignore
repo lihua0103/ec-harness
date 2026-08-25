@@ -1,66 +1,42 @@
-# 敏感配置与本地运行数据，绝不提交
-# 2026-08-25：.env / .env.china 为不含真实凭据的配置模板（API Key 行均为
-# 注释占位符），显式放行入库供部署参考。真实密钥一律走本地覆盖或
-# credentials/，绝不写进这两个文件。
-!.env
-!.env.china
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 构建产物
+lib/
+dist/
+*.tsbuildinfo
+
+# 环境变量
+.env
 .env.local
 .env.*.local
-!.env.example
 
-# 本地凭据（归档密码等）——原值只在本地工具间流转，绝不入库
-credentials/
-
-# 审计日志（含临床数据痕迹）
-var/
+# 日志
+logs/
 *.log
-deployment_report_*.txt
-
-# 本地依赖与缓存
-.cache/
-.npm-cache/
-**/.npm-cache/
-.pnpm-store/
-node_modules/
 npm-debug.log*
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-dist/
-build/
-.pytest_cache/
-.mutmut-cache
-htmlcov/
-.coverage
-.venv/
+pnpm-debug.log*
 
-# 本地安装验证与运行制品
-log/
-_package_smoke*/
-**/_package_smoke*/
-.trae/tmp/
-
-# 只保留当前正式发布包
-dsh-clinical-data-guard/*.tgz
-!dsh-clinical-data-guard/emerald-clinical-data-guard-1.0.7.tgz
-
-# DSH 项目内 home：只提交 clinical profile 清单和锁文件（FIX-10 / AR-4）
-.dsh/*
-!.dsh/profiles/
-.dsh/profiles/*
-!.dsh/profiles/clinical/
-.dsh/profiles/clinical/*
-!.dsh/profiles/clinical/cordis.yml
-!.dsh/profiles/clinical/cordis.patch.yml
-!.dsh/profiles/clinical/package.json
-!.dsh/profiles/clinical/pnpm-lock.yaml
-!.dsh/profiles/clinical/pnpm-workspace.yaml
-
-# IDE
-.idea/
+# 编辑器
 .vscode/
+.idea/
 *.swp
 *.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 临时文件
+tmp/
+temp/
+*.tmp
+
+# 测试覆盖率
+coverage/
+.nyc_output/
+
+# 其他
+*.bak
