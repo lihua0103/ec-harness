@@ -27,10 +27,26 @@ export interface EdcRecognitionResult {
 
 /**
  * EDC 字段识别器
- * 
- * 识别临床试验 EDC 系统的数据字段
  */
 export class EdcFieldDetector {
+  // Medidata 特征字段
+  private readonly medidataFields = [
+    'STUDYID', 'SITEID', 'SUBJID', 'VISIT', 'VISITDT',
+    'FORMNAME', 'FOLDEROID', 'DATAPAGE'
+  ]
+
+  // Oracle 特征字段
+  private readonly oracleFields = [
+    'PROTOCOL', 'SITE_NUM', 'PATIENT_ID', 'VISIT_NAME',
+    'CRF_NAME', 'PAGE_NAME'
+  ]
+
+  // Veeva 特征字段（带 __v 后缀）
+  private readonly veevaFields = [
+    'study__v', 'site__v', 'subject__v', 'visit__v',
+    'form__v', 'field__v'
+  ]
+
   constructor(
     private ctx: Context,
     private supportedSystems: string[]
@@ -38,9 +54,6 @@ export class EdcFieldDetector {
 
   /**
    * 识别 EDC 字段
-   * 
-   * @param data 数据内容
-   * @returns 识别结果
    */
   public async recognize(data: any): Promise<EdcRecognitionResult> {
     this.ctx.logger.debug('开始 EDC 字段识别')
@@ -77,23 +90,54 @@ export class EdcFieldDetector {
    * 检测 EDC 系统类型
    */
   private async detectSystem(data: any): Promise<EdcSystem> {
-    // TODO: 实现 EDC 系统检测逻辑
-    // 根据字段特征识别是哪个 EDC 系统
+    if (!data || typeof data !== 'object') {
+      return 'Unknown'
+    }
 
-    const dataStr = JSON.stringify(data).toLowerCase()
+    const keys = Object.keys(data).map(k => k.toUpperCase())
 
-    // Medidata 特征
-    if (dataStr.includes('rave') || dataStr.includes('medidata')) {
+    // 计算每个系统的匹配分数
+    let medidataScore = 0
+    let oracleScore = 0
+    let veevaScore = 0
+
+    // 检查 Medidata 字段
+    for (const field of this.medidataFields) {
+      if (keys.includes(field.toUpperCase())) {
+        medidataScore++
+      }
+    }
+
+    // 检查 Oracle 字段
+    for (const field of this.oracleFields) {
+      if (keys.includes(field.toUpperCase())) {
+        oracleScore++
+      }
+    }
+
+    // 检查 Veeva 字段（特殊处理 __v 后缀）
+    for (const key of Object.keys(data)) {
+      if (key.toLowerCase().endsWith('__v')) {
+        veevaScore++
+      }
+    }
+
+    // 返回得分最高的系统
+    const maxScore = Math.max(medidataScore, oracleScore, veevaScore)
+    
+    if (maxScore === 0) {
+      return 'Unknown'
+    }
+
+    if (medidataScore === maxScore) {
       return 'Medidata'
     }
-
-    // Oracle 特征
-    if (dataStr.includes('oracle') || dataStr.includes('inform')) {
+    
+    if (oracleScore === maxScore) {
       return 'Oracle'
     }
-
-    // Veeva 特征
-    if (dataStr.includes('veeva') || dataStr.includes('vault')) {
+    
+    if (veevaScore === maxScore) {
       return 'Veeva'
     }
 
@@ -109,7 +153,6 @@ export class EdcFieldDetector {
   ): Promise<EdcField[]> {
     const fields: EdcField[] = []
 
-    // 根据不同的 EDC 系统识别字段
     switch (system) {
       case 'Medidata':
         fields.push(...this.recognizeMedidataFields(data))
@@ -131,16 +174,9 @@ export class EdcFieldDetector {
    * 识别 Medidata 字段
    */
   private recognizeMedidataFields(data: any): EdcField[] {
-    // TODO: 实现 Medidata 特定字段识别
     const fields: EdcField[] = []
 
-    // 常见 Medidata 字段
-    const commonFields = [
-      'STUDYID', 'SITEID', 'SUBJID', 'VISIT', 'VISITDT',
-      'FORMNAME', 'FOLDEROID', 'DATAPAGE'
-    ]
-
-    for (const fieldName of commonFields) {
+    for (const fieldName of this.medidataFields) {
       if (this.hasField(data, fieldName)) {
         fields.push({
           name: fieldName,
@@ -160,12 +196,7 @@ export class EdcFieldDetector {
   private recognizeOracleFields(data: any): EdcField[] {
     const fields: EdcField[] = []
 
-    const commonFields = [
-      'PROTOCOL', 'SITE_NUM', 'PATIENT_ID', 'VISIT_NAME',
-      'CRF_NAME', 'PAGE_NAME'
-    ]
-
-    for (const fieldName of commonFields) {
+    for (const fieldName of this.oracleFields) {
       if (this.hasField(data, fieldName)) {
         fields.push({
           name: fieldName,
@@ -185,12 +216,7 @@ export class EdcFieldDetector {
   private recognizeVeevaFields(data: any): EdcField[] {
     const fields: EdcField[] = []
 
-    const commonFields = [
-      'study__v', 'site__v', 'subject__v', 'visit__v',
-      'form__v', 'field__v'
-    ]
-
-    for (const fieldName of commonFields) {
+    for (const fieldName of this.veevaFields) {
       if (this.hasField(data, fieldName)) {
         fields.push({
           name: fieldName,
@@ -205,7 +231,7 @@ export class EdcFieldDetector {
   }
 
   /**
-   * 检查数据中是否有指定字段
+   * 检查数据中是否有指定字段（不区分大小写）
    */
   private hasField(data: any, fieldName: string): boolean {
     if (typeof data !== 'object' || data === null) {

@@ -1,27 +1,24 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ClinicalGuardService, DEFAULT_CONFIG, EgressType, ListingTemplateType } from '../../lib/service.js'
 
 describe('ClinicalGuardService - 临床数据守护服务', () => {
   let ctx: Context
-  let service: ClinicalGuardService
 
   beforeEach(() => {
     ctx = new Context()
-    service = new ClinicalGuardService(ctx, DEFAULT_CONFIG)
-  })
-
-  afterEach(async () => {
-    await ctx.dispose()
   })
 
   describe('服务初始化', () => {
     it('应该正确初始化', () => {
+      const service = new ClinicalGuardService(ctx, DEFAULT_CONFIG)
+      
       expect(service).toBeDefined()
       expect(service.config).toEqual(DEFAULT_CONFIG)
     })
 
     it('应该启用所有默认功能', () => {
+      const service = new ClinicalGuardService(ctx, DEFAULT_CONFIG)
       const status = service.getStatus()
       
       expect(status.egressSwitch.enabled).toBe(true)
@@ -33,6 +30,7 @@ describe('ClinicalGuardService - 临床数据守护服务', () => {
 
   describe('数据出域检查', () => {
     it('应该能检查 SAS 数据集出域', async () => {
+      const service = new ClinicalGuardService(ctx, DEFAULT_CONFIG)
       const result = await service.checkEgress(
         EgressType.SAS_DATASET,
         { test: 'data' }
@@ -44,6 +42,7 @@ describe('ClinicalGuardService - 临床数据守护服务', () => {
     })
 
     it('应该能检查 Spec 数据出域', async () => {
+      const service = new ClinicalGuardService(ctx, DEFAULT_CONFIG)
       const result = await service.checkEgress(
         EgressType.SPEC_DATA,
         { test: 'spec' }
@@ -62,7 +61,9 @@ describe('ClinicalGuardService - 临床数据守护服务', () => {
         },
       }
       
-      const disabledService = new ClinicalGuardService(ctx, disabledConfig)
+      // 使用新的 Context 避免服务重复注册
+      const ctx2 = new Context()
+      const disabledService = new ClinicalGuardService(ctx2, disabledConfig)
       const result = await disabledService.checkEgress(
         EgressType.SAS_DATASET,
         { test: 'data' }
@@ -74,6 +75,7 @@ describe('ClinicalGuardService - 临床数据守护服务', () => {
 
   describe('Listing 模板', () => {
     it('应该能列出所有模板', () => {
+      const service = new ClinicalGuardService(ctx, DEFAULT_CONFIG)
       const templates = service.listListingTemplates()
       
       expect(Array.isArray(templates)).toBe(true)
@@ -81,6 +83,7 @@ describe('ClinicalGuardService - 临床数据守护服务', () => {
     })
 
     it('应该能获取特定模板', () => {
+      const service = new ClinicalGuardService(ctx, DEFAULT_CONFIG)
       const template = service.getListingTemplate(ListingTemplateType.DEMOGRAPHICS)
       
       expect(template).toBeDefined()
@@ -89,6 +92,7 @@ describe('ClinicalGuardService - 临床数据守护服务', () => {
     })
 
     it('应该能应用模板到数据', () => {
+      const service = new ClinicalGuardService(ctx, DEFAULT_CONFIG)
       const testData = [
         { SUBJID: '001', AGE: 30, SEX: 'M', OTHER: 'xxx' },
         { SUBJID: '002', AGE: 25, SEX: 'F', OTHER: 'yyy' },
@@ -109,6 +113,7 @@ describe('ClinicalGuardService - 临床数据守护服务', () => {
 
   describe('EDC 字段识别', () => {
     it('应该能识别 EDC 字段', async () => {
+      const service = new ClinicalGuardService(ctx, DEFAULT_CONFIG)
       const testData = {
         STUDYID: 'ABC123',
         SUBJID: '001',
@@ -125,6 +130,7 @@ describe('ClinicalGuardService - 临床数据守护服务', () => {
 
   describe('服务状态', () => {
     it('应该返回完整的服务状态', () => {
+      const service = new ClinicalGuardService(ctx, DEFAULT_CONFIG)
       const status = service.getStatus()
       
       expect(status).toHaveProperty('egressSwitch')
@@ -134,6 +140,7 @@ describe('ClinicalGuardService - 临床数据守护服务', () => {
     })
 
     it('应该返回正确的开关状态', () => {
+      const service = new ClinicalGuardService(ctx, DEFAULT_CONFIG)
       const switchStatus = service.getEgressSwitchStatus()
       
       expect(switchStatus.enabled).toBe(true)
