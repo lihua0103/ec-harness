@@ -61,15 +61,6 @@
       config:
         backend: json
 
-    - id: message-feedback
-      name: '@deepseek-ai/dsh-message-feedback'
-      config:
-        maxNoteBytes: 8192
-
-    # Browser Session export: `/export` command plus the shared download dialog.
-    - id: session-log-download
-      name: '@deepseek-ai/dsh-session-log-export'
-
     - id: workspace
       name: '@deepseek-ai/dsh-workspace'
 
@@ -82,26 +73,6 @@
     - id: session-reference
       name: '@deepseek-ai/dsh-session-reference'
 
-    - id: file-reference-local
-      name: '@deepseek-ai/dsh-file-reference-local'
-
-    # Whole-log turn/step counts for the chat stats strip (the sessionStats
-    # projection key); the projection registry itself is a base-layer row.
-    - id: session-stats
-      name: '@deepseek-ai/dsh-session-stats'
-
-    # Resolve bind host, SSH launch, and display once at boot, then mount the
-    # matching dual-face directory picker. Mount -native or -browse directly in
-    # an overlay to pin the interaction.
-    - id: directory-picker
-      name: '@deepseek-ai/dsh-host-directory-picker-auto'
-
-    # Read-only projection of current Loader entries for trusted client RPCs.
-    - id: plugin-inventory
-      name: '@deepseek-ai/dsh-host-plugin-inventory'
-
-    # The API gateway: the transport-agnostic dispatch face every client shape
-    # shares. The base layer's agent-default-model service owns the default model.
     - id: api-gateway
       name: '@deepseek-ai/dsh-host-apiproxy'
 
@@ -203,9 +174,6 @@
     - id: ui-settings-models
       name: '@deepseek-ai/dsh-client-ui-settings-models'
 
-    - id: ui-settings-plugin-inventory
-      name: '@deepseek-ai/dsh-client-ui-settings-plugin-inventory'
-
     - id: ui-conversation
       name: '@deepseek-ai/dsh-client-ui-conversation'
 
@@ -214,23 +182,6 @@
       name: '@deepseek-ai/dsh-client-ui-attachment'
 
     # Tool call tree, generic fallback, and keyed business Tool views.
-    - id: ui-tool
-      name: '@deepseek-ai/dsh-client-ui-tool'
-
-    - id: ui-cordis
-      name: '@deepseek-ai/dsh-client-ui-cordis'
-
-    # Durable workflow lifecycle as an independent Chat node after the
-    # existing generic workflow tool row.
-    - id: ui-workflow-run
-      name: '@deepseek-ai/dsh-client-ui-workflow-run'
-
-    # Turn tail: the produced-files row under each closing assistant message.
-    # Remove this entry to turn the surface off; the tail hole renders empty.
-    - id: ui-deliverables
-      name: '@deepseek-ai/dsh-client-ui-deliverables'
-
-
     - id: ui-workspace
       name: '@deepseek-ai/dsh-client-ui-workspace'
 
@@ -242,16 +193,6 @@
     - id: ui-commands
       name: '@deepseek-ai/dsh-client-ui-commands'
 
-    - id: ui-skill
-      name: '@deepseek-ai/dsh-client-ui-skill'
-
-    - id: ui-subagent
-      name: '@deepseek-ai/dsh-client-ui-subagent'
-
-    - id: ui-reference
-      name: '@deepseek-ai/dsh-client-ui-reference'
-
-    # Background jobs: the session-header list over the jobsBySession mirror.
     - id: ui-jobs
       name: '@deepseek-ai/dsh-client-ui-jobs'
 
@@ -261,52 +202,8 @@
 
     # Per-message feedback: Like/Dislike plus an optional note in the
     # assistant-message action strip, over the messageFeedback Remote.
-    - id: ui-message-feedback
-      name: '@deepseek-ai/dsh-client-ui-message-feedback'
-
-    # Model selection: the /model popupSelect + composer seat over session.models.
     - id: ui-model-selection
       name: '@deepseek-ai/dsh-client-ui-model-selection'
-
-    - id: ui-permission
-      name: '@deepseek-ai/dsh-client-ui-permission-presets'
-
-    # The agent-preset row in General settings: the default preset for
-    # sessions created later. Absent a roster it renders nothing.
-    - id: ui-agent-preset
-      name: '@deepseek-ai/dsh-client-ui-agent-preset'
-
-    # Plugin configuration: the host-plane sections a user owns, as expandable
-    # cards. A namespace this deployment does not expose renders nothing.
-    - id: ui-settings-plugins
-      name: '@deepseek-ai/dsh-client-ui-settings-plugins'
-
-    # Plan control: the composer plan seat over the plan projection + /plan channel.
-    - id: ui-plan
-      name: '@deepseek-ai/dsh-client-ui-plan'
-
-    - id: ui-user-questions
-      name: '@deepseek-ai/dsh-client-ui-user-questions'
-
-    - id: ui-trajectory
-      name: '@deepseek-ai/dsh-client-ui-trajectory'
-
-# ── the agent plane moves behind agent presets ─────────────────────────────
-#
-# Every row below composes what ONE agent contributes to the host registries:
-# its tools, its prompt sections, its delegation backends. The base keeps them
-# for the TUI, which is single-session and composes its agent process-wide; the
-# Web surface disables them here and lets each session mount a preset instead.
-#
-# Disabling rather than deleting is deliberate: the base is shared, and a row
-# absent from a surface overlay would silently reappear the day someone reorders
-# the composition.
-
-# `shell-env` STAYS in the host plane: `apps/cli/src/web.ts` injects it to
-# publish `DSH_WEB_URL`/`DSH_WEB_MODE`, and a host row that injects a service is
-# the criterion for host-plane ownership — injection resolves before any session
-# exists, so there is no agent to key by. Behind a preset realm those variables
-# would never reach the model's shell at all.
 
 - id: tool-bash
   disabled: true

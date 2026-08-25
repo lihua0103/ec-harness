@@ -1,8 +1,6 @@
 packages:
   - vendor/*
   - packages/*/*
-  - native/landlock-run
-  - native/landlock-run/packages/*
   - apps/*
 
 linkWorkspacePackages: true
@@ -17,7 +15,6 @@ peerDependencyRules:
 
 allowBuilds:
   esbuild: true
-  lefthook: true
   node-pty: true
   '@google/genai': false
   protobufjs: false

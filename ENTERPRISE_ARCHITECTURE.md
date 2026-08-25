@@ -78,7 +78,7 @@
 4. `packages/client/web/src/boot.ts` 加载模块表、激活 Cordis 插件、渲染 BootPage。
 5. 各 `ui-*` 插件通过 `ui-renderer` 与 `ui-slots` 注册视图。
 
-### 3.2 主要视图模块
+### 3.2 主要视图模块（企业版工作台精简保留）
 
 | 包名 | 一句话职责 |
 |---|---|
@@ -90,22 +90,17 @@
 | `ui-goal` | 目标(goal)管理 |
 | `ui-jobs` | 后台任务面板 |
 | `ui-model-selection` | 模型选择器 |
+| `ui-settings` | 设置外壳 |
 | `ui-settings-general` | 通用设置 |
 | `ui-settings-models` | 模型参数设置 |
-| `ui-settings-plugins` | 已安装插件清单 |
-| `ui-skill` | 技能(skill)管理 |
-| `ui-subagent` | 子代理面板 |
-| `ui-tool` | 工具调用展示 |
-| `ui-trajectory` | 执行轨迹 |
 | `ui-workspace` | 工作区管理 |
 | `ui-theme` | 主题/深色模式 |
 | `ui-attachment` | 附件预览 |
-| `ui-message-feedback` | 消息反馈 |
-| `ui-deliverables` | 交付物 |
-| `ui-plan` | Plan 模式 |
-| `ui-workflow-run` | 工作流运行 |
-| `ui-permission-presets` | 权限预设 |
-| `ui-directory-picker-*` | 目录选择器(browse/native) |
+
+以下基础设施模块不直接渲染视图，但支撑工作台运行：
+- `ui-renderer`：视图注册与渲染调度
+- `ui-slots`：插槽系统
+- `ui-primitives`：通用 UI 原子组件
 
 ### 3.3 扩展 Web UI 的标准方式
 
