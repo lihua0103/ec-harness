@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# 本地凭据（归档密码等）——原值只在本地工具间流转，绝不入库
+credentials/
+
 # 审计日志（含临床数据痕迹）
 var/
 *.log
@@ -10,6 +13,8 @@ deployment_report_*.txt
 
 # 本地依赖与缓存
 .cache/
+.npm-cache/
+**/.npm-cache/
 .pnpm-store/
 node_modules/
 npm-debug.log*
@@ -26,6 +31,16 @@ build/
 htmlcov/
 .coverage
 .venv/
+
+# 本地安装验证与运行制品
+log/
+_package_smoke*/
+**/_package_smoke*/
+.trae/tmp/
+
+# 只保留当前正式发布包
+dsh-clinical-data-guard/*.tgz
+!dsh-clinical-data-guard/emerald-clinical-data-guard-1.0.7.tgz
 
 # DSH 项目内 home：只提交 clinical profile 清单和锁文件（FIX-10 / AR-4）
 .dsh/*

@@ -1,14 +1,18 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { delimiter } from 'node:path';
+import { delimiter, join } from 'node:path';
+import { existsSync, mkdirSync, realpathSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { registerBranding } from './branding.js';
-import { scanDlp } from './patterns.js';
-import { extractPath, safeToolResult, shouldReplaceResult } from './tool-result-guard.js';
+import { createDataInterceptionPolicy } from './data-interception-policy.js';
+import { planeOf, parseRootsEnv, validatePlaneRoots } from './planes.js';
+import { safeToolResult, shouldReplaceResult } from './tool-result-guard.js';
+import { registerClinicalListingPlugin } from './clinical-listing-plugin.js';
 
-// FIX-6 (R-9): 安全检查请求超时（默认 30s，可配置）。
 const REQUEST_TIMEOUT_DEFAULT_MS = 30_000;
-// FIX-11 (Claude P2-1): worker 心跳——30s 间隔、5s 超时、3 次失败标记 degraded 并重启。
+const HOOK_TIMEOUT_DEFAULT_MS = 120_000;
+const HEAVY_OPERATIONS = new Set(['listing_inspect', 'listing_run_code', 'listing_publish']);
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const HEARTBEAT_TIMEOUT_MS = 5_000;
 const HEARTBEAT_MAX_FAILURES = 3;
@@ -16,73 +20,118 @@ const HEARTBEAT_MAX_FAILURES = 3;
 export class SecurityRuntime {
   constructor(config) {
     this.config = config;
-    this.pending = new Map();
-    this.seq = 0;
-    this.broken = false;
-    this.degraded = false;
-    this.heartbeatFailures = 0;
+    this.lanes = {
+      fast: this.#newLane(),
+      heavy: this.#newLane(),
+    };
     this.heartbeatTimer = null;
-    this.#spawnWorker();
+    this.#spawnWorker(this.lanes.fast);
+    this.#spawnWorker(this.lanes.heavy);
   }
 
-  #spawnWorker() {
+  get child() { return this.lanes.fast.child; }
+  get broken() { return this.lanes.fast.broken; }
+  get degraded() { return this.lanes.fast.degraded; }
+  get startupNotice() { return this.lanes.fast.startupNotice; }
+
+  #newLane() {
+    return {
+      child: null, buffer: '', pending: new Map(), seq: 0,
+      broken: false, degraded: false, heartbeatFailures: 0, startupNotice: null,
+    };
+  }
+
+  #laneFor(payload, options) {
+    if (options?.lane === 'heavy') return this.lanes.heavy;
+    if (options?.lane === 'fast') return this.lanes.fast;
+    return HEAVY_OPERATIONS.has(String(payload?.operation ?? ''))
+      ? this.lanes.heavy : this.lanes.fast;
+  }
+
+  #resolvePython() {
+    if (this.config?.python) return this.config.python;
+    if (process.env.PLUGIN_PYTHON) return process.env.PLUGIN_PYTHON;
+    if (process.env.PYTHON) return process.env.PYTHON;
+    const pluginRoot = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
+    const candidates = process.platform === 'win32'
+      ? [join(pluginRoot, '..', '.venv', 'Scripts', 'python.exe')]
+      : [join(pluginRoot, '..', '.venv', 'bin', 'python'),
+         join(pluginRoot, '..', '.venv', 'bin', 'python3')];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+    return process.platform === 'win32' ? 'python' : 'python3';
+  }
+
+  #spawnWorker(lane) {
     const config = this.config;
-    const python = config.python ?? process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
+    const python = this.#resolvePython();
     const cwd = fileURLToPath(new URL('..', import.meta.url));
-    // ST-P2-3: worker 只继承最小 env 白名单，防止不可信 Excel 解析漏洞
-    // 导致 LLM API Key 等宿主凭据被收割。所有需要的运行时量显式传递。
+    lane.startupNotice = null;
     const env = {};
-    // PATH/SystemRoot/USERPROFILE/HOME: 让 Python 能找到标准库和 CRT
     for (const key of ['PATH', 'SystemRoot', 'USERPROFILE', 'HOME', 'TEMP', 'TMP',
                        'LOCALAPPDATA', 'APPDATA', 'HOMEDRIVE', 'HOMEPATH',
                        'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH']) {
       if (process.env[key] !== undefined) env[key] = process.env[key];
     }
+    let workerTmp = null;
+    try {
+      const packageRoot = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
+      workerTmp = join(packageRoot, '..', '.cache', 'tmp');
+      mkdirSync(workerTmp, { recursive: true });
+      env.TEMP = workerTmp;
+      env.TMP = workerTmp;
+      env.TMPDIR = workerTmp;
+      env.EMERALD_TMP_ROOT = workerTmp;
+    } catch {
+      // 目录不可建时保留宿主临时区
+    }
     env.EMERALD_WORKER_ROOT = cwd;
-    // 协议层 UTF-8 兜底（E2E-1 修复）
     env.PYTHONIOENCODING = 'utf-8';
     env.PYTHONUTF8 = '1';
-    env.PYTHONPATH = cwd + (process.env.PYTHONPATH ? delimiter + process.env.PYTHONPATH : '');
-    // 审计/授权 root 路径（若已配置）
+    const pythonPaths = [cwd];
+    if (process.env.PYTHONPATH) pythonPaths.push(process.env.PYTHONPATH);
+    env.PYTHONPATH = pythonPaths.join(delimiter);
     if (process.env.EMERALD_AUDIT_ROOT) env.EMERALD_AUDIT_ROOT = process.env.EMERALD_AUDIT_ROOT;
-    if (process.env.EMERALD_AUTHZ_ROOT) env.EMERALD_AUTHZ_ROOT = process.env.EMERALD_AUTHZ_ROOT;
     const child = spawn(python, ['-m', 'security.worker'], {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
     });
-    this.child = child;
-    this.buffer = '';
+    lane.child = child;
+    lane.buffer = '';
     child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => this.#onOutput(chunk));
+    child.stdout.on('data', (chunk) => this.#onOutput(lane, chunk));
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', () => {});
-    // 仅当退出的仍是当前 worker 时才判定运行时损坏（避免重启竞态误杀新进程）。
     child.on('error', (error) => {
-      if (this.child === child) this.#failAll(error);
+      if (lane.child === child) this.#failAll(lane, error);
     });
     child.on('exit', () => {
-      if (this.child === child) this.#failAll(new Error('security worker exited'));
+      if (lane.child !== child) return;
+      const notice = lane.startupNotice;
+      this.#failAll(lane, notice
+        ? new Error('security worker exited: ' + (notice.code ?? 'UNKNOWN') + ' - ' + (notice.reason ?? 'no reason'))
+        : new Error('security worker exited'));
     });
   }
 
-  // FIX-6 (R-9): EPIPE / 进程崩溃 → 标记损坏、kill 并拒绝全部 pending。
-  #failAll(error) {
-    this.broken = true;
-    for (const { reject, timer } of this.pending.values()) {
+  #failAll(lane, error) {
+    lane.broken = true;
+    for (const { reject, timer } of lane.pending.values()) {
       clearTimeout(timer);
       reject(error);
     }
-    this.pending.clear();
-    try { this.child.kill(); } catch { /* already dead */ }
+    lane.pending.clear();
+    try { lane.child.kill(); } catch { /* already dead */ }
   }
 
-  #onOutput(chunk) {
-    this.buffer += chunk;
+  #onOutput(lane, chunk) {
+    lane.buffer += chunk;
     let index;
-    while ((index = this.buffer.indexOf('\n')) >= 0) {
-      const line = this.buffer.slice(0, index).trim();
-      this.buffer = this.buffer.slice(index + 1);
+    while ((index = lane.buffer.indexOf('\n')) >= 0) {
+      const line = lane.buffer.slice(0, index).trim();
+      lane.buffer = lane.buffer.slice(index + 1);
       if (!line) continue;
       let response;
       try {
@@ -90,46 +139,52 @@ export class SecurityRuntime {
       } catch {
         response = { ok: false, code: 'SECURITY_UNAVAILABLE', reason: 'invalid worker response' };
       }
-      const pending = this.pending.get(response.requestId);
+      const pending = lane.pending.get(response.requestId);
       if (pending) {
-        this.pending.delete(response.requestId);
+        lane.pending.delete(response.requestId);
         clearTimeout(pending.timer);
         pending.resolve(response);
+      } else if (response.code) {
+        lane.startupNotice = response;
       }
     }
   }
 
   request(payload, options = {}) {
-    const requestId = `req-${++this.seq}`;
+    const lane = this.#laneFor(payload, options);
+    const requestId = 'req-' + (++lane.seq);
     const configured = Number(this.config?.requestTimeoutMs);
     const timeoutMs = Number(options.timeoutMs) > 0
       ? Number(options.timeoutMs)
       : (configured > 0 ? configured : REQUEST_TIMEOUT_DEFAULT_MS);
     return new Promise((resolve, reject) => {
-      if (this.broken || this.child.exitCode !== null || this.child.killed) {
-        reject(new Error('security worker unavailable'));
+      if (lane.broken || lane.child.exitCode !== null || lane.child.killed) {
+        const notice = lane.startupNotice;
+        reject(new Error(notice
+          ? 'security worker unavailable: ' + (notice.code ?? 'UNKNOWN') + ' - ' + (notice.reason ?? 'no reason')
+          : 'security worker unavailable'));
         return;
       }
       const timer = setTimeout(() => {
-        this.pending.delete(requestId);
-        // FIX-6: 超时视为检查不可用，fail-closed 由调用方拒绝继续。
-        reject(new Error(`security worker request timeout after ${timeoutMs}ms`));
+        lane.pending.delete(requestId);
+        const timeout = new Error('security worker request timeout after ' + timeoutMs + 'ms');
+        reject(timeout);
+        if (!options.probe && !this.#hasInFlightRequest(lane)) {
+          this.#restartWorker(lane, new Error('security worker restarted after a timed-out request'));
+        }
       }, timeoutMs);
-      this.pending.set(requestId, { resolve, reject, timer });
-      this.child.stdin.write(JSON.stringify({ requestId, ...payload }) + '\n', (error) => {
+      lane.pending.set(requestId, { resolve, reject, timer, probe: options.probe === true });
+      lane.child.stdin.write(JSON.stringify({ requestId, ...payload }) + '\n', (error) => {
         if (error) {
-          // FIX-6 (R-9): stdin EPIPE → worker 损坏，kill 并拒绝全部 pending。
-          this.pending.delete(requestId);
+          lane.pending.delete(requestId);
           clearTimeout(timer);
-          this.#failAll(error);
+          this.#failAll(lane, error);
           reject(error);
         }
       });
     });
   }
 
-  // FIX-11 (Claude P2-1): ping/pong 心跳，3 次失败标记 degraded 并自动重启 worker。
-  // 间隔/超时/阈值可经 config 覆盖（测试注入小值驱动）。
   startHeartbeat() {
     if (this.heartbeatTimer) return;
     const intervalMs = Number(this.config?.heartbeatIntervalMs) > 0
@@ -139,24 +194,28 @@ export class SecurityRuntime {
     const maxFailures = Number.isInteger(this.config?.heartbeatMaxFailures)
       ? Number(this.config.heartbeatMaxFailures) : HEARTBEAT_MAX_FAILURES;
     const ping = async () => {
-      if (this.broken) {
-        // worker 已退出/损坏：计入心跳失败，达到阈值自动重启恢复服务。
-        this.heartbeatFailures += 1;
-        if (this.heartbeatFailures >= maxFailures) {
-          this.degraded = true;
-          this.#restartWorker();
+      const fast = this.lanes.fast;
+      if (fast.broken) {
+        fast.heartbeatFailures += 1;
+        if (fast.heartbeatFailures >= maxFailures) {
+          fast.degraded = true;
+          this.#restartWorker(fast);
         }
         return;
       }
+      if (this.#hasInFlightRequest(fast)) {
+        fast.heartbeatFailures = 0;
+        return;
+      }
       try {
-        await this.request({ operation: 'ping' }, { timeoutMs: probeTimeoutMs });
-        this.heartbeatFailures = 0;
-        this.degraded = false;
+        await this.request({ operation: 'ping' }, { timeoutMs: probeTimeoutMs, probe: true });
+        fast.heartbeatFailures = 0;
+        fast.degraded = false;
       } catch {
-        this.heartbeatFailures += 1;
-        if (this.heartbeatFailures >= maxFailures) {
-          this.degraded = true;
-          this.#restartWorker();
+        fast.heartbeatFailures += 1;
+        if (fast.heartbeatFailures >= maxFailures) {
+          fast.degraded = true;
+          this.#restartWorker(fast);
         }
       }
     };
@@ -164,76 +223,188 @@ export class SecurityRuntime {
     this.heartbeatTimer.unref?.();
   }
 
-  #restartWorker() {
-    try { this.child.kill(); } catch { /* already dead */ }
-    this.heartbeatFailures = 0;
-    this.broken = false;
-    this.#spawnWorker();
+  #hasInFlightRequest(lane) {
+    for (const entry of lane.pending.values()) {
+      if (!entry.probe) return true;
+    }
+    return false;
+  }
+
+  #restartWorker(lane, reason = new Error('security worker restarted')) {
+    const previous = lane.child;
+    lane.broken = true;
+    for (const { reject, timer } of lane.pending.values()) {
+      clearTimeout(timer);
+      reject(reason);
+    }
+    lane.pending.clear();
+    try { previous.kill(); } catch { /* already dead */ }
+    lane.heartbeatFailures = 0;
+    lane.broken = false;
+    this.#spawnWorker(lane);
   }
 
   dispose() {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    try { this.child.kill(); } catch { /* already dead */ }
+    for (const lane of [this.lanes.fast, this.lanes.heavy]) {
+      try { lane.child.kill(); } catch { /* already dead */ }
+    }
   }
 }
 
 function validateConfig(raw = {}) {
-  const mode = raw.mode ?? process.env.DATA_PROTECTION_MODE ?? 'enforce';
-  if (!['enforce', 'shadow', 'disabled'].includes(mode)) {
-    throw new Error(`invalid DATA_PROTECTION_MODE: ${mode}`);
-  }
-  const approvalId = raw.approvalId ?? process.env.DATA_PROTECTION_APPROVAL_ID;
-  const approvedBy = raw.approvedBy ?? process.env.DATA_PROTECTION_APPROVED_BY;
-  if (mode === 'disabled' && (!approvalId || !approvedBy)) {
-    throw new Error('disabled mode requires approvalId and approvedBy');
+  const environmentEnabled = process.env.DATA_PROTECTION_ENABLED !== '0'
+    && process.env.DATA_INTERCEPTION_ENABLED !== '0';
+  const dataInterceptionEnabled = raw.dataInterceptionEnabled
+    ?? raw.dataProtectionEnabled
+    ?? environmentEnabled;
+  if (typeof dataInterceptionEnabled !== 'boolean') {
+    throw new Error('dataInterceptionEnabled must be a boolean');
   }
   const maxScanRows = Number(raw.maxScanRows ?? process.env.MAX_SCAN_ROWS ?? 20);
   if (!Number.isInteger(maxScanRows) || maxScanRows < 1 || maxScanRows > 200) {
     throw new Error('maxScanRows must be an integer from 1 to 200');
   }
-  // 本地凭据通道：credentialsDir 下的文件是本地凭据（如压缩包密码），
-  // 原值只在本地工具间流转，绝不进 LLM 上下文。默认关闭。
   const credentialsDir = raw.credentialsDir ?? process.env.EMERALD_CREDENTIALS_DIR;
-  // UAT 本地数据处理车道：只允许项目根目录内的本地转换；它不改变
-  // llm/stream 与 post-execute 的出域防线，也不放行 expected/网络/数据转储。
   const localDataAccess = raw.localDataAccess ?? process.env.EMERALD_LOCAL_DATA_ACCESS ?? 'disabled';
   if (!['disabled', 'uat-local'].includes(localDataAccess)) {
-    throw new Error(`invalid localDataAccess: ${localDataAccess}`);
+    throw new Error('invalid localDataAccess: ' + localDataAccess);
   }
   const localDataRoot = raw.localDataRoot ?? process.env.EMERALD_LOCAL_DATA_ROOT;
-  if (localDataAccess === 'uat-local' && (typeof localDataRoot !== 'string' || !localDataRoot.trim())) {
-    throw new Error('uat-local data access requires localDataRoot');
+  const listingTimeoutMs = raw.listingTimeoutMs
+    ?? (process.env.EMERALD_LISTING_TIMEOUT_MS ? Number(process.env.EMERALD_LISTING_TIMEOUT_MS) : undefined);
+  if (listingTimeoutMs !== undefined) {
+    const values = typeof listingTimeoutMs === 'object' && listingTimeoutMs !== null
+      ? Object.values(listingTimeoutMs) : [listingTimeoutMs];
+    if (!values.length || values.some((value) => !Number.isFinite(Number(value)) || Number(value) <= 0)) {
+      throw new Error('listingTimeoutMs must be a positive number of milliseconds');
+    }
   }
-  return {
+  const hookTimeoutMs = raw.hookTimeoutMs
+    ?? (process.env.EMERALD_HOOK_TIMEOUT_MS ? Number(process.env.EMERALD_HOOK_TIMEOUT_MS) : undefined);
+  if (hookTimeoutMs !== undefined
+    && (!Number.isFinite(Number(hookTimeoutMs)) || Number(hookTimeoutMs) <= 0)) {
+    throw new Error('hookTimeoutMs must be a positive number of milliseconds');
+  }
+  const asRootList = (value) => {
+    if (Array.isArray(value)) return value.filter((x) => typeof x === 'string' && x.trim());
+    if (typeof value === 'string' && value.trim()) return [value];
+    return [];
+  };
+  const config = {
     ...raw,
-    mode,
-    approvalId,
-    approvedBy,
+    dataInterceptionEnabled,
     maxScanRows,
     credentialsDir,
     localDataAccess,
     localDataRoot,
-    authorizationRoot: raw.authorizationRoot ?? process.env.EMERALD_AUTHZ_ROOT,
+    listingTimeoutMs,
+    hookTimeoutMs,
+    dataPlaneRoots: asRootList(raw.dataPlaneRoots ?? parseRootsEnv(process.env.EMERALD_DATA_PLANE_ROOTS)),
+    specPlaneRoots: asRootList(raw.specPlaneRoots ?? parseRootsEnv(process.env.EMERALD_SPEC_PLANE_ROOTS)),
+    documentPlaneRoots: asRootList(raw.documentPlaneRoots ?? parseRootsEnv(process.env.EMERALD_DOCUMENT_PLANE_ROOTS)),
+    outputPlaneRoot: raw.outputPlaneRoot ?? process.env.EMERALD_OUTPUT_PLANE_ROOT,
   };
+  const planeErrors = validatePlaneRoots(config);
+  if (planeErrors.length) {
+    throw new Error('invalid plane roots: ' + planeErrors.join('; '));
+  }
+  return config;
 }
 
-function context(config, exec = {}) {
+function hookTimeoutMs(config) {
+  const override = Number(config?.hookTimeoutMs);
+  if (Number.isFinite(override) && override > 0) return override;
+  return HOOK_TIMEOUT_DEFAULT_MS;
+}
+
+function context(config, policy, exec = {}) {
+  const workspaceRoot = exec.agent?.session?.header?.cwd ?? config.localDataRoot;
+  // 2026-08-25 P0：开关状态实时求值，绝不用启动期快照。worker 侧
+  // check_llm / scrub_text / inspect_local_data / listing_* 都据此字段决定
+  // 是否执行拦截；传快照会让运行时切换开关后 worker 仍按旧值拦截。
+  const enabled = typeof policy?.isEnabled === 'function'
+    ? policy.isEnabled()
+    : (config.dataInterceptionEnabled ?? true);
   return {
-    mode: config.mode,
-    // FIX-9 (BR-06.5): 身份默认值非空，Python 侧哈希真实生效。
-    sessionId: exec.agent?.sessionId ?? config.sessionId ?? config.authorizationSession ?? 'unknown-session',
-    userId: exec.agent?.userId ?? config.userId ?? config.authorizationUser ?? 'anonymous',
-    workspaceRoot: exec.agent?.session?.header?.cwd ?? config.localDataRoot,
+    dataInterceptionEnabled: enabled,
+    sessionId: exec.agent?.sessionId ?? config.sessionId ?? 'unknown-session',
+    userId: exec.agent?.userId ?? config.userId ?? 'anonymous',
+    workspaceRoot,
     localDataAccess: config.localDataAccess,
-    localDataRoot: config.localDataRoot,
-    approvalId: config.approvalId,
-    approvedBy: config.approvedBy,
+    localDataRoot: workspaceRoot,
+    credentialsDir: config.credentialsDir,
   };
 }
 
 function modelRequestPayload(options) {
   const { signal, ...payload } = options;
   return payload;
+}
+
+function maskTrustedDocuments(value, token, restored = new Map(), path = []) {
+  if (Array.isArray(value)) return value.map(
+    (item, index) => maskTrustedDocuments(item, token, restored, [...path, index]),
+  );
+  if (!value || typeof value !== 'object') return value;
+  if (value.type === 'text'
+      && value.clinicalGuard === 'PROTECTED_DATA_SOURCE'
+      && value.protectedDataToken === token
+      && (value.protectedDataSource === 'sas' || value.protectedDataSource === 'external_excel')) {
+    const { clinicalGuard, protectedDataSource, protectedDataToken, ...block } = value;
+    return { ...block, text: 'protected data source' };
+  }
+  if (value.type === 'text'
+      && value.clinicalGuard === 'TRUSTED_DOCUMENT_CONTENT'
+      && value.trustedDocumentToken === token
+      && typeof value.text === 'string') {
+    restored.set(JSON.stringify([...path, 'text']), value.text);
+    const { clinicalGuard, trustedDocumentToken, ...block } = value;
+    return { ...block, text: 'trusted document content' };
+  }
+  if (value.type === 'text'
+      && value.clinicalGuard === 'TRUSTED_LISTING_RECEIPT'
+      && value.trustedListingToken === token
+      && typeof value.text === 'string') {
+    restored.set(JSON.stringify([...path, 'text']), value.text);
+    const { clinicalGuard, trustedListingToken, ...block } = value;
+    return { ...block, text: 'trusted listing receipt' };
+  }
+  if (value.type === 'text'
+      && typeof value.text === 'string'
+      && value.text.includes('"clinicalGuard":"CONTROL_PATHS"')
+      && value.text.includes('"trustedControlToken":"' + token + '"')) {
+    try {
+      const projection = JSON.parse(value.text);
+      if (projection.clinicalGuard === 'CONTROL_PATHS'
+          && projection.trustedControlToken === token
+          && Array.isArray(projection.paths)
+          && projection.paths.every((item) => typeof item === 'string')) {
+        restored.set(JSON.stringify([...path, 'text']), JSON.stringify({
+          ...projection,
+          trustedControlToken: undefined,
+        }));
+        return { ...value, text: 'trusted local path control metadata' };
+      }
+    } catch {
+      // 非 canonical JSON 继续进入普通 smart_guard
+    }
+  }
+  return Object.fromEntries(Object.entries(value).map(
+    ([key, item]) => [key, maskTrustedDocuments(item, token, restored, [...path, key])],
+  ));
+}
+
+function restoreTrustedDocuments(value, restored, path = []) {
+  const original = restored.get(JSON.stringify(path));
+  if (original !== undefined) return original;
+  if (Array.isArray(value)) return value.map(
+    (item, index) => restoreTrustedDocuments(item, restored, [...path, index]),
+  );
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(
+    ([key, item]) => [key, restoreTrustedDocuments(item, restored, [...path, key])],
+  ));
 }
 
 const ALLOWED_CONTENT_BLOCKS = new Set(['text', 'reasoning', 'tool-call', 'tool-result']);
@@ -261,45 +432,35 @@ const LOCAL_DATA_OUTPUT_SCHEMA = {
   },
 };
 
-function registerLocalMetadataTool(ctx, runtime, config) {
+function registerLocalMetadataTool(ctx, runtime, config, policy) {
   if (config.localDataAccess !== 'uat-local') return () => {};
   const promptDisposer = ctx.systemPrompt?.section?.({
     name: 'tool:local-data-metadata',
     order: 99,
-    text: 'For UAT clinical source files, use local_data_metadata to inspect only schema metadata (file type, sheet names, row counts, and column names). Do not use bash, read_file, pwsh, or scripts to open source data files. The tool never returns data rows or cell values.',
+    text: 'For UAT clinical source files, use local_data_metadata to inspect only schema metadata.',
   }) ?? (() => {});
   const toolDisposer = ctx.tools.register(defineTool({
     name: 'local_data_metadata',
-    description: 'Inspect a UAT source file locally and return only non-value metadata: file type, sheet names, row counts, and column names. No records, cell values, subject identifiers, dates, or query text are returned.',
+    description: 'Inspect a UAT source file locally and return only non-value metadata.',
     parameters: {
-      path: {
-        type: 'string',
-        required: true,
-        description: 'Path under the configured local UAT data root. Supported: xlsx, xls, csv, sas7bdat.',
-      },
+      path: { type: 'string', required: true, description: 'Relative path under the current Web UI session workspace.' },
     },
     output: {
       schema: LOCAL_DATA_OUTPUT_SCHEMA,
-      render: (_args, value) => [{
-        type: 'text',
-        text: JSON.stringify(value),
-      }],
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
     execute: async (args, exec) => {
       const response = await runtime.request({
         operation: 'inspect_local_data',
         path: args.path,
-        context: context(config, exec),
-      });
+        context: context(config, policy, exec),
+      }, { timeoutMs: hookTimeoutMs(config) });
       if (!response.ok) throw new Error(response.reason ?? 'local metadata inspection failed');
-      return {
-        clinicalGuard: 'LOCAL_METADATA_ONLY',
-        ...response.metadata,
-      };
+      return { clinicalGuard: 'LOCAL_METADATA_ONLY', ...response.metadata };
     },
     presentCall: (args) => ({
       card: 'generic',
-      title: `Inspect local metadata: ${args.path}`,
+      title: 'Inspect local metadata: ' + args.path,
       kind: 'read',
       locations: [{ path: args.path }],
     }),
@@ -320,7 +481,7 @@ function validateMessageShape(messages) {
     if (Array.isArray(message.content)) {
       for (const block of message.content) {
         if (!block || typeof block !== 'object' || !ALLOWED_CONTENT_BLOCKS.has(block.type)) {
-          return `不支持的内容块类型: ${block?.type ?? 'unknown'}`;
+          return '不支持的内容块类型: ' + (block?.type ?? 'unknown');
         }
       }
     }
@@ -328,182 +489,126 @@ function validateMessageShape(messages) {
   return null;
 }
 
+/**
+ * 2026-08-25 重构 v2：
+ * - 开关只控制数据拦截
+ * - 智能功能（流程引导、EDC识别、模板规范）始终生效
+ * - 开关切换时触发进程重启
+ */
 export default function clinicalDataGuard(ctx, rawConfig = {}) {
   const config = validateConfig(rawConfig);
-  const runtime = new SecurityRuntime(config);
-  runtime.startHeartbeat();
-  const branding = registerBranding(ctx, config);
-  const localMetadataTool = registerLocalMetadataTool(ctx, runtime, config);
-  const disposers = [() => runtime.dispose(), branding, localMetadataTool];
 
-  // L3 用户决策（FIX-4 / FR-13）：outcome 为 allowed-once 时按用户选择落授权类别。
-  async function requestL3Decision(exec, userPrompt) {
-    if (!ctx.approval?.request) return { allowed: false, blockedNoChannel: true };
-    let outcome = await ctx.approval.request({
-      agent: exec.agent,
-      toolName: exec.name,
-      callId: exec.callId,
-      signal: exec.signal,
-      reason: `${userPrompt ?? '敏感临床数据需要用户决策。'} 选项：跳过（默认）/ 脱敏后继续 / 允许（需授权）`,
-    });
-    let choice = 'redacted-continue';
-    if (typeof outcome === 'object' && outcome) {
-      choice = outcome.choice ?? 'redacted-continue';
-      outcome = outcome.outcome;
-    }
-    if (outcome !== 'allowed-once') return { allowed: false, blockedNoChannel: false };
-    const category = choice === 'allow-audited' ? 'L3_ALLOW_AUDITED' : 'L3_REDACTED_CONTINUE';
-    const authorization = await runtime.request({
-      operation: 'authorize',
-      root: config.authorizationRoot,
-      user: exec.agent?.userId ?? config.authorizationUser ?? config.userId,
-      session: exec.agent?.sessionId ?? config.authorizationSession ?? config.sessionId,
-      category,
-      operator: config.approvedBy ?? config.authorizationUser,
-    });
-    if (!authorization.ok) return { allowed: false, blockedNoChannel: false, authzFailed: true };
-    return { allowed: true, category };
-  }
-
-  const quickGuard = ctx.tools.guard((exec) => {
-    // Dedicated UAT metadata inspection has a narrower, independently validated
-    // data boundary in the worker. Generic argument DLP must not reject its
-    // legitimate local path before that boundary can enforce root containment.
-    if (exec.name === 'local_data_metadata' && config.localDataAccess === 'uat-local') {
-      return undefined;
-    }
-    const args = exec.arguments ?? {};
-    const serialized = JSON.stringify(args);
-    const hit = scanDlp(serialized);
-    if (hit) return `[clinical-data-guard] 工具参数包含疑似临床数据（${hit}），已阻断。`;
-    return undefined;
-  });
-  disposers.push(quickGuard);
-
-  const pre = ctx.on('tools/pre-execute', async (exec, next) => {
-    let check;
-    try {
-      check = await runtime.request({
-        operation: 'check_tool',
-        tool: exec.name,
-        args: exec.arguments ?? {},
-        context: context(config, exec),
+  // 创建策略对象，传入开关切换回调
+  const policy = createDataInterceptionPolicy(config.dataInterceptionEnabled, {
+    onChange(change) {
+      const record = JSON.stringify({
+        event: 'data_interception_policy_changed',
+        previousEnabled: change.previousEnabled,
+        enabled: change.enabled,
+        source: change.source ?? 'runtime',
+        timestamp: new Date().toISOString(),
       });
-    } catch (error) {
-      return { kind: 'deny', reason: `[clinical-data-guard] 安全运行时不可用，已拒绝执行：${error.message}` };
-    }
-    if (!check.ok) {
-      const localLane = check.code === 'LOCAL_DATA_ACCESS_REQUIRED'
-        && config.localDataAccess === 'uat-local';
-      if (localLane) {
-        return { kind: 'deny', reason: `[clinical-data-guard] 本地 UAT 数据处理需要受限本地执行车道：${check.reason}` };
-      }
-      return { kind: 'deny', reason: `[clinical-data-guard] ${check.reason} (audit:${check.audit_id ?? 'none'})` };
-    }
-    // FIX-12: pre-execute 路径键与 extractPath 对齐（path/file_path/filePath/filename/file，5 键）。
-    const path = extractPath(exec.arguments ?? {});
-    // UAT 车道：源文件只允许在安全 worker 的本地元数据车道内读取。
-    // 具体的路径边界和格式检查由 worker 的 check_tool 统一执行；这里
-    // 不再调用 inspect_file（那是通用 Excel L3 预检，会重复扫描并阻断
-    // 已获准的 UAT 本地结构读取）。结果投影在 post-execute 统一处理。
-    if (config.localDataAccess === 'uat-local' && typeof path === 'string'
-        && /\.(xlsx|xls|csv|sas7bdat)$/i.test(path)) {
-      return next();
-    }
+      if (typeof ctx.logger?.info === 'function') ctx.logger.info(record);
+      else process.stderr.write('[clinical-data-guard] ' + record + '\n');
+    },
 
-    return next();
+    // 2026-08-25: 开关切换时触发进程重启
+    onSwitch(switchInfo) {
+      console.log(
+        '[clinical-data-guard] 开关切换: ' + switchInfo.previousEnabled + ' → ' + switchInfo.enabled + '，触发进程重启'
+      );
+      // 通知 Harness 重启进程
+      if (typeof ctx.emit === 'function') {
+        ctx.emit('plugin:restart', {
+          reason: 'data_interception_switch',
+          previousEnabled: switchInfo.previousEnabled,
+          enabled: switchInfo.enabled,
+          timestamp: switchInfo.timestamp,
+        });
+      }
+    },
   });
-  disposers.push(pre);
 
+  const runtime = new SecurityRuntime(config);
+  const trustedToken = randomBytes(32).toString('hex');
+  runtime.startHeartbeat();
+
+  const disposers = [];
+
+  // 2026-08-25: 所有组件始终注册，不受开关控制
+  // 开关只影响数据拦截，不影响智能功能
+
+  // 1. 品牌与开关 UI（始终注册）
+  disposers.push(registerBranding(ctx, config, policy));
+
+  // 2. Listing 插件（流程引导，始终生效）
+  disposers.push(registerClinicalListingPlugin(ctx, runtime, config, policy));
+
+  // 3. 本地数据工具（始终注册）
+  disposers.push(registerLocalMetadataTool(ctx, runtime, config, policy));
+
+  // 4. post-execute 钩子（数据拦截受开关控制，智能功能始终生效）
   const post = ctx.on('tools/post-execute', async (exec, result, next) => {
-    if (config.mode === 'enforce' && shouldReplaceResult(exec)) {
-      const decision = await safeToolResult(exec, result, runtime, config);
-      if (decision.needsApproval) {
-        // FIX-4/FIX-13: user decisions may replace model-facing content, but
-        // must never replace canonical value with a generic cross-tool shape.
-        // DSH revalidates an accepted `value` against the originating tool's
-        // output schema; glob/pwsh/read/get_goal/job_list therefore use content.
-        if (!ctx.approval?.request) {
-          return {
-            kind: 'accept',
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                clinicalGuard: 'BLOCKED',
-                reason: '敏感数据需要用户决策，当前部署无审批通道，结果已 fail-closed。',
-              }),
-            }],
-          };
-        }
-        const l3 = await requestL3Decision(exec, decision.userPrompt);
-        if (!l3.allowed) {
-          return {
-            kind: 'accept',
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                clinicalGuard: 'BLOCKED',
-                reason: '用户未授权查看敏感数据组合，结果已阻断。',
-              }),
-            }],
-          };
-        }
-        if (l3.category === 'L3_ALLOW_AUDITED') {
-          // 允许并审计：保留工具原有 content；canonical value 不被改写，
-          // 仅由用户明确授权决定这一次结果可以继续展示。
-          return { kind: 'accept', content: decision.originalContent ?? result.content };
-        }
-        // 脱敏后继续：只返回 scrubbed content，原始 value 仍留在执行局部。
-        return { kind: 'accept', content: decision.scrubbedContent };
-      }
+    if (shouldReplaceResult(exec)) {
+      // 2026-08-25: 根据开关状态决定是否拦截数据
+      // 智能功能（表头提取、EDC识别、模板验证）始终生效
+      const interceptData = policy.isEnabled();
+
+      const decision = await safeToolResult(exec, result, runtime, {
+        ...config,
+        workspaceRoot: context(config, policy, exec).workspaceRoot,
+        protectedDataToken: trustedToken,
+        hookTimeoutMs: hookTimeoutMs(config),
+      }, trustedToken, { interceptData });
+
       return { kind: 'accept', content: decision.content ?? result.content };
     }
     return next();
   });
   disposers.push(post);
 
+  // 5. llm/stream 钩子（出域检查受开关控制）
   const stream = ctx.on('llm/stream', async function* streamGuard(options, next) {
-    const shapeError = validateMessageShape(options.messages ?? []);
-    if (shapeError) throw new Error(`[clinical-data-guard] ${shapeError}`);
-    const payload = modelRequestPayload(options);
-    const check = await runtime.request({
-      operation: 'check_llm',
-      payload,
-      context: { ...context(config), scanScope: 'full_generate_options' },
-    });
-    if (!check.ok) {
-      if (check.code === 'SECURITY_UNAVAILABLE') throw new Error(check.reason);
-      // FIX-4 (FR-13): L3_ALLOW_AUDITED 一次性消费——命中违规时若存在当次有效授权
-      // 则消费并放行本请求；同一授权不会被第二次使用。
-      if (check.code === 'EGRESS_VIOLATION') {
-        const consumed = await runtime.request({
-          operation: 'consume_authorization',
-          root: config.authorizationRoot,
-          user: config.authorizationUser ?? config.userId,
-          session: config.authorizationSession ?? config.sessionId,
-          category: 'L3_ALLOW_AUDITED',
-        });
-        if (consumed.ok) {
-          yield* next();
-          return;
-        }
+    // 2026-08-25: 根据开关状态决定是否执行出域检查
+    if (policy.isEnabled()) {
+      const shapeError = validateMessageShape(options.messages ?? []);
+      if (shapeError) throw new Error('[clinical-data-guard] ' + shapeError);
+
+      const restoredDocuments = new Map();
+      const payload = maskTrustedDocuments(
+        modelRequestPayload(options), trustedToken, restoredDocuments,
+      );
+
+      const check = await runtime.request({
+        operation: 'check_llm',
+        payload,
+        context: {
+          ...context(config, policy),
+          scanScope: 'full_generate_options',
+        },
+      }, { timeoutMs: hookTimeoutMs(config) });
+
+      if (!check.ok) {
+        if (check.code === 'SECURITY_UNAVAILABLE') throw new Error(check.reason);
+        throw new Error('[clinical-data-guard] 临床数据出域已阻断 (audit:' + (check.audit_id ?? 'none') + ')');
       }
-      throw new Error(`[clinical-data-guard] 临床数据出域已阻断 (audit:${check.audit_id ?? 'none'})`);
-    }
-    // smart_guard 自愈车道：worker 已把命中值统一 token 化（[SUBJ:xx] 等），
-    // 用脱敏后的载荷继续本次请求——原值不出域，会话不再被误报钉死。
-    // waterfall 的 next() 复用同一 options 对象，字段就地替换即对下游生效；
-    // signal 等非载荷字段不在 payload 内，保持原引用。
-    if (check.action === 'scrubbed' && check.payload && typeof check.payload === 'object') {
-      for (const key of Object.keys(payload)) {
-        if (key in check.payload) options[key] = check.payload[key];
+
+      if (check.payload && typeof check.payload === 'object') {
+        const restored = restoreTrustedDocuments(check.payload, restoredDocuments);
+        yield* next({ ...options, ...restored });
+        return;
       }
     }
+
+    // 开关关闭时：不检查，直接放行
     yield* next();
   });
   disposers.push(stream);
 
-  return () => disposers.reverse().forEach((dispose) => dispose());
+  return () => {
+    disposers.reverse().forEach((dispose) => dispose?.());
+    runtime.dispose();
+  };
 }
 
-clinicalDataGuard.inject = ['tools', 'llm', 'webServer'];
+clinicalDataGuard.inject = ['tools', 'llm', 'webServer', 'systemPrompt'];

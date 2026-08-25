@@ -31,6 +31,7 @@ def test_ui_branding_uses_official_webserver_extension():
         "manifestBranded": True,
         "faviconBranded": True,
         "officialRoutes": True,
+        "dataInterceptionToggle": True,
     }
 
 

@@ -6,40 +6,49 @@
 FIX-3 (R-6 / AR-2.9): 所有异常回执经 sanitize_error 统一脱敏（路径→[PATH]、
 受试者/日期→占位），绝不外泄 str(exc) 原文与本地路径。
 FIX-6 (AR-2.6): 单行解析失败返回 SECURITY_UNAVAILABLE 并继续服务后续请求。
-FIX-8 (FR-06-03): inspect_file 遍历全部 sheet 并使用配置 max_scan_rows。
 FIX-9 (BR-06.5): 上下文键名统一（camelCase/snake_case 均可消费）。
-FIX-4 (FR-13): L3_ALLOW_AUDITED 授权检查侧一次性消费。
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any
 
-from security.ai_operations_monitor import (
-    AIOperationMonitor,
-    DangerousOperationBlocked,
-    check_tool_call,
-)
-from security.data_egress_guard import (
-    DataRiskLevel,
-    ClinicalDataDetector,
-    StreamingScrubber,
-)
-from security.egress_authz import authorize_category, consume_category, is_authorizable
-from security.egress_checkpoint import EgressViolation, check_egress
+from security.egress_checkpoint import EgressViolation, check_egress_v2
 from security.local_data_inspector import LocalDataInspectionError, inspect_local_data
-from security.data_egress_guard import scan_xlsx_sheet_safe
 from security.patterns import clean_surrogates, sanitize_error
-from security.smart_guard import (
-    is_mass_data_dump,
-    smart_scrub_structure,
-    smart_scrub_text,
-)
 
 
 def _result(ok: bool, **fields: Any) -> dict[str, Any]:
     return {"ok": ok, **fields}
+
+
+# E-2（2026-08-22 e2e 审计）：worker 启动依赖预检清单，与 requirements.txt 对齐。
+# 此前落在缺依赖解释器上的 worker 会在首个重操作时崩溃，traceback 写入已失效
+# stderr 句柄产生 EBADF，以无语义方式杀掉整轮运行。启动即 fail-fast：
+# stdout 输出一条结构化横幅并退出，Node 侧捕获后给出可行动诊断。
+WORKER_REQUIRED_MODULES = ("pandas", "pyreadstat", "openpyxl", "xlrd", "pyzipper")
+
+
+def missing_worker_dependencies(importer=None, stop_on_first: bool = False):
+    """返回缺失的必需依赖名列表；全部齐备时为空列表。importer 可注入测试。
+
+    stop_on_first=True 时命中首个缺失立即返回——预检线程据此第一时间发
+    横幅退出，不等其余重依赖（pandas 等导入需秒级）完成。
+    """
+    import importlib
+
+    import_module = importer or importlib.import_module
+    missing: list[str] = []
+    for name in WORKER_REQUIRED_MODULES:
+        try:
+            import_module(name)
+        except ImportError as exc:
+            missing.append(str(getattr(exc, "name", None) or name))
+            if stop_on_first:
+                break
+    return missing
 
 
 def _emit(response: dict[str, Any]) -> None:
@@ -61,46 +70,6 @@ def _emit(response: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
-class _XlrdSheetAdapter:
-    """把 xlrd sheet 适配为 scan_xlsx_sheet_safe 需要的 openpyxl 风格接口。"""
-
-    def __init__(self, sheet):
-        self._sheet = sheet
-        self.max_row = sheet.nrows
-
-    def iter_rows(self, min_row=1, values_only=True):
-        for index in range(min_row - 1, self._sheet.nrows):
-            yield tuple(self._sheet.row_values(index))
-
-
-class _XlrdWorkbook:
-    """把 xlrd workbook 适配为 openpyxl 风格的 sheetnames/下标访问。"""
-
-    def __init__(self, workbook):
-        self._workbook = workbook
-
-    @property
-    def sheetnames(self):
-        return self._workbook.sheet_names()
-
-    def __getitem__(self, name):
-        return _XlrdSheetAdapter(self._workbook.sheet_by_name(name))
-
-
-def _scan_workbook(workbook, max_rows):
-    """FIX-8 (FR-06-03): 遍历全部 sheet，使用配置 max_scan_rows，返回首个用户决策提示。"""
-    prompt = None
-    options = None
-    for sheet_name in workbook.sheetnames:
-        report = scan_xlsx_sheet_safe(workbook[sheet_name], sheet_name, max_rows=max_rows)
-        found = report.get("user_prompt") or {}
-        if found:
-            prompt = found.get("message")
-            options = found.get("options")
-            break
-    return prompt, options
-
-
 def _normalize_context(context: Any) -> dict[str, Any]:
     """FIX-9: Node 侧 camelCase 上下文键名统一为 Python 消费侧 snake_case。"""
     if not isinstance(context, dict):
@@ -115,78 +84,26 @@ def _normalize_context(context: Any) -> dict[str, Any]:
 def _handle(request: dict[str, Any]) -> dict[str, Any]:
     operation = request.get("operation")
     context = _normalize_context(request.get("context"))
-    mode = str(context.get("mode", "enforce")).lower()
 
-    if operation == "check_tool":
-        try:
-            tool_name = str(request.get("tool", ""))
-            args = request.get("args", {})
-            # The dedicated local metadata tool is itself the capability boundary:
-            # it is allowed only in explicit UAT-local mode and only its worker
-            # implementation can open local source files.
-            if tool_name == "local_data_metadata":
-                if context.get("localDataAccess") != "uat-local":
-                    return _result(False, code="LOCAL_DATA_ACCESS_REQUIRED",
-                                   reason="local metadata inspection is disabled")
-                return _result(True, action="allow")
-            # First apply the UAT capability policy, then the generic dangerous-
-            # operation monitor. Generic shell/read/write access to source files
-            # is never a substitute for local_data_metadata.
-            monitor = AIOperationMonitor()
-            try:
-                monitor.check_local_data_policy(tool_name, args, context)
-            except DangerousOperationBlocked as exc:
-                return _result(False, code="LOCAL_DATA_ACCESS_REQUIRED",
-                               audit_id=exc.audit_id, reason=exc.threat.reason)
-            check_tool_call(tool_name, args, context)
-            return _result(True, action="allow")
-        except DangerousOperationBlocked as exc:
-            if mode == "shadow":
-                return _result(True, action="observed", audit_id=exc.audit_id,
-                               reason=exc.threat.reason)
-            return _result(False, code="DANGEROUS_OPERATION", audit_id=exc.audit_id,
-                           reason=exc.threat.reason)
+    # 测试数据环境关闭时完全旁路；开启时只允许或阻断，不改写载荷。
+    data_interception_enabled = context.get("dataInterceptionEnabled", True)
 
     if operation == "check_llm":
+        # 数据拦截关闭时原样放行；开启时只允许或阻断，永不改写载荷。
+        if not data_interception_enabled:
+            payload = request.get("payload", {})
+            return _result(True, action="allow", payload=payload)
         payload = request.get("payload", {})
         try:
-            evidence = check_egress(payload, context)
+            evidence = check_egress_v2(payload, context)
             return _result(True, action="allow", **evidence)
         except EgressViolation as exc:
-            if mode == "shadow":
-                return _result(True, action="observed", audit_id=exc.audit_id,
-                               threats=len(exc.threats))
-            # 白名单自愈车道（smart_guard 接线）：出域命中不再一刀切拦死——
-            # 把载荷统一 token 化后放行。模型拿到 [SUBJ:xx]/[DATE:xx] 仍可
-            # join/推理，真实值不出域；token 形态幂等，历史误报不再钉死会话。
-            # 唯一硬红线：整表转储体量（is_mass_data_dump）仍拒绝。
-            try:
-                scrubbed, stats = smart_scrub_structure(payload)
-            except Exception:
-                # 脱敏自身失败 → fail-closed，维持原拦截判定。
-                return _result(False, code="EGRESS_VIOLATION", audit_id=exc.audit_id,
-                               threats=len(exc.threats))
-            if is_mass_data_dump(stats):
-                return _result(False, code="EGRESS_VIOLATION", audit_id=exc.audit_id,
-                               threats=len(exc.threats),
-                               reason="mass data dump: 数据行体量超阈值，拒绝出域")
-            # token 化后的载荷以 shadow 口径复扫留痕：审计链呈现
-            # BLOCKED(原文) → OBSERVED/ALLOWED(token 化后)，可用于调优，
-            # 不再产生第二次阻断。
-            try:
-                evidence = check_egress(
-                    scrubbed,
-                    {**context, "mode": "shadow", "egress_stage": "post_scrub"},
-                )
-            except Exception:
-                evidence = {}
-            return _result(True, action="scrubbed", payload=scrubbed,
-                           blocked_audit_id=exc.audit_id,
-                           tokens_hashed=stats.tokens_hashed,
-                           data_lines=stats.data_lines, **evidence)
+            return _result(False, code="EGRESS_VIOLATION", audit_id=exc.audit_id,
+                           threats=len(exc.threats))
 
     if operation == "inspect_local_data":
-        if context.get("localDataAccess") != "uat-local":
+        # 2026-08-25: 开关关闭时本地元数据检查无条件可用（零限制）。
+        if data_interception_enabled and context.get("localDataAccess") != "uat-local":
             return _result(
                 False,
                 code="LOCAL_DATA_ACCESS_REQUIRED",
@@ -203,105 +120,105 @@ def _handle(request: dict[str, Any]) -> dict[str, Any]:
             return _result(False, code="SECURITY_UNAVAILABLE", reason=sanitize_error(exc))
         return _result(True, action="local-metadata", metadata=metadata)
 
-    if operation == "scrub_row":
-        detector = ClinicalDataDetector()
-        scrubber = StreamingScrubber(detector)
-        row = request.get("row", [])
-        scrubbed, detection = scrubber.scrub_row(
-            row if isinstance(row, list) else [row],
-            int(request.get("row_index", 0)),
-            bool(request.get("after_header", False)),
-        )
-        return _result(
-            True,
-            row=scrubbed,
-            risk_level=detection.risk_level.name,
-            patterns=detection.patterns_matched,
-            evidence=detection.evidence,
-            recommendation=detection.recommendation,
-            needs_user=detection.risk_level == DataRiskLevel.SENSITIVE,
-        )
-
-    if operation == "scrub_text":
-        # smart_guard 接线：白名单式统一 token 化取代旧 StreamingScrubber 逐行
-        # 黑名单。散文/表头/路径原样，其余含数字值一律 token；与 check_llm
-        # 出域自愈车道同一口径，写入/出域不再不对称。
-        text = str(request.get("text", ""))
-        scrubbed_text, stats = smart_scrub_text(text)
-        needs_user = is_mass_data_dump(stats)
-        return _result(
-            True,
-            text=scrubbed_text,
-            scrubbed_rows=stats.lines_changed,
-            data_lines=stats.data_lines,
-            tokens_hashed=stats.tokens_hashed,
-            needs_user=needs_user,
-            user_prompt=(
-                "数据安全检查：检测到整表级数据转储。选项：跳过（默认）/ 脱敏后继续 / 允许（需授权）"
-                if needs_user else None
-            ),
-        )
-
-    if operation == "inspect_file":
-        path = str(request.get("path", ""))
-        if not path.lower().endswith((".xlsx", ".xls")):
-            return _result(True, needs_user=False)
-        max_rows = max(1, int(request.get("max_scan_rows", 200)))
+    # 2026-08-24 架构重设计（用户裁决）：IR 车道（listing_validate_plan /
+    # listing_execute）退役，由代码车道（listing_run_code / listing_publish）替代。
+    # 模型全权编写 pandas 代码；沙箱保证 SAS 行级数据与 doc/ 外数据零出域。
+    if operation in {"listing_inspect", "listing_run_code", "listing_publish"}:
+        # 2026-08-25: 流程引导（listing 家族）不受出域开关控制——inspect 读
+        # spec/ALS/schema、run_code 迭代、publish 出 Excel 都是本地计算，是
+        # 引导 AI 的主流程，开关只管"数据是否出域"。localDataAccess 门禁在
+        # 开关关闭时不再适用：关闭即零限制，本地车道无条件可用。
+        if not data_interception_enabled:
+            pass
+        elif context.get("localDataAccess") != "uat-local":
+            return _result(False, code="LOCAL_DATA_ACCESS_REQUIRED",
+                           reason="clinical listing requires uat-local mode")
+        # E-1（2026-08-22 e2e 审计）：导入必须先于主 try 完成。此前 import 放在
+        # try 内而 `except ListingWorkflowError:` 引用导入名——任何导入失败
+        # （缺依赖/代码漂移）都会让 except 子句抛 UnboundLocalError，把真实的
+        # ImportError 永久掩盖。导入失败单独回结构化收据，保留脱敏后的真因。
         try:
-            if path.lower().endswith(".xls"):
-                # 真实故障修复：openpyxl 不支持 .xls（真实 .xls 预检一律失败导致
-                # agent 被拒）。.xls 走 xlrd 只读解析；SpreadsheetML XML 伪装的
-                # .xls（如 *PROD.xls）由 xlrd 抛错进入 fail-closed。
-                import xlrd
-                workbook = xlrd.open_workbook(path, on_demand=True)
-                try:
-                    prompt, options = _scan_workbook(_XlrdWorkbook(workbook), max_rows)
-                finally:
-                    workbook.release_resources()
-            else:
-                import openpyxl
-                workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
-                try:
-                    prompt, options = _scan_workbook(workbook, max_rows)
-                finally:
-                    workbook.close()
+            from security.listing_code_lane import (
+                publish_listing_code,
+                run_listing_code,
+            )
+            from security.listing_workflow import ListingWorkflowError, inspect_listing
         except Exception as exc:
-            # FIX-3: 异常原文不得回传（可能含本地路径/受试者标记/孤立代理）。
+            return _result(False, code="LISTING_STACK_UNAVAILABLE",
+                           reason=sanitize_error(exc))
+        try:
+            project = str(request.get("project") or "")
+            raw_scenario = request.get("scenario")
+            scenario = str(raw_scenario) if raw_scenario else None
+            if operation == "listing_inspect":
+                credential_ref = str(request.get("credentialRef") or "") or None
+                credentials_dir = str(context.get("credentialsDir") or "") or None
+                return _result(True, action="listing-inspect", inspection=inspect_listing(
+                    local_data_root=str(context.get("localDataRoot") or ""),
+                    project=project, scenario=scenario,
+                    credential_ref=credential_ref, credentials_dir=credentials_dir,
+                ))
+            if operation == "listing_run_code":
+                return _result(True, action="listing-run-code", receipt=run_listing_code(
+                    local_data_root=str(context.get("localDataRoot") or ""),
+                    project=project, scenario=scenario,
+                    code=request.get("code"),
+                    credential_ref=str(request.get("credentialRef") or "") or None,
+                    credentials_dir=str(context.get("credentialsDir") or "") or None,
+                    session_id=str(context.get("sessionId") or "unknown-session"),
+                ))
+            return _result(True, action="listing-publish", receipt=publish_listing_code(
+                local_data_root=str(context.get("localDataRoot") or ""),
+                project=project, scenario=scenario,
+                credential_ref=str(request.get("credentialRef") or "") or None,
+                credentials_dir=str(context.get("credentialsDir") or "") or None,
+                session_id=str(context.get("sessionId") or "unknown-session"),
+                output_plane_root=str(context.get("outputPlaneRoot") or "") or None,
+            ))
+        except ListingWorkflowError as exc:
+            # E-3: ListingWorkflowError 的文案本身即模型安全（不含路径/记录），
+            # 保留原文与结构化 code，让 AI 能据此采取动作（如补凭据），
+            # 而不是收到一句无法行动的 "operation failed"。
+            return _result(False, code=getattr(exc, "code", "LISTING_WORKFLOW_ERROR"),
+                           reason=str(exc))
+        except Exception as exc:
+            return _result(False, code="WORKFLOW_UNAVAILABLE", reason=sanitize_error(exc))
+
+    # 2026-08-25 P0 修复（真实故障：关闭开关后 Listing 仍反复报
+    # "Listing 结果安全检查失败"）。tool-result-guard.js 的
+    # scrubUntrustedListingContent 会对未被信任的 Listing 文本块发起
+    # operation="scrub_text" 请求，但 worker 从未注册该 operation——请求落到
+    # 函数末尾的 UNKNOWN_OPERATION 分支，ok=False，Node 侧据此把每个文本块
+    # 替换成 {clinicalGuard:"CHECK_FAILED"}。这条路径与开关状态无关，因此
+    # 关闭拦截也照样触发，且每个内容块各报一次，表现为"反复拦截"。
+    #
+    # 修法：注册 scrub_text，并让它首先遵从开关——关闭时原样返回文本，
+    # 不做任何扫描或改写（关闭 = 零限制，Harness 完全接手）。
+    if operation == "scrub_text":
+        text = request.get("text")
+        if not isinstance(text, str):
+            return _result(False, code="SCRUB_TEXT_INVALID_INPUT",
+                           reason="text must be a string")
+        # 开关关闭：不扫描、不改写，原样放行。
+        if not data_interception_enabled:
+            return _result(True, action="allow", text=text)
+        try:
+            from security.patterns import scan_text_context_aware
+            verdict = scan_text_context_aware(text, scan_if_metadata=True)
+        except Exception as exc:
             return _result(False, code="SECURITY_UNAVAILABLE",
                            reason=sanitize_error(exc))
-        return _result(
-            True,
-            needs_user=bool(prompt),
-            user_prompt=prompt,
-            options=options,
-        )
-
-    if operation == "authorize":
-        category = str(request.get("category", ""))
-        if not is_authorizable(category):
-            return _result(False, code="INVALID_CATEGORY")
-        record = authorize_category(
-            request.get("root"),
-            request.get("user"),
-            request.get("session"),
-            category,
-            request.get("operator"),
-        )
-        return _result(bool(record.get("ok")), categories=record.get("categories", []))
+        if verdict.get("should_block"):
+            return _result(True, action="scrubbed", text=json.dumps({
+                "clinicalGuard": "SCRUBBED",
+                "reason": "内容命中临床数据模式，已替换为占位",
+                "context": verdict.get("context"),
+            }, ensure_ascii=False))
+        return _result(True, action="allow", text=text)
 
     if operation == "ping":
         # FIX-11: 心跳探活——只需返回响应即证明 worker 存活。
         return _result(True, action="pong")
-
-    if operation == "consume_authorization":
-        # FIX-4 (FR-13): L3_ALLOW_AUDITED 仅当次有效——消费即移除。
-        consumed = consume_category(
-            request.get("root"),
-            request.get("user"),
-            request.get("session"),
-            str(request.get("category", "L3_ALLOW_AUDITED")),
-        )
-        return _result(consumed)
 
     return _result(False, code="UNKNOWN_OPERATION")
 
@@ -316,6 +233,26 @@ def main() -> int:
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # E-2: 依赖预检 fail-fast。预检在后台线程执行（完整 import pandas 等
+    # 需数秒，不能挡在协议路径上——ping/check_llm 必须立即可答）；缺依赖
+    # 时输出不带 requestId 的结构化横幅并立即退出，Node 侧记录为启动诊断，
+    # 触发 fail-closed。完整 import（而非 find_spec）同时能暴露包损坏
+    # （如 pyreadstat DLL 加载失败），这类故障 find_spec 探不出来。
+    import threading
+
+    def _preflight() -> None:
+        missing = missing_worker_dependencies(stop_on_first=True)
+        if missing:
+            _emit({
+                "ok": False,
+                "code": "WORKER_DEPENDENCY_MISSING",
+                "reason": "worker python is missing required packages: "
+                          + ", ".join(sorted(set(missing))),
+            })
+            # 横幅已 flush；直接终止，避免与主线程的输出交错撕裂响应行。
+            os._exit(3)
+
+    threading.Thread(target=_preflight, daemon=True).start()
     for line in sys.stdin:
         if not line.strip():
             continue

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$Check,
     [switch]$NoOpen
 )
@@ -35,6 +35,27 @@ function Get-Sha256([string]$Path) {
         $hasher.Dispose()
     }
 }
+
+# E-5 (2026-08-22 e2e audit): the clinical profile loads the plugin via pnpm link,
+# so the workspace IS the runtime. Code saved after the server started is invisible
+# to the running process (drift failures look like random ImportErrors). The stamp
+# records the newest plugin source mtime at server start; the "already running"
+# path compares it with the current disk state and warns on drift.
+function Get-PluginCodeStamp {
+    $pluginRoot = Join-Path $Root 'dsh-clinical-data-guard'
+    $newest = $null
+    foreach ($dir in @('security', 'src')) {
+        $files = @(Get-ChildItem -LiteralPath (Join-Path $pluginRoot $dir) -File -Filter '*.*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in '.py', '.js' })
+        foreach ($file in $files) {
+            if (-not $newest -or $file.LastWriteTime -gt $newest.LastWriteTime) { $newest = $file }
+        }
+    }
+    if ($newest) { return "$($newest.LastWriteTime.ToString('yyyy-MM-ddTHH:mm:ss'))|$($newest.Name)" }
+    return $null
+}
+
+$PluginStampFile = Join-Path $Cache 'server-plugin.stamp'
 function Get-SystemPythonCommand {
     if ($env:EMERALD_PYTHON) {
         if (Test-Path $env:EMERALD_PYTHON) {
@@ -42,12 +63,24 @@ function Get-SystemPythonCommand {
         }
     }
 
+    # 2026-08-24：系统只统一一套 Python 环境。宿主运行时（TRAE/codex）会把
+    # 自己缓存目录里的 python 前置到 PATH（如 .cache\codex-runtimes），它既是
+    # 易失缓存又缺项目依赖，绝不允许作为 venv 基解释器；仅在没有其他选择时
+    # 才接受。
+    $pathCandidates = @()
     foreach ($name in @('python', 'python3')) {
         $command = Get-Command $name -ErrorAction SilentlyContinue
         $candidate = if ($command) { $command.Source } else { $null }
         if ($candidate -and $candidate -notmatch 'WindowsApps') {
-            return @{ Command = $candidate; Arguments = @() }
+            $pathCandidates += $candidate
         }
+    }
+    $stable = @($pathCandidates | Where-Object { $_ -notmatch '\.cache[\\/]codex-runtimes' })
+    if ($stable) {
+        return @{ Command = $stable[0]; Arguments = @() }
+    }
+    if ($pathCandidates) {
+        return @{ Command = $pathCandidates[0]; Arguments = @() }
     }
 
     $launcher = Get-Command py -ErrorAction SilentlyContinue
@@ -88,8 +121,28 @@ Assert-Version $pythonVersion ([version]'3.10.0') 'Python'
 
 New-Item -ItemType Directory -Force -Path $Cache | Out-Null
 $env:DSH_HOME = $DshHome
+# The clinical runtime must write its audit trail inside the project runtime.
+# A stale lock under the user's profile can retain a restrictive Windows ACL
+# after a previous elevated run, causing the real web workflow to fail before
+# any Listing tool is reached. Keep an explicit operator override for managed
+# deployments and tests, but make the local project path the default.
+if (-not $env:EMERALD_AUDIT_ROOT) {
+    $env:EMERALD_AUDIT_ROOT = Join-Path $DshHome 'var\egress_audit'
+}
+# 2026-08-24: listing 交付物属于项目数据，必须落在用户为会话选择的项目目录内
+# （<项目>/.clinical-listing/output/<scenario>，由 listing_workflow 回退路径实现）。
+# 系统产物（审计日志）才跟随系统 .dsh 运行时目录。不再默认设置
+# EMERALD_OUTPUT_PLANE_ROOT；托管部署仍可显式指定独立产物域。
 $env:NPM_CONFIG_CACHE = Join-Path $Cache 'npm'
 $env:PIP_CACHE_DIR = Join-Path $Cache 'pip'
+# 2026-08-24：系统不往 C 盘写任何数据。宿主的 TEMP/TMP 默认指向
+# C:\Users\...\AppData\Local\Temp，dsh-spill（工具大结果落盘）、node 与
+# python 的临时文件都会落到 C 盘。统一把临时区重定向到系统目录 .cache\tmp。
+$TmpHome = Join-Path $Cache 'tmp'
+New-Item -ItemType Directory -Force -Path $TmpHome | Out-Null
+$env:TMPDIR = $TmpHome
+$env:TEMP = $TmpHome
+$env:TMP = $TmpHome
 $env:NPM_CONFIG_UPDATE_NOTIFIER = 'false'
 # ST-P2-4: 强制 DISABLED，不允许外部预设覆盖（临床数据守卫不上报遥测）
 $env:DSH_TELEMETRY_MODE = 'DISABLED'
@@ -110,6 +163,20 @@ if (-not (Test-Path $RuntimeBin) -or -not (Test-Path $runtimeStamp) -or (Get-Con
 }
 
 # Python packages stay project-local, while the interpreter itself comes from the system.
+# 2026-08-24：venv 的基解释器必须与本次选定的解释器一致。venv 记录的是创建时
+# 的解释器（pyvenv.cfg home）；宿主环境变化（例如从 TRAE/codex 缓存 python 切到
+# 系统 python）后，旧 venv 仍指向易失/错误的基解释器——沙盒与本地因此跑在两套
+# 环境上。发现不一致即重建 venv 并使依赖戳失效。
+$venvCfg = Join-Path $PythonHome 'pyvenv.cfg'
+if ((Test-Path $PythonBin) -and (Test-Path $venvCfg)) {
+    $selectedHome = (& $pythonCommand @pythonArguments -c 'import sys; print(sys.base_prefix)').ToString().Trim()
+    $recordedHome = ((Select-String -Path $venvCfg -Pattern '^home\s*=\s*(.+)$' | Select-Object -First 1).Matches.Groups[1].Value).Trim()
+    if ($recordedHome -and $selectedHome -and ($recordedHome -ne $selectedHome)) {
+        Write-Host "Python base interpreter changed ($recordedHome -> $selectedHome); rebuilding virtual environment..."
+        Remove-Item -LiteralPath $PythonHome -Recurse -Force
+        Remove-Item -LiteralPath (Join-Path $Cache 'python-requirements.sha256') -Force -ErrorAction SilentlyContinue
+    }
+}
 if (-not (Test-Path $PythonBin)) {
     & $pythonCommand @pythonArguments -m venv $PythonHome
     if ($LASTEXITCODE -ne 0) { throw "Python virtual environment creation failed (exit $LASTEXITCODE)." }
@@ -123,6 +190,10 @@ if (-not (Test-Path $pythonStamp) -or (Get-Content $pythonStamp -Raw).Trim() -ne
     Set-Content -LiteralPath $pythonStamp -Value $requirementsHash -NoNewline
 }
 $env:PYTHON = $PythonBin
+# 2026-08-24：PLUGIN_PYTHON 是插件运行时（index.js / tool-result-guard.js）
+# 优先消费的解释器钉点，主路径也必须导出——此前只在 -Check 分支设置，
+# 生产代码从未读到，worker/extractor 退化到 PATH 上的任意 python。
+$env:PLUGIN_PYTHON = $PythonBin
 
 $pnpm = Get-Command pnpm -ErrorAction SilentlyContinue
 $pnpmCommand = if ($pnpm) { $pnpm.Source } else { $null }
@@ -156,11 +227,35 @@ try {
     Pop-Location
 }
 
+# Interrupted pnpm atomic writes can leave _tmp_* files in the profile root.
+# DSH watches this directory, and Windows can reject watchers for those files.
+foreach ($temporaryProfileFile in @(Get-ChildItem -LiteralPath $Profile -File -Force -Filter '_tmp_*')) {
+    Remove-Item -LiteralPath $temporaryProfileFile.FullName -Force
+}
+
 if ($Check) {
+    $pluginRoot = Join-Path $Root 'dsh-clinical-data-guard'
+    $previousPythonPath = $env:PYTHONPATH
+    $env:PYTHONPATH = if ($previousPythonPath) { "$pluginRoot;$previousPythonPath" } else { $pluginRoot }
+    # D-1 (2026-08-22): the legacy generator module was removed (F-11); check the
+    # current three-stage listing stack instead so -Check cannot pass on dead refs.
+    & $PythonBin -c 'import security.listing_workflow'
+    if ($LASTEXITCODE -ne 0) { throw 'Clinical listing workflow import check failed.' }
     $config = & $RuntimeBin --profile clinical --dump-config
     if ($LASTEXITCODE -ne 0) { throw "Clinical profile config check failed (exit $LASTEXITCODE)." }
     if (-not ($config -match 'clinical-data-guard')) {
         throw 'Clinical profile did not load emerald-clinical-data-guard.'
+    }
+    $env:PLUGIN_PYTHON = $PythonBin
+    $env:LOCAL_DATA_ACCESS = 'uat-local'
+    $env:LOCAL_DATA_ROOT = $Root
+    $toolContract = & $nodeCommand (Join-Path $pluginRoot 'tests\integration\plugin_driver.js') 'listing-tool-contract'
+    if ($LASTEXITCODE -ne 0) { throw 'Clinical tool registration check failed.' }
+    $toolNames = @($toolContract | ConvertFrom-Json | ForEach-Object { $_.name })
+    foreach ($requiredTool in @('clinical_listing_inspect', 'clinical_listing_run_code', 'clinical_listing_publish', 'local_data_metadata')) {
+        if ($requiredTool -notin $toolNames) {
+            throw "Clinical profile tool is not registered: $requiredTool"
+        }
     }
     Write-Host 'PROJECT_DSH_CHECK=PASS'
     exit 0
@@ -177,7 +272,27 @@ if ($portOwners) {
         $existingResponse = Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 3
         if ($existingResponse.StatusCode -ge 200) {
             Write-Host "Emerald Clinical DSH is already running: $url"
-            if (-not $NoOpen) { Start-Process $url }
+            # E-5: drift self-check - warn when plugin code on disk is newer than
+            # the code the running server started with (pnpm link workspace runtime).
+            if (Test-Path $PluginStampFile) {
+                $startedStamp = (Get-Content $PluginStampFile -Raw).Trim()
+                $currentStamp = Get-PluginCodeStamp
+                if ($startedStamp -and $currentStamp -and $currentStamp -ne $startedStamp) {
+                    Write-Warning "Plugin code changed since the running server started (server started with: $startedStamp; disk now: $currentStamp)."
+                    Write-Warning 'The workspace is the runtime (pnpm link). Run stop.bat and then start.ps1 to load the new code.'
+                }
+            }
+            if (-not $NoOpen) {
+                Start-Process $url
+                # One-click UX: launched via double-click (start.bat), this console
+                # would flash and close before the message above is readable.
+                # Hold it briefly; -NoOpen (scripted runs) skips the delay.
+                for ($i = 10; $i -gt 0; $i--) {
+                    Write-Host "`rThis window closes in $i second(s)...   " -NoNewline
+                    Start-Sleep -Seconds 1
+                }
+                Write-Host ''
+            }
             exit 0
         }
     } catch {
@@ -214,6 +329,10 @@ exit 1
 
 try {
     Write-Host "Emerald Clinical DSH: $url"
+    # E-5: record the plugin code stamp the server is starting with, so a later
+    # start.ps1 run can detect and warn about code drift on the running server.
+    $pluginStamp = Get-PluginCodeStamp
+    if ($pluginStamp) { Set-Content -LiteralPath $PluginStampFile -Value $pluginStamp -NoNewline }
     & $RuntimeBin --profile clinical
     $exitCode = $LASTEXITCODE
 } finally {

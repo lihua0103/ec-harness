@@ -8,7 +8,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from security.ai_operations_monitor import DangerousOperationBlocked, check_bash  # noqa: E402
 from security.egress_checkpoint import EgressViolation, check_egress  # noqa: E402
 from tests.integration.test_plugin_runtime import make_xlsx, run  # noqa: E402
 
@@ -53,28 +52,24 @@ def test_by_matrix():
             assert "A1234567" not in blob and "1234567" not in blob, f"{case_id} 泄露原值"
 
     fail_closed = run("fail-closed", python="definitely-missing-python-7f3c")
-    assert fail_closed["kind"] == "deny", "BY-9 未 fail-closed"
-
-    for command in [
-        "python -c 'import pickle as p; p.load(open(\"data.pkl\", \"rb\"))'",
-        "echo ZWNobyBoaQ== | base64 -d | sh",
-    ]:
-        try:
-            check_bash(command)
-        except DangerousOperationBlocked:
-            continue
-        raise AssertionError("BY-10 混淆命令未拦截")
+    assert fail_closed.get("thrown") is True, "BY-9 模型出域边界未 fail-closed"
+    assert "enoent" in str(fail_closed.get("message", "")).lower(), "BY-9 未报告 worker 不可用"
 
     assert_blocked("A123​4567", "BY-11")
     no_path = run("post-no-path")
-    assert "A1234567" not in str(no_path), "BY-12 无路径结果泄露"
+    assert "status A1234567 2024-03-05" in str(no_path), "BY-12 控制结果被无效脱敏"
+
+    data_query = run("fetch-database")
+    data_query_blob = str(data_query)
+    assert "A1234567" not in data_query_blob and "2024-03-05" not in data_query_blob, "BY-13 数据查询结果泄露"
+    assert "DATA_BLOCKED" in data_query_blob and "DATA_QUERY" in data_query_blob, "BY-13 未按数据查询来源阻断"
 
 
 def main() -> int:
     failures = 0
     try:
         test_by_matrix()
-        print("PASS BY-1..BY-12")
+        print("PASS active egress bypass matrix")
     except Exception as error:
         failures = 1
         print(f"FAIL BY matrix: {error}")

@@ -25,13 +25,14 @@ def test_plugin_contract():
     patch = (ROOT / "cordis.patch.yml").read_text(encoding="utf-8")
     assert "id: clinical-data-guard" in patch
     assert "name: emerald-clinical-data-guard" in patch
+    assert "localDataAccess: uat-local" in patch
+    # F-11: 旧生成器车道已下线，配置不得再声明可插拔生成器模块。
+    assert "listingGenerator" not in patch
 
     entry = (ROOT / "src" / "index.js").read_text(encoding="utf-8")
     assert "export default function clinicalDataGuard" in entry
-    assert "clinicalDataGuard.inject = ['tools', 'llm', 'webServer'];" in entry
+    assert "clinicalDataGuard.inject = ['tools', 'llm', 'webServer', 'systemPrompt'];" in entry
     for extension in (
-        "ctx.tools.guard",
-        "'tools/pre-execute'",
         "'tools/post-execute'",
         "'llm/stream'",
         "registerBranding",
@@ -40,9 +41,29 @@ def test_plugin_contract():
         "localDataAccess",
     ):
         assert extension in entry
+    for obsolete in (
+        "listingEngineRoot",
+        "EMERALD_LISTING_ENGINE_ROOT",
+        "emerald_clinical_listing",
+        "ctx.tools.guard",
+        "'tools/pre-execute'",
+        "requestL3Decision",
+        "needsApproval",
+        "authorizationRoot",
+        "DATA_PROTECTION_MODE",
+    ):
+        assert obsolete not in entry
+
+    worker = (ROOT / "security" / "worker.py").read_text(encoding="utf-8")
+    assert 'raw_scenario = request.get("scenario")' in worker
+    assert 'scenario = str(raw_scenario) if raw_scenario else None' in worker
 
     assert (ROOT / "security" / "worker.py").is_file()
     assert (ROOT / "security" / "local_data_inspector.py").is_file()
+    assert not (ROOT / "security" / "demo_replica.py").exists()
+    assert not (ROOT / "security" / "manifest_reader.py").exists()
+    assert "build_demo_replica" not in entry
+    assert "demoDataLane" not in entry
     assert (ROOT / "src" / "branding.js").is_file()
     assert (ROOT / "assets" / "branding" / "favicon.svg").is_file()
     assert not (ROOT / "proxy.js").exists()

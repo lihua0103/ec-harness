@@ -46,6 +46,22 @@ def test_request_timeout_fails_closed():
     assert "timeout" in output["message"]
 
 
+def test_timeout_restarts_worker_before_next_request():
+    """超时后必须销毁旧 worker，下一次请求不能排在旧任务后面。"""
+    output = run_node(
+        "import { SecurityRuntime } from './src/index.js';\n"
+        "const rt = new SecurityRuntime({});\n"
+        "let timedOut = false;\n"
+        "try { await rt.request({ operation: 'ping' }, { timeoutMs: 1 }); }\n"
+        "catch (error) { timedOut = /timeout/.test(error.message); }\n"
+        "const restarted = rt.child;\n"
+        "const probe = await rt.request({ operation: 'ping' }, { timeoutMs: 15000 });\n"
+        "process.stdout.write(JSON.stringify({ timedOut, restarted: restarted !== null, recovered: probe.ok === true }));\n"
+        "rt.dispose();\n"
+    )
+    assert output["timedOut"] is True
+    assert output["restarted"] is True
+    assert output["recovered"] is True
 def test_stdin_epipe_fails_all_pending_and_kills_worker():
     """R-9: stdin 损坏 → worker 被 kill、全部 pending 被拒绝。"""
     output = run_node(

@@ -20,7 +20,13 @@ def main() -> int:
     args = parser.parse_args()
 
     patterns = [
-        {"source": item["re"], "flags": item.get("flags", ""), "label": item["label"]}
+        {
+            "source": item["re"],
+            "flags": item.get("flags", ""),
+            "label": item["label"],
+            # S4: severity 是 JS/Python 豁免对齐的单一来源，必须一起同步。
+            "severity": item.get("severity", "block"),
+        }
         for item in NODE_DLP_PATTERNS
     ]
     output = Path(args.output)

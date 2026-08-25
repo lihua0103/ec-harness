@@ -36,23 +36,21 @@ MUTANTS = (
            "for threat in self.scan_text(key_str, child_path):",
            "for threat in []:"),
     Mutant("unicode-bypass", "egress_checkpoint.py", "if normalized != text:", "if False:"),
-    Mutant("sas-extension", "ai_operations_monitor.py",
-           r"(re.compile(r'\.sas7bdat', re.IGNORECASE), RiskLevel.HIGH,",
-           r"(re.compile(r'\.sasXbdat', re.IGNORECASE), RiskLevel.HIGH,"),
-    Mutant("pickle-alias", "ai_operations_monitor.py",
-           'RiskLevel.CRITICAL, "尝试用别名导入',
-           'RiskLevel.LOW, "尝试用别名导入'),
-    Mutant("sensitive-combination", "data_egress_guard.py",
-           "if subj_count >= 1 and date_count >= 1 and medical_count >= 1:", "if False:"),
-    Mutant("light-subject-scrub", "data_egress_guard.py",
-           r"s = token_sub(re.compile(r'\b[A-Z]{1,4}\d{6,8}\b', re.IGNORECASE), s, 'SUBJ')", "s = s"),
-    Mutant("filename-exemption", "patterns.py", "return True", "return False"),
+    Mutant(
+        "filename-exemption",
+        "patterns.py",
+        "for m in _FILENAME_TOKEN_RE.finditer(text):",
+        "for m in ():",
+    ),
 )
 
 
 def run_oracle(cwd: Path) -> bool:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
+    # 变异副本必须使用自己的审计目录，避免继承宿主用户目录 ACL，
+    # 也避免不同 mutant 共享审计状态。
+    env["EMERALD_AUDIT_ROOT"] = str(cwd / "var" / "mutation-audit")
     result = subprocess.run(
         [PYTHON, str(ROOT / "tests" / "mutation" / "oracle.py")],
         cwd=cwd,

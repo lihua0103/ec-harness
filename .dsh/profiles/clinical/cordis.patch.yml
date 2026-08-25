@@ -1,4 +1,2 @@
-# Your patch layer for this dsh profile, applied after every bundle layer:
-# a top-level YAML array of loader patch entries (id-targeted config
-# overrides, disables, and insert lists; `!!js` expressions allowed).
+# 此 profile 仅运行主工作台，监听端口为 3080。
 []

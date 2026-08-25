@@ -9,10 +9,12 @@
 3. 零容忍：检测到数据=中断请求，不是warning
 4. 完整留痕：每次拦截记录到独立审计文件
 5. 性能优先：正常请求快速通过（<5ms），只对疑似内容深度扫描
+6. 全局开关：DATA_PROTECTION_ENABLED=0 关闭所有拦截（用于测试/非敏感环境）
 """
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -22,9 +24,8 @@ from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime
 from dataclasses import dataclass
 
-from security.audit_log import write_audit_record
+from security.audit_log import harden_permissions, write_audit_record
 from security.patterns import strip_uuids
-from security.tokenizer import is_token
 from security.patterns import (
     CDISC_CORE_FIELDS,
     CLINICAL_TERMS,
@@ -41,6 +42,70 @@ from security.patterns import (
     is_safe_filename_date,
     stable_hash,
 )
+
+# ============================================================================
+# P0-1 Fix: clinicalGuard HMAC 签名验证
+# ============================================================================
+_EMERALD_SIGNING_SALT = os.environ.get("EMERALD_SIGNING_SALT", "").encode("utf-8")
+
+
+def _sign_clinical_guard(marker: str, critical_fields: dict) -> str:
+    """为 clinicalGuard 收据生成 HMAC 签名。
+
+    签名内容 = marker + 按字母序序列化的关键字段 JSON
+    防伪造：攻击者无法在不掌握 EMERALD_SIGNING_SALT 的情况下伪造有效签名。
+    """
+    if not _EMERALD_SIGNING_SALT:
+        return ""
+    canonical = json.dumps(critical_fields, sort_keys=True, ensure_ascii=False)
+    raw = f"{marker}:{canonical}".encode("utf-8")
+    return hmac.new(_EMERALD_SIGNING_SALT, raw, hashlib.sha256).hexdigest()[:16]
+
+
+def _verify_clinical_guard_signature(value: dict) -> bool:
+    """递归验证 clinicalGuard 字段的 HMAC 签名。
+
+    防止伪造攻击：攻击者可能在 payload 中注入伪造的 clinicalGuard 结构。
+    验证策略：
+    1. clinicalGuard 字段本身必须是字符串标记（不能是嵌套 dict/list）
+    2. 必须存在有效的 signature 字段
+    3. signature 必须是 marker + critical_fields 的 HMAC
+    4. 不允许在 clinicalGuard 结构中混入未知字段
+    """
+    marker = value.get("clinicalGuard") or value.get("clinical_guard")
+    if not isinstance(marker, str) or not marker:
+        return False
+
+    sig = value.get("signature") or value.get("sig")
+    if not isinstance(sig, str) or len(sig) != 16:
+        return False
+
+    critical_fields = {
+        "listingId": value.get("listingId") or value.get("listing_id"),
+        "schemaFingerprint": value.get("schemaFingerprint") or value.get("schema_fingerprint"),
+        "stage": value.get("stage"),
+        "status": value.get("status"),
+        "dataClass": value.get("dataClass") or value.get("data_class"),
+    }
+    expected_sig = _sign_clinical_guard(marker, {k: v for k, v in critical_fields.items() if v is not None})
+    if not hmac.compare_digest(sig, expected_sig):
+        return False
+
+    forbidden_nested = {"data", "records", "rows", "values", "content", "payload", "body"}
+    if any(k for k in value.keys() if k.lower() in forbidden_nested):
+        return False
+
+    return True
+
+# ============================================================================
+# 全局开关：DATA_INTERCEPTION_ENABLED=0 关闭所有数据扫描与拦截。
+# ============================================================================
+def _egress_enabled(context: Dict[str, Any] | None = None) -> bool:
+    """请求态开关优先，环境变量仅作为无上下文调用的部署默认值。"""
+    value = (context or {}).get("dataInterceptionEnabled")
+    if isinstance(value, bool):
+        return value
+    return os.environ.get("DATA_INTERCEPTION_ENABLED", "1") != "0"
 
 
 # ============================================================================
@@ -66,6 +131,12 @@ _DATA_VALUE_RES = [
 _SPEC_TERM_RE = re.compile(r'^[A-Za-z][A-Za-z()\-+/&~ ]*$')
 _SPEC_LABEL_RE = re.compile(r'^[A-Za-z]{1,12}(?:\([A-Za-z]?\d{0,3}\))?[+\-]?$')
 _DAY_LABEL_RE = re.compile(r'^[A-Za-z]\d{1,3}$')
+
+# 代码模板占位符：f-string/str.format 的 {}、%-格式化、shell/env 的 ${}。
+# 用于把"构造表达式"与"字面数据值"分开（见 _looks_like_data_value）。
+_TEMPLATE_PLACEHOLDER_RE = re.compile(
+    r'\{[^{}]*\}|%\(?[A-Za-z_]\w*\)?[sdrfgex]|\$\{?\w+\}?'
+)
 
 # GenerateOptions 已知字段白名单 (FIX-2 / FR-12-05)：
 # 审计 payload_fields 只呈现白名单内的字段名，未知字段仅记录截断哈希。
@@ -109,6 +180,89 @@ _METADATA_KEY_FIELDS = frozenset({
     "uuid", "traceid", "trace_id", "spanid", "span_id", "seq", "nonce",
     "timestamp", "createdat", "created_at", "updatedat", "updated_at",
 })
+
+# 2026-08-23 FIX: 临床防护标记字段
+# 这些字段标识内容已经过安全验证，不需要再次扫描
+_CLINICAL_GUARD_FIELDS = frozenset({
+    "clinicalguard", "clinical_guard", "trustedcontroltoken", "trusted_control_token",
+    "trusteddocumenttoken", "trusted_document_token", "dataclass", "data_class",
+    "schemafingerprint", "schema_fingerprint", "auditid", "audit_id",
+})
+
+# 受控 listing 工具产生的结构化收据。收据是控制面元数据，不是临床记录，
+# 但只有同时满足完整形状时才可以跳过递归 DLP；单独出现 marker 不构成信任。
+_TRUSTED_LISTING_MARKERS = frozenset({
+    "CLINICAL_LISTING_INSPECTION",
+    "CLINICAL_LISTING_PLAN_RECEIPT",
+    # execute 收据经 tool-result-guard.js 的 projectExecuteReceipt 白名单投影后
+    # 才会带上这个 marker 与 METADATA_ONLY。投影是"未列出即不存在"，产物内容、
+    # payload、rows 已在 Node 侧被丢弃，出域侧不必再扫一遍产物文件名与行列统计。
+    "CLINICAL_LISTING_RECEIPT",
+})
+
+
+def _is_trusted_listing_receipt(value: Any) -> bool:
+    """验证 listing 收据的安全形状，避免把 marker 当作通用白名单。
+
+    P0-1 Fix: 添加 HMAC 签名验证，防止伪造攻击。
+    - 签名字段必须是有效的 HMAC-16
+    - 不允许在收据中混入 data/records/rows 等数据字段
+
+    这份形状校验与 src/tool-result-guard.js 的 isTrustedListingReceipt 是两道
+    独立防线，各自维护一份字段闭集。任一侧漏字段都会让真实收据失信：Node 侧失信
+    收据被 token 化，出域侧失信则收据被递归 DLP 扫描后 BLOCK 或降级——两种结果
+    都让 harness 读不到 spec 与 schema。改生产者字段时必须同步两侧，
+    test_listing_receipt_keys_stay_within_whitelists 会守住这条约束。
+    """
+    if not isinstance(value, dict):
+        return False
+    marker = value.get("clinicalGuard") or value.get("clinical_guard")
+    if marker not in _TRUSTED_LISTING_MARKERS:
+        return False
+    if value.get("dataClass") != "METADATA_ONLY":
+        return False
+    fingerprint = value.get("schemaFingerprint") or value.get("schema_fingerprint")
+    if not isinstance(fingerprint, str) or not fingerprint:
+        return False
+
+    if not _verify_clinical_guard_signature(value):
+        return False
+
+    schema = value.get("schema")
+    if marker == "CLINICAL_LISTING_INSPECTION":
+        if value.get("stage") != "inspect" or not isinstance(schema, dict) or any(
+            not isinstance(dataset, str)
+            or not isinstance(columns, list)
+            or any(not isinstance(column, str) for column in columns)
+            for dataset, columns in schema.items()
+        ):
+            return False
+    elif marker == "CLINICAL_LISTING_RECEIPT":
+        if value.get("stage") not in {"execute", "publish"} or value.get("status") not in {
+            "completed", "failed", "rejected"
+        }:
+            return False
+    elif marker == "CLINICAL_LISTING_CODE_RECEIPT":
+        if value.get("stage") != "run" or value.get("status") not in {
+            "ok", "rejected", "error"
+        }:
+            return False
+    elif value.get("stage") != "validate" or value.get("status") not in {
+        "validated", "invalid", "rejected"
+    }:
+        return False
+    allowed = {
+        "clinicalGuard", "clinical_guard", "status", "stage", "project",
+        "scenario", "inferredScenario", "scenarioConfidence", "scenarioCandidates", "supportData",
+        "documents", "datasets", "schema", "schemaFingerprint",
+        "schema_fingerprint", "missing", "warnings", "dataClass",
+        "validation", "plan", "result", "audit_id", "auditId", "outputCount",
+        "artifact", "artifacts", "note",
+        "code", "path", "message",
+        "outputs", "datasetsTouched", "errorType",
+        "signature", "sig",
+    }
+    return set(value).issubset(allowed)
 
 
 # CDISC 字段组合正则，模块级预编译（FIX-10 / NFR-1: 正常请求 <10ms，含冷启动）。
@@ -183,8 +337,22 @@ class ClinicalDataRecognizer:
         return "[KEY:" + stable_hash(key, length=8) + "]"
 
     def scan_text(self, text: str, location: str = "") -> List[EgressThreat]:
-        """扫描文本，返回所有检测到的威胁"""
+        """扫描文本，返回所有检测到的威胁。
+
+        P1 改进：使用上下文感知扫描。
+        - 元数据上下文（路径、列名、Sheet名）→ 大幅放宽检测
+        - 单元格值上下文 → 完整 DLP 检测
+        """
         if not text or not isinstance(text, str):
+            return []
+
+        # P1 精准检测：上下文感知扫描
+        # 先判断文本是否处于"元数据"上下文，如果是则大幅放宽
+        from security.patterns import is_metadata_context
+
+        # 只有可证明的路径、文件名、列名和技术标识才是元数据。短文本恰恰是
+        # 受试者号、日期和医学编码的常见载体，不能仅凭长度提前放行。
+        if is_metadata_context(text):
             return []
 
         # UUID（消息/调用 id 等技术标识）统一剥离后再扫：E2E-4 口径——技术
@@ -340,6 +508,10 @@ class ClinicalDataRecognizer:
         threats = []
 
         if isinstance(payload, dict):
+            # 每次递归入口都验证收据。这样 inspection/validation 等嵌套收据
+            # 在历史重扫时仍保持控制面语义；未通过完整验证的伪造对象照常扫描。
+            if _is_trusted_listing_receipt(payload):
+                return threats
             for key, value in payload.items():
                 key_str = str(key)
                 key_lower = key_str.lower()
@@ -442,11 +614,6 @@ class ClinicalDataRecognizer:
         if not text or len(text) > 100:
             return False
 
-        # 已脱敏 token（[SUBJ:a3f9c2b1]）是脱敏产物，不是数据值。不排除它，
-        # "字段名 + token" 会被判成"CDISC 字段 + 数据值"而阻断，脱敏保底失效。
-        if is_token(text):
-            return False
-
         # 真实缺陷修复（审计 20260820_150945-85697ec72e）：PDF 规格文档的访视
         # 窗口术语 "Visit Date(D1)"、"Visit Date- Screening" 被判为数据行，
         # 13 次 BLOCK + 复合威胁把整个请求拦死。用户规则明确 spec/方案文档可读。
@@ -467,6 +634,26 @@ class ClinicalDataRecognizer:
         # 代码变量注解 (DSCOHORT@5218。CDISC 导出的数据值形态从不包含 @
         # （纯数字/日期/短字母数字 ID），含 @ 一律是代码/注解标识。
         if '@' in stripped:
+            return False
+
+        # 2026-08-21 修复：纯英文字母短语（如 "SUBJECT"、"VISIT"、"STATUS"）
+        # 在 prompts/system 中被误判为 CDISC 字段+数据值。数据值必然含数字：
+        # 编号（A1234567）、日期（2026-01-01）、测量值（37.2）。纯字母短语
+        # 是提示词模板/SQL 别名/CDISC 字段名，不是临床数据。
+        if stripped.isalpha():
+            return False
+
+        # 代码符号排除（2026-08-21 RBQM_test 实测：真实执行器脚本被拦死）：
+        # 生成器代码里的 `USUBJID=f'{STUDYID}-{site}-{i:03d}'`（构造表达式）与
+        # `USUBJID=u` / `USUBJID=x['USUBJID']`（变量引用）承载的是符号而非
+        # 患者级字面值。旧判据只看"短且含数字"，把格式说明符 03d 当数据值 →
+        # BLOCK，agent 写不出任何执行器脚本。
+        # 纯格式判据（非关键词豁免）：剥掉 f-string/format/shell 占位符后若不再
+        # 含任何字面数字，该串是代码符号。真实数据不受影响——字面 USUBJID
+        # `010-001-1001`、日期 `2026-03-18` 无占位符，剥离后数字仍在；混合形态
+        # f'{STUDY}-001-1001' 的字面尾段 -001-1001 保留，同样判数据值。
+        without_placeholders = _TEMPLATE_PLACEHOLDER_RE.sub('', stripped)
+        if not any(c.isdigit() for c in without_placeholders):
             return False
 
         # 短且含数字/日期 → 疑似数据
@@ -531,13 +718,15 @@ class EgressCheckpoint:
 
     def __init__(self, audit_dir: str = None):
         self.recognizer = ClinicalDataRecognizer()
-        # FIX-12 (FR-16-07): 审计 root 可经 EMERALD_AUDIT_ROOT 配置；
-        # 默认写入用户主目录（审计数据不属于插件包/仓库的一部分）。
+        # FIX-12 (FR-16-07): 审计 root 可经 EMERALD_AUDIT_ROOT 配置。
+        # 默认目录位于系统项目内 var/，禁止落用户主目录，
+        # 主目录在 C 盘，系统不往 C 盘写任何数据）。
+        _pkg_root = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
         self.audit_dir = audit_dir or os.environ.get("EMERALD_AUDIT_ROOT") or os.path.join(
-            os.path.expanduser("~"), ".dsh-guard", "var", "egress_audit"
+            _pkg_root, "var", "egress_audit"
         )
         os.makedirs(self.audit_dir, exist_ok=True)
-        os.chmod(self.audit_dir, 0o700)
+        harden_permissions(self.audit_dir, 0o700)
 
     def check(self, payload: Any, context: Dict[str, Any] = None) -> Dict[str, Any]:
         """检查payload是否包含临床数据
@@ -549,6 +738,14 @@ class EgressCheckpoint:
         Raises:
             EgressViolation: 检测到临床数据，拦截请求
         """
+        # 数据拦截关闭时完全旁路，不扫描也不记录检测审计。
+        if not _egress_enabled(context):
+            try:
+                evidence = self._request_evidence(payload)
+            except Exception:
+                evidence = {}
+            return {"audit_id": "disabled", **evidence, "egress_disabled": True}
+
         # 1. 扫描威胁
         threats = self.recognizer.scan_structured(payload, path="payload")
 
@@ -564,15 +761,7 @@ class EgressCheckpoint:
         if composite:
             threats.append(composite)
 
-        # ST-P1-5: 判定改白名单式 fail-closed——只有明确的非阻断模式(shadow/disabled)
-        # 才观察不阻断；其余一切(含拼写错误/未知值/None)一律按 enforce 阻断，
-        # 绝不因非精确 mode 值静默放行。
-        mode = str((context or {}).get("mode", "enforce")).lower()
-        non_blocking = mode in ("shadow", "disabled")
-        blocking_threats = (
-            [] if non_blocking
-            else [t for t in threats if t.recommendation == "BLOCK"]
-        )
+        blocking_threats = [t for t in threats if t.recommendation == "BLOCK"]
 
         # 4. 记录审计（即使没拦截也记录，用于调优）
         # E2E-2: 指纹计算可能抛异常（如载荷含孤立代理无法编码），审计落盘必须
@@ -717,6 +906,42 @@ def get_egress_checkpoint() -> EgressCheckpoint:
                 _GLOBAL_CHECKPOINT = EgressCheckpoint()
     return _GLOBAL_CHECKPOINT
 
+
+def check_egress_v2(payload: Any, context: Dict[str, Any] = None) -> Dict[str, Any]:
+    """检查完整待发送载荷；只允许或阻断，永不改写后继续发送。
+
+    开启时同时检查受保护来源标记与 payload 中的真实临床 data。关闭时完全
+    旁路，不扫描、不投影、不写检测审计。Harness 引导和本地 Listing 工作流
+    不由本函数控制。
+    """
+    if not _egress_enabled(context):
+        return {"audit_id": "disabled", "egress_disabled": True}
+
+    checkpoint = get_egress_checkpoint()
+    protected_source = str((context or {}).get("protectedDataSource", "")).casefold()
+    threats = checkpoint.recognizer.scan_structured(payload, path="payload")
+    if protected_source in {"sas", "external_excel"}:
+        threats.append(EgressThreat(
+            threat_type="protected_data_source", confidence=1.0,
+            evidence="受保护数据来源", location="payload",
+            pattern_name="来源边界", recommendation="BLOCK"))
+    threats = _dedupe_threats(threats)
+    composite = checkpoint.recognizer.detect_composite_threat(threats)
+    if composite:
+        threats.append(composite)
+    blocking = [t for t in threats if t.recommendation == "BLOCK"]
+    try:
+        evidence = checkpoint._request_evidence(payload)
+    except Exception as exc:
+        evidence = {"fingerprint_error": type(exc).__name__}
+    audit_id = checkpoint._log_audit(
+        threats, blocking, context, evidence)
+    if blocking:
+        raise EgressViolation(blocking, audit_id)
+    return {"audit_id": audit_id, **evidence}
+
+
+# 保留 v1 check_egress 作为 EMERALD_EGRESS_V2=0 的回退路径。
 
 def check_egress(payload: Any, context: Dict[str, Any] = None) -> Dict[str, Any]:
     """便捷函数：检查出境内容

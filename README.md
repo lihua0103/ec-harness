@@ -1,6 +1,6 @@
 # Emerald Clinical Data Guard
 
-这是面向本地 DeepSeek Harness（DSH）/ Cordis 的临床试验数据安全项目。源码、DSH runtime、独立 profile、Python 虚拟环境、npm/pnpm 缓存和运行数据全部位于 `G:\home\dsh-guard`；不修改 DSH 原有插件，不修改 `node_modules` 源码，也不启动外置 HTTP 代理或新增插件监听端口。
+这是面向本地 DeepSeek Harness（DSH）/ Cordis 的临床试验数据安全项目。源码、DSH runtime、独立 profile、Python 虚拟环境、npm/pnpm 缓存和运行数据全部位于项目根目录；不修改 DSH 原有插件，不修改 `node_modules` 源码，也不启动外置 HTTP 代理或新增插件监听端口。
 
 当前唯一交付边界：
 
@@ -25,11 +25,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
 
 脚本会：
 
-1. 使用 `DSH_HOME=G:\home\dsh-guard\.dsh`，禁止落到用户主目录。
+1. 使用项目根目录下的 `.dsh` 作为 `DSH_HOME`，禁止落到用户主目录。
 2. 按锁文件安装项目内 DSH runtime。
-3. 基于系统 Python 创建 `.venv` 并安装 `openpyxl`。
+3. 基于系统 Python 创建 `.venv` 并按根目录 `requirements.txt` 安装 Python 依赖。
 4. 使用系统或自动安装的 pnpm 按相对路径刷新 `clinical` profile。
 5. 启动 Web 工作台并自动打开 `http://127.0.0.1:3080`。
+
+本地工作台只监听 `http://127.0.0.1:3080`，不启动额外的观察或调试端口。
 
 只做环境和 profile 校验、不启动服务时：
 
@@ -40,20 +42,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 -Check
 发布包位于：
 
 ```text
-dsh-clinical-data-guard/var/emerald-clinical-data-guard-1.0.5.tgz
+dsh-clinical-data-guard/emerald-clinical-data-guard-1.0.7.tgz
 ```
 
-SHA-256: `1D9A814743929933DDAB03EC38C83A8122CE802CD95D339C8E7095B4DB9F4A5B`
+SHA-256: `310FA292D2999C7D162D1F4C8D27085E4DF83F9A3F424F8BA0D8A2B10F2BAE67`
 
 ## 验证
 
 ```powershell
-cd G:\home\dsh-guard\dsh-clinical-data-guard
+# 从项目根目录执行
+Set-Location .\dsh-clinical-data-guard
 $env:PYTHONIOENCODING='utf-8'
 $env:PYTHONDONTWRITEBYTECODE='1'
 python tests\run_all.py
 python tests\mutation\run_mutation.py
-G:\home\dsh-guard\.venv\Scripts\python.exe G:\home\dsh-guard\tests\test_project_contract.py
+& ..\.venv\Scripts\python.exe ..\tests\test_project_contract.py
 ```
 
 详细架构、验收矩阵和仓库纪律见 [EMERALD_CLINICAL_MASTER_SPEC.md](docs/EMERALD_CLINICAL_MASTER_SPEC.md) 与 [EMERALD_DEV_PLAN_v2_20260818.md](docs/EMERALD_DEV_PLAN_v2_20260818.md)。

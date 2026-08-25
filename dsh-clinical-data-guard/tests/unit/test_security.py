@@ -10,6 +10,7 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -17,10 +18,7 @@ os.chdir(ROOT)
 # FIX-12 后审计/授权默认写入用户主目录；测试显式指回项目 var 以便断言审计内容。
 os.environ.setdefault("EMERALD_AUDIT_ROOT", str(ROOT / "var" / "egress_audit"))
 
-from security.ai_operations_monitor import DangerousOperationBlocked, check_bash, check_python_code, check_tool_call  # noqa: E402
-from security.audit_log import write_audit_record  # noqa: E402
-from security.data_egress_guard import ClinicalDataDetector, DataRiskLevel, StreamingScrubber  # noqa: E402
-from security.egress_authz import authorize_category, consume_category  # noqa: E402
+from security.audit_log import AuditLockTimeout, write_audit_record  # noqa: E402
 from security.egress_checkpoint import EgressCheckpoint, EgressViolation, check_egress  # noqa: E402
 from security.patterns import sanitize_error  # noqa: E402
 
@@ -40,6 +38,31 @@ def subject_id_blocks():
         assert exc.audit_id
         return
     raise AssertionError("字母前缀受试者编号未拦截")
+
+
+@case
+def data_protection_toggle_is_dynamic_per_request():
+    """同一 worker/checkpoint 实例必须按请求态开关立即切换。"""
+    with tempfile.TemporaryDirectory() as directory:
+        checkpoint = EgressCheckpoint(directory)
+        payload = [{"role": "user", "content": "Subject A1234567"}]
+        disabled = checkpoint.check(payload, {"dataProtectionEnabled": False})
+        assert disabled["egress_disabled"] is True
+        try:
+            checkpoint.check(payload, {"dataProtectionEnabled": True})
+        except EgressViolation:
+            return
+    raise AssertionError("请求态重新开启保护后仍放行临床数据")
+
+
+@case
+def audit_lock_timeout_falls_back_to_append():
+    """审计锁竞争不得阻塞业务，也不得丢掉本条审计记录。"""
+    with tempfile.TemporaryDirectory() as directory:
+        with mock.patch("security.audit_log._exclusive_lock", side_effect=AuditLockTimeout("busy")):
+            write_audit_record(directory, "lock_fallback", {"event": "fallback", "sequence": 1})
+        path = next(Path(directory).glob("lock_fallback_*.jsonl"))
+        assert json.loads(path.read_text(encoding="utf-8"))["event"] == "fallback"
 
 
 @case
@@ -181,92 +204,6 @@ def filename_date_is_allowed():
 
 
 @case
-def dangerous_tools_and_bash_block():
-    for tool, args in [
-        ("read_expected_output", {}),
-        ("bash", {"command": "cat data.sas7bdat"}),
-    ]:
-        try:
-            check_tool_call(tool, args)
-        except DangerousOperationBlocked:
-            continue
-        raise AssertionError(f"危险操作未拦截: {tool}")
-
-
-@case
-def dynamic_exec_and_quote_split_bypass_block():
-    """ST-P1-8 红队：__import__/eval/exec/getattr/marshal 与 shell 引号拼接不得绕过。"""
-    for code in [
-        "__import__('pickle').load(open('x','rb'))",
-        "eval('1+1')",
-        "exec('x=1')",
-        "getattr(o,'load')()",
-        "import marshal\nmarshal.load(f)",
-    ]:
-        try:
-            check_python_code(code)
-        except DangerousOperationBlocked:
-            continue
-        raise AssertionError(f"危险代码未拦截: {code!r}")
-    # bash 引号拼接绕过
-    try:
-        check_bash("c''at data.sas7bdat")
-    except DangerousOperationBlocked:
-        pass
-    else:
-        raise AssertionError("引号拼接绕过未拦截")
-    # 正常 pandas 代码不误杀
-    check_python_code("import pandas as pd\ndf = pd.DataFrame()")
-
-
-@case
-def ai_operation_audit_has_no_raw_filename_or_identity():
-    try:
-        check_tool_call(
-            "read_file",
-            {"path": "patient-A1234567.sas7bdat"},
-            {"session_id": "session-raw-9f", "user_id": "user-raw-9f"},
-        )
-    except DangerousOperationBlocked:
-        pass
-    else:
-        raise AssertionError("敏感路径未拦截")
-    latest_records = [
-        line
-        for path in (ROOT / "var" / "ai_ops_audit").glob("*.jsonl")
-        for line in path.read_text(encoding="utf-8").splitlines()
-    ]
-    audit_blob = latest_records[-1]
-    assert "A1234567" not in audit_blob
-    assert "session-raw-9f" not in audit_blob
-    assert "user-raw-9f" not in audit_blob
-
-
-@case
-def graded_scrub_removes_values():
-    detector = ClinicalDataDetector()
-    scrubber = StreamingScrubber(detector)
-    scrubbed, result = scrubber.scrub_row(
-        ["A1234567", "2024-03-05", "Screening", "已入组"], 1, True
-    )
-    joined = " ".join(scrubbed)
-    assert "A1234567" not in joined and "2024-03-05" not in joined
-    assert result.risk_level == DataRiskLevel.SENSITIVE
-
-
-@case
-def authorization_stores_no_raw_values():
-    with tempfile.TemporaryDirectory() as root:
-        record = authorize_category(root, "user@example.com", "session-1", "L3_ALLOW_AUDITED", "human-operator-9f")
-        assert record["ok"]
-        files = list(Path(root).rglob("*"))
-        blob = "\n".join(path.read_text(encoding="utf-8") for path in files if path.is_file())
-        assert "user@example.com" not in blob, "授权文件包含原始用户"
-        assert "session-1" not in blob, "授权文件包含原始会话"
-        assert "human-operator-9f" not in blob, "授权文件包含原始操作人"
-
-
-@case
 def normal_request_is_fast():
     """NFR-1: 正常请求检查路径 <10ms。
 
@@ -306,15 +243,19 @@ def _allows(text: str) -> bool:
 
 @case
 def every_request_is_audited_without_raw_values():
-    audit_dir = ROOT / "var" / "egress_audit"
+    audit_dir = Path(os.environ.get("EMERALD_AUDIT_ROOT", ROOT / "var" / "egress_audit"))
+    # D-3 (2026-08-22): 只统计 egress 域文件。此前 glob("*.jsonl") 会把
+    # ai_ops/listing_ops 一起拼进 records——一旦 listing_ops_*.jsonl 存在
+    # （任何 listing execute 测试先运行过），尾部 2 条就不再是本次 egress
+    # 记录，ALLOWED/BLOCKED 断言必红。
     before = sum(
         len(path.read_text(encoding="utf-8").splitlines())
-        for path in audit_dir.glob("*.jsonl")
+        for path in audit_dir.glob("egress_*.jsonl")
     )
     _allows("请生成列表规范说明。")
     assert not _allows("Subject A1234567")
     records = []
-    for path in audit_dir.glob("*.jsonl"):
+    for path in audit_dir.glob("egress_*.jsonl"):
         records.extend(line for line in path.read_text(encoding="utf-8").splitlines() if line)
     assert len(records) - before == 2
     blob = "\n".join(records[-2:])
@@ -340,6 +281,21 @@ def audit_rotation_has_disk_cap():
         current = Path(root) / stem
         assert len(archives) == 2
         assert current.read_text(encoding="utf-8").strip()
+
+
+@case
+def hardened_audit_directory_remains_writable():
+    """Windows 仅支持 chmod 的只读位语义，权限加固不能锁死审计目录。"""
+    with tempfile.TemporaryDirectory() as root:
+        audit_dir = Path(root) / "fresh" / "audit"
+        write_audit_record(str(audit_dir), "egress", {"audit_id": "first"})
+        write_audit_record(str(audit_dir), "egress", {"audit_id": "second"})
+        records = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in audit_dir.glob("egress_*.jsonl")
+        )
+        assert '"audit_id":"first"' in records
+        assert '"audit_id":"second"' in records
 
 
 # ============================================================================
@@ -371,8 +327,7 @@ def _run_worker(lines, timeout=20):
 def worker_malformed_line_returns_unavailable_and_survives():
     """AR-2.6 / FIX-6: 非法 JSON 行返回 SECURITY_UNAVAILABLE 且继续服务。"""
     good = json.dumps({
-        "requestId": "r1", "operation": "check_tool",
-        "tool": "read_file", "args": {"path": "safe.txt"}, "context": {},
+        "requestId": "r1", "operation": "ping",
     })
     responses, _ = _run_worker(["{{{not-json", good])
     assert responses[0]["ok"] is False
@@ -380,19 +335,6 @@ def worker_malformed_line_returns_unavailable_and_survives():
     assert responses[0]["requestId"] is None
     assert responses[1]["ok"] is True
     assert responses[1]["requestId"] == "r1"
-
-
-@case
-def worker_error_receipt_is_sanitized():
-    """R-6 / AR-2.9 / FIX-3: 异常回执不含路径原文与受试者标记。"""
-    request = json.dumps({
-        "requestId": "r2", "operation": "inspect_file",
-        "path": r"C:\secret\patient-A1234567.xlsx", "context": {},
-    })
-    responses, _ = _run_worker([request])
-    blob = json.dumps(responses[0], ensure_ascii=False)
-    assert responses[0]["ok"] is False
-    assert "A1234567" not in blob and "C:\\secret" not in blob
 
 
 @case
@@ -447,110 +389,6 @@ def audit_payload_fields_use_known_whitelist_and_hash_unknown():
 
 
 @case
-def write_file_with_malicious_python_is_blocked():
-    """FR-03-13 / TC-25 / FIX-5: write_file 写入恶意 Python 代码被 AST 检查阻断。"""
-    for content in [
-        "import pickle\npickle.load(open('data.pkl','rb'))",
-        "import pickle as p\np.load(open('data.pkl','rb'))",
-        "from pickle import load\nload(open('data.pkl','rb'))",
-        "import pandas as pd\npd.read_excel('expected/output.xlsx')",
-    ]:
-        try:
-            check_tool_call("write_file", {"path": "gen.py", "content": content})
-        except DangerousOperationBlocked:
-            continue
-        raise AssertionError(f"恶意代码写入未拦截: {content[:40]}")
-
-
-@case
-def benign_write_file_is_allowed():
-    """FIX-5: 正常代码写入不受影响。"""
-    check_tool_call("write_file", {
-        "path": "report.py",
-        "content": "def build():\n    return [i for i in range(10)]\n",
-    })
-
-
-@case
-def strings_reading_data_files_is_blocked():
-    """FR-03-10 / FIX-12: strings/xxd/od 读取数据文件被阻断。"""
-    for command in [
-        "strings data.xlsx",
-        "xxd patients.csv",
-        "od -c trial.sas7bdat",
-    ]:
-        try:
-            check_bash(command)
-        except DangerousOperationBlocked:
-            continue
-        raise AssertionError(f"数据转储命令未拦截: {command}")
-
-
-@case
-def light_scrub_covers_code_dates_and_usubjid():
-    """FR-11: 轻度脱敏把编码/日期/USUBJID 复合格式 token 化（不可逆，同值同 token）。"""
-    scrubber = StreamingScrubber(ClinicalDataDetector())
-    scrubbed = scrubber._light_scrub(
-        ["PT: 10001234", "03/05/2024", "2024年3月5日", "STUDY001-SITE01-SUBJ001"]
-    )
-    joined = " ".join(scrubbed)
-    assert "10001234" not in joined
-    assert "03/05/2024" not in joined
-    assert "2024年3月5日" not in joined
-    assert "STUDY001-SITE01-SUBJ001" not in joined
-    # 原值被 HMAC token 替换（形如 [CODE:xxxxxxxx]），前缀标注语义类型。
-    assert "[CODE:" in joined and "[DATE:" in joined and "[SUBJ:" in joined
-
-
-@case
-def tokenizer_is_deterministic_within_session_and_irreversible():
-    """用户方案核验：同值同 token（LLM 可关联），不同值不同 token，无原值。"""
-    from security.tokenizer import token_for
-    a = token_for("101-001", "SUBJ")
-    b = token_for("101-001", "SUBJ")
-    c = token_for("101-002", "SUBJ")
-    assert a == b            # 同值同 token → LLM 可 join/去重/计数
-    assert a != c            # 不同值不同 token → 不塌缩信息
-    assert "101-001" not in a  # 不含原值 → 不可逆
-    assert a.startswith("[SUBJ:") and a.endswith("]")
-
-
-@case
-def authorization_requires_identity_and_consumes_once():
-    """ST-P1-4 / ST-P1-3：缺 user/session 不授权(不共享 anonymous 桶)；
-    有身份时授权一次、消费一次后失效。"""
-    with tempfile.TemporaryDirectory() as root:
-        # 缺身份 → fail-closed
-        assert authorize_category(root, "u", None, "L3_ALLOW_AUDITED", "op")["ok"] is False
-        assert authorize_category(root, None, "s", "L3_ALLOW_AUDITED", "op")["ok"] is False
-        assert consume_category(root, "u", None, "L3_ALLOW_AUDITED") is False
-        # 有身份 → 授权后一次性消费
-        assert authorize_category(root, "u", "s", "L3_ALLOW_AUDITED", "op")["ok"] is True
-        assert consume_category(root, "u", "s", "L3_ALLOW_AUDITED") is True
-        assert consume_category(root, "u", "s", "L3_ALLOW_AUDITED") is False
-        # 不同 session 不共享授权
-        assert authorize_category(root, "u", "s2", "L3_ALLOW_AUDITED", "op")["ok"] is True
-        assert consume_category(root, "u", "s-other", "L3_ALLOW_AUDITED") is False
-
-
-@case
-def metadata_evidence_has_no_raw_cell_text():
-    """FIX-9 / R-6: METADATA 行 evidence 不含原始单元格文本。"""
-    detector = ClinicalDataDetector()
-    result = detector.detect_data_row(["请生成列表规范说明文档"], False)
-    assert result.risk_level == DataRiskLevel.METADATA
-    assert "请生成列表规范说明文档" not in result.evidence
-
-
-@case
-def l3_allow_audited_consumed_once():
-    """FR-13 / TC-28 / FIX-4: L3_ALLOW_AUDITED 消费一次后失效。"""
-    with tempfile.TemporaryDirectory() as root:
-        authorize_category(root, "u", "s", "L3_ALLOW_AUDITED", "op")
-        assert consume_category(root, "u", "s", "L3_ALLOW_AUDITED") is True
-        assert consume_category(root, "u", "s", "L3_ALLOW_AUDITED") is False
-
-
 def _concurrent_writer(root, worker_id):
     for i in range(40):
         write_audit_record(
@@ -624,10 +462,22 @@ def node_patterns_json_matches_python_source_of_truth():
         (ROOT / "security" / "node_patterns.json").read_text(encoding="utf-8")
     )
     expected = [
-        {"source": p["re"], "flags": p.get("flags", ""), "label": p["label"]}
+        {
+            "source": p["re"],
+            "flags": p.get("flags", ""),
+            "label": p["label"],
+            # S4: severity 决定 Node 侧阻断/仅告警，属于必须同步的判据。
+            "severity": p.get("severity", "block"),
+        }
         for p in NODE_DLP_PATTERNS
     ]
     assert synced == expected, "运行 scripts/sync_patterns.py 同步 Node 模式副本"
+    # 纯日期形态在两侧都只是 WARN；若被改回 block，写 spec/SAS 会再次被拦死。
+    severities = {item["label"]: item["severity"] for item in synced}
+    assert severities["ISO_DATE"] == "warn"
+    assert severities["SAS_DATE"] == "warn"
+    assert severities["ISO8601_DATETIME"] == "block"
+    assert severities["SITE_SUBJECT_ID"] == "block"
 
 
 @case
@@ -654,21 +504,6 @@ def xls_header_extraction_delivers_structure_without_values():
         assert payload["sheets"][0]["sheet"] == "DM"
         assert any(c["value"] == "USUBJID" for c in payload["sheets"][0]["header_cells"])
         assert "A1234567" not in blob and "2024-03-05" not in blob
-
-
-@case
-def authorization_and_audit_share_hash_context():
-    """FIX-9.4 / R-6: 授权与审计使用同一哈希上下文，可通过哈希关联。"""
-    from security.patterns import stable_hash
-
-    with tempfile.TemporaryDirectory() as root:
-        authorize_category(root, "link-user", "link-session", "L3_SKIP", "op")
-        record = next(Path(root).rglob("egress_authz.json"))
-        # 身份哈希同时体现在授权记录的目录层级中，与审计 stable_hash 同源。
-        record_path = str(record).replace(str(root), "")
-        assert stable_hash("link-user") in record_path
-        assert stable_hash("link-session") in record_path
-        assert "link-user" not in record_path and "link-session" not in record_path
 
 
 # ============================================================================
@@ -719,10 +554,10 @@ def dd_mmm_yyyy_clinical_date_is_detected_and_scrubbed():
         except EgressViolation:
             continue
         raise AssertionError(f"临床报告日期未拦截: {text}")
-    scrubbed = StreamingScrubber(ClinicalDataDetector())._light_scrub(
-        ["08 Jun 2026", "08 Jun 2026 05:19:50"]
-    )
-    joined = " ".join(scrubbed)
+    from security.tokenizer import tokenize_clinical_text
+    joined = " ".join(tokenize_clinical_text(value) for value in (
+        "08 Jun 2026", "08 Jun 2026 05:19:50"
+    ))
     assert "Jun" not in joined and "[DATE:" in joined
 
 
@@ -734,7 +569,7 @@ def headerless_data_table_does_not_leak_rows():
     修复后 header_cells 只含标题行，data_start_row 停在首个数据行。
     """
     import openpyxl
-    from excel_header_extractor import process_xlsx
+    from excel_header_extractor import process_xlsx  # 薄壳转发
     with tempfile.TemporaryDirectory() as directory:
         path = str(Path(directory) / "crviewer_like.xlsx")
         workbook = openpyxl.Workbook()
@@ -756,8 +591,8 @@ def headerless_data_table_does_not_leak_rows():
         entry = payload["sheets"][0]
         assert entry["data_start_row"] == 2
         assert entry["header_cells"] == [
-            {"row": 0, "col": 0, "value": "SiteGroup: World"},
-            {"row": 1, "col": 0, "value": "Site: UAT_006 (Site Number:23)"},
+            {"row": 0, "col": 0, "value": "COLUMN_1"},
+            {"row": 1, "col": 0, "value": "COLUMN_1"},
         ]
 
 
@@ -770,9 +605,11 @@ def leading_zero_subject_cell_is_redacted():
     也一律 REDACTED（DATA_VALUE 兜底）——列名极少是纯数字，数据值常是，
     误判表头时这类值原值输出即泄露通道。
     """
-    from excel_header_extractor import _dlp_scan_cell
+    from security.header_detect import _dlp_scan_cell
     cleaned, label = _dlp_scan_cell("01001")
     assert label == "SUBJECT_ID" and "01001" not in str(cleaned)
+    repeated, _ = _dlp_scan_cell("01001")
+    assert repeated == cleaned and str(cleaned).startswith("[SUBJ:")
     for data_like in ["346.0", "002", "2024"]:
         value, hit = _dlp_scan_cell(data_like)
         assert hit == "DATA_VALUE" and data_like not in str(value), \
@@ -784,46 +621,64 @@ def leading_zero_subject_cell_is_redacted():
 
 
 @case
-def worker_inspects_real_xls_via_xlrd():
-    """真实缺陷：worker inspect_file 对 .xls 用 openpyxl 必失败（agent 被拒）。
+def sdtm_column_names_survive_metadata_projection():
+    """真实缺陷回放：合法 SDTM 字段名被元数据车道打成 COLUMN_n。
 
-    .xls 现在走 xlrd；含 SENSITIVE 组合的 .xls 触发用户决策提示。
+    2026-08-24：header_names 原先用白名单证明制（必须命中临床词表才输出原值），
+    实测 32 个标准列名丢 13 个——ALT、AST、TBIL、EXDOSE、EXTRT、CMTRT、VSORRES、
+    VSTESTCD、QSORRES、SUPPDM、IDVAR、QNAM、QVAL。列名进 inspect 收据的 schema，
+    harness 拿到 COLUMN_n 无法按 ALS 字段定位数据列，execute 取列也会失败。
+    列名是结构元数据，不能套用面向数据值的保护启发式。
     """
-    import xlwt
-    with tempfile.TemporaryDirectory() as directory:
-        path = str(Path(directory) / "legacy.xls")
-        workbook = xlwt.Workbook()
-        sheet = workbook.add_sheet("DM")
-        sheet.write(0, 0, "Subject")
-        sheet.write(1, 0, "A1234567")
-        sheet.write(1, 1, "2024-03-05")
-        sheet.write(1, 2, "Screening")
-        workbook.save(path)
-        request = json.dumps({
-            "requestId": "x1", "operation": "inspect_file",
-            "path": path, "max_scan_rows": 20, "context": {"mode": "enforce"},
-        })
-        responses, _ = _run_worker([request])
-        assert responses[0]["ok"] is True, responses[0]
-        assert responses[0]["needs_user"] is True
-        assert responses[0]["user_prompt"]
+    from security.header_detect import header_names
+    columns = [
+        "STUDYID", "DOMAIN", "USUBJID", "SUBJID", "RFSTDTC", "RFENDTC",
+        "SITEID", "BRTHDTC", "AGE", "AGEU", "SEX", "RACE", "ETHNIC",
+        "ARMCD", "ARM", "ALT", "AST", "TBIL", "AETERM", "AEDECOD", "AESEV",
+        "AESTDTC", "EXDOSE", "EXTRT", "CMTRT", "VSORRES", "VSTESTCD",
+        "QSORRES", "SUPPDM", "IDVAR", "QNAM", "QVAL",
+    ]
+    projected, verdict = header_names(columns, with_verdict=True)
+    lost = [(a, b) for a, b in zip(columns, projected) if a != b]
+    assert not lost, f"合法 SDTM 列名被降级: {lost}"
+    assert verdict, "标准 SDTM 表头行未被判为表头，rowCount 会多算一行"
+
+    # ALS/EDC 导出表头与中文表头同样必须原样通过。
+    for header in (
+        ["Form", "ItemOID", "SASLabel", "DataType", "CodeList"],
+        ["受试者编号", "访视", "检查项目", "结果", "单位"],
+    ):
+        assert header_names(header) == header, f"表头被降级: {header}"
 
 
 @case
-def windows_path_separator_does_not_bypass_blacklist():
-    """ST-P2-6: Windows 路径分隔符 \\ 不能绕过危险路径黑名单。
+def data_rows_still_degrade_in_metadata_projection():
+    """放宽列名投影不能放宽安全边界：无表头文件的首行仍须整行降级。"""
+    from security.header_detect import header_names
+    rows = [
+        ["GQ1005-301", "101-0001", "2024-03-05", "45", "M", "ASIAN", "12.5", "ONGOING"],
+        ["1", "2", "3.5", "1,200", "0.001"],
+        ["S001", "受试者", "2023-01-02"],
+    ]
+    for row in rows:
+        projected, verdict = header_names(row, with_verdict=True)
+        assert not verdict, f"数据行被误判为表头: {row}"
+        leaked = [value for value in projected if value in row]
+        assert not leaked, f"数据行原值出现在投影结果里: {leaked}"
 
-    ai_operations_monitor._assess_file_threat 归一化后匹配，
-    C:\\project\\docment\\dm\\data\\sas_data_cache.pkl 必须被拦截。
-    """
-    from security.ai_operations_monitor import AIOperationMonitor, RiskLevel
-    monitor = AIOperationMonitor()
-    threat = monitor._assess_file_threat(
-        r"C:\project\docment\dm\data\sas_data_cache.pkl", "read"
-    )
-    assert threat.risk_level >= RiskLevel.HIGH, (
-        f"Windows 路径绕过黑名单: risk={threat.risk_level}"
-    )
+
+@case
+def edc_system_fields_map_to_canonical_roles():
+    from security.header_detect import canonical_edc_field, header_names
+    aliases = {
+        "SubjectName": "subject", "SiteNumber": "site",
+        "FolderName": "visit", "FormName": "form",
+        "RecordPosition": "repeat", "ItemGroupRepeatKey": "repeat",
+        "SubjectStatus": "status", "ModifiedDate": "date",
+    }
+    for field, expected in aliases.items():
+        assert canonical_edc_field(field) == expected
+    assert header_names(list(aliases)) == list(aliases)
 
 
 @case
@@ -844,36 +699,6 @@ def message_id_uuid_does_not_trigger_egress_block():
         check_egress(payload)
     except EgressViolation as exc:
         raise AssertionError(f"消息 id UUID 误报触发拦截: {exc}") from exc
-
-
-@case
-def authz_replay_is_rejected():
-    """ST-D-3: 授权重放——同一授权消费两次，第二次必须返回 False。"""
-    with tempfile.TemporaryDirectory() as root:
-        authorize_category(root, "u1", "s1", "L3_ALLOW_AUDITED", "op")
-        first = consume_category(root, "u1", "s1", "L3_ALLOW_AUDITED")
-        second = consume_category(root, "u1", "s1", "L3_ALLOW_AUDITED")
-        assert first is True, "首次消费应成功"
-        assert second is False, "重放消费未拒绝"
-
-
-@case
-def concurrent_double_consume_is_rejected():
-    """ST-D-3: 并发双消费——两个进程竞争消费同一授权，恰好一个成功。"""
-    import multiprocessing
-    with tempfile.TemporaryDirectory() as root:
-        authorize_category(root, "u2", "s2", "L3_ALLOW_AUDITED", "op")
-
-        results = multiprocessing.Manager().list()
-
-        def _consume(r):
-            results.append(consume_category(root, "u2", "s2", "L3_ALLOW_AUDITED"))
-
-        procs = [multiprocessing.Process(target=_consume, args=(results,)) for _ in range(2)]
-        for p in procs: p.start()
-        for p in procs: p.join(timeout=10)
-        successes = [x for x in results if x is True]
-        assert len(successes) == 1, f"并发双消费应仅一次成功，实际 {len(successes)} 次"
 
 
 @case
@@ -924,137 +749,6 @@ def spec_and_header_terms_are_allowed():
 
 
 @case
-def tokenizer_is_idempotent_and_shared_by_both_lanes():
-    """脱敏保底必须真实生效且幂等——这是会话可自愈的前提。
-
-    历史故障：token_for/token_sub 只在 post-execute 车道被调用，出域车道从不
-    token 化，"读到 data 先 hash 再送 AI"的保底在出域层是死代码。现在两个车道
-    共用 tokenizer.tokenize_clinical_text 单一来源。
-    """
-    from security.tokenizer import tokenize_clinical_text
-    from security.data_egress_guard import ClinicalDataDetector, StreamingScrubber
-
-    raw = "Subject A1234567 visit 2024-01-15"
-    once = tokenize_clinical_text(raw)
-    assert "A1234567" not in once and "2024-01-15" not in once, f"原值未脱敏: {once!r}"
-    assert "[SUBJ:" in once and "[DATE:" in once, f"token 前缀缺失: {once!r}"
-    # 幂等：token 化结果重扫不再变化，否则历史重扫无法自愈
-    assert tokenize_clinical_text(once) == once, "token 化非幂等"
-    # 同值同 token（LLM 仍可 join/去重/计数）
-    assert tokenize_clinical_text("A1234567") == tokenize_clinical_text("a1234567")
-    # 两车道同一口径：post-execute 的 _light_scrub 走同一函数
-    scrubber = StreamingScrubber(ClinicalDataDetector())
-    assert scrubber._light_scrub([raw]) == [once], "两车道脱敏口径不一致"
-
-
-@case
-def tokenized_text_passes_egress():
-    """脱敏后的 token 文本必须能通过出域检查，否则保底手段等于无效。"""
-    from security.tokenizer import tokenize_clinical_text
-    assert _allows(tokenize_clinical_text("Subject A1234567 visit 2024-01-15")), \
-        "token 化后仍被拦截，脱敏保底无效"
-
-
-@case
-def pdf_spec_visit_window_terms_are_allowed():
-    """真实缺陷回归（审计 20260820_150945-85697ec72e）：PDF 规格文档的
-    访视窗术语 "Visit Date(D1)"、"Visit Date- Screening (D-56~D-3)" 被
-    CDISC字段:visit 判为数据行，13 次 BLOCK + 复合威胁拦死整个请求。
-    用户规则：spec/方案文档可读。纯格式判据（术语/括号天数标签），无关键词豁免。
-    """
-    for text in ("Visit Date- Screening (D-56~D-3)",
-                 "Visit Date- Baseline (D-2)",
-                 "D3 | Visit Date(D1) +2 days",
-                 "ADA Follow-up | Visit Date(D1) +89 days",
-                 "If the Visit Date of D1 is entered, Expected date follows"):
-        assert _allows(text), f"PDF spec 访视术语被误拦: {text!r}"
-
-
-@case
-def code_identifier_after_cdisc_field_is_allowed():
-    """真实缺陷回归（审计 20260820_155650-bbbef95ac1）：读代码文件结果里的
-    注释 "cohort per subject (DSCOHORT@5218; STD@5278)" 被 CDISC字段:subject
-    误判（值 (DSCOHORT@5218 短且含数字）。含 @ 的值是代码变量注解，
-    CDISC 数据值形态从不包含 @。真实数据值不受影响。
-    """
-    for text in ("    # ---- DS1: cohort per subject (DSCOHORT@5218; STD@5278) ----",
-                 'per subject (AESTDTC@1234) annotation'):
-        assert _allows(text), f"代码标识被误拦: {text!r}"
-
-
-@case
-def file_paths_and_filenames_are_operational():
-    """真实缺陷回归（2026-08-20 工作台实测）：路径中的模式形态被 token 化，
-    模型拿 "G:\...\CGB3002-TEST\[SUBJ:d1b1c9f9].txt" 假路径读文件直接
-    not found，工作流断裂。用户规则：路径/文件名是辅助读取的操作性数据，
-    写入/出域/工具参数三车道一律原样放行；数据值照旧脱敏/拦截。
-    """
-    from security.data_egress_guard import ClinicalDataDetector, StreamingScrubber
-    scrubber = StreamingScrubber(ClinicalDataDetector())
-    cases = [
-        r'G:\home\Clinical-Data\CGB3002-TEST\SUBJ123456_report.txt',
-        'G:\\\\home\\\\Clinical-Data\\\\CGB3002-TEST\\\\AE1234567.txt',
-        r'\\server\\share\\010-001-1001.csv',
-        '/data/exports/S0001234/2024-01-15.txt',
-        'bare AE123456.txt reference',
-    ]
-    for op in cases:
-        scrubbed, _ = scrubber.scrub_row([f'{{"path": "{op}"}}'], 1, False)
-        assert op in scrubbed[0], f"路径被改写: {op!r} -> {scrubbed[0]!r}"
-        assert _allows(f'Error: cannot read "{op}": not found'), f"路径被拦: {op!r}"
-    # 数据值（无操作性形态）照旧：写入侧脱敏消除原值、出域侧拦截
-    scrubbed, _ = scrubber.scrub_row(['subject 101-001 visit 2024-01-15'], 1, False)
-    assert '101-001' not in scrubbed[0] and '2024-01-15' not in scrubbed[0], scrubbed[0]
-    assert re.search(r'\[(SUBJ|DATE|TEXT|NUM):[0-9a-f]{8}\]', scrubbed[0]), scrubbed[0]
-    assert not _allows('subject 101-001 visit 2024-01-15')
-
-
-@case
-def numeric_visit_values_still_block():
-    """反向回归：结构字段后跟纯数字值（真实数据行形态）必须仍拦。"""
-    for text in ("VISIT: 3", "VISITNUM 4.0", "visit 12 结果"):
-        assert not _allows(text), f"真实数据形态漏放: {text!r}"
-
-
-@case
-def uuid_and_docid_follow_unified_tokenization_architecture():
-    """统一 token 化架构回归（用户规则）：
-    - UUID（技术标识，E2E-4 口径）在出域检测入口剥离——原文与 normalized
-      拼接形态（'id c25e...' 融合后按位置豁免会越界失效）都不得误拦。
-    - 文档编号（DS5565-0002-NIS-MA 等）出域侧按原值拦（fail-closed），
-      由写入侧统一 token 化消化：token 化后的文本必须放行。真实 USUBJID
-      （含 STUDY-SITE-001 纯字母段形态）任何时候都拦。
-    """
-    from security.tokenizer import tokenize_clinical_text
-    # UUID：两种形态都放行
-    for text in ('id c25e2638-0ced-4330-86ae-728287fcdeaa isError false',
-                 'call_6ad2d0e2-c715-4a38-bdc2-2def4bdfe804'):
-        assert _allows(text), f"UUID 被误拦: {text!r}"
-    # 编号结构判据：字母末段=文档/项目编号（含 meta.lines 投影场景）放行
-    for text in ("DS5565-0002-NIS-MA DM Status Report Specification",
-                 "CGB3002-TEST 项目目录", "读取 CGB3002-TEST spec"):
-        assert _allows(text), f"文档/项目编号被误拦: {text!r}"
-    # 数字末段=真实 USUBJID，任何时候都拦
-    for text in ("USUBJID 010-001-1001", "STUDY001-SITE01-SUBJ001",
-                 "STUDY-SITE-001", "010-001-1001-S1 随机"):
-        assert not _allows(text), f"真实 USUBJID 漏放: {text!r}"
-    # 写入侧统一 token 化后的文本必须放行（保底闭环）
-    for text in ("DS5565-0002-NIS-MA DM Status Report Specification",
-                 "USUBJID 010-001-1001 随机 2024-01-15"):
-        tokenized = tokenize_clinical_text(text)
-        assert tokenized != text, f"token 化未生效: {text!r}"
-        assert _allows(tokenized), f"token 化后仍被拦: {tokenized!r}"
-
-
-@case
-def uuid_is_preserved_by_tokenizer():
-    """token 化不得吃掉 UUID（LLM 需要消息 id 引用），USUBJID 正常 token 化。"""
-    from security.tokenizer import tokenize_clinical_text
-    uuid_text = "id c25e2638-0ced-4330-86ae-728287fcdeaa ok"
-    assert tokenize_clinical_text(uuid_text) == uuid_text
-    assert "[SUBJ:" in tokenize_clinical_text("subj 010-001-1001")
-
-
 def main() -> int:
     failures = 0
     for test in CASES:

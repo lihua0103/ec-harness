@@ -14,8 +14,7 @@ os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 SCENARIOS = [
     # (driver 场景, 环境补充, 断言函数)
-    ("pre-sas", None, lambda o: o["kind"] == "deny"),
-    ("llm-dirty", None, lambda o: o["thrown"] is True and "A1234567" not in o["message"]),
+    ("llm-dirty", None, lambda o: o.get("streamed") is True and "A1234567" in json.dumps(o, ensure_ascii=False)),
     ("fetch-database", None, lambda o: "A1234567" not in json.dumps(o, ensure_ascii=False)),
 ]
 
@@ -25,6 +24,7 @@ MARKERS = ["01001", "01002", "S005", "S006", "346.0", "08 Jun 2026"]
 
 
 def post_excel(path):
+    assert path.is_file(), f"真实项目文件不存在: {path}"
     env = dict(os.environ, EXCEL_FILE=str(path))
     result = subprocess.run(
         ["node", str(ROOT / "tests/integration/plugin_driver.js"), "post-excel"],
@@ -50,7 +50,7 @@ for scenario, _, check in SCENARIOS:
     print(status, scenario, json.dumps(output, ensure_ascii=False)[:110])
 
 for name in ["crViewer.xls", "RT01_DM Status Report Specification_11Aug2026.xlsx"]:
-    decision = post_excel(PROJECT / name)
+    decision = post_excel(PROJECT / "doc" / name)
     blob = json.dumps(decision, ensure_ascii=False)
     leaked = [m for m in MARKERS if m in blob]
     status = "PASS" if decision.get("kind") == "accept" and not leaked else "FAIL"
@@ -60,9 +60,15 @@ for name in ["crViewer.xls", "RT01_DM Status Report Specification_11Aug2026.xlsx
           blob[:130])
 
 # PROD.xls 是 SpreadsheetML XML 伪装的 .xls：fail-closed（CHECK_FAILED），无泄露。
-decision = post_excel(PROJECT / "RT01_V1.0_29JUN2026_PROD.xls")
+decision = post_excel(PROJECT / "doc" / "RT01_V1.0_29JUN2026_PROD.xls")
 blob = json.dumps(decision, ensure_ascii=False)
-value = decision.get("value", {})
+content = decision.get("content", [])
+value = {}
+if content and isinstance(content[0], dict):
+    try:
+        value = json.loads(content[0].get("text", "{}"))
+    except json.JSONDecodeError:
+        value = {}
 status = "PASS" if value.get("clinicalGuard") == "CHECK_FAILED" else "FAIL"
 if status == "FAIL":
     failures.append("PROD.xls")

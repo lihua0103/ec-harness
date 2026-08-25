@@ -140,27 +140,37 @@ SAFE_FILENAME_CONTEXT_RE = re.compile(
 
 # ---------------------------------------------------------------------------
 # Node.js 插件初筛用弱正则子集；scripts/sync_patterns.py 生成 JSON 副本。
+#
+# S4（JS/Python 豁免对齐）：`severity` 是同步到 Node 的第三个字段，取值
+#   "block" — 命中即阻断（受试者编号、带时间成分的时间戳、医学编码）
+#   "warn"  — 单独命中不阻断（纯日期形态），与 Python 出域侧
+#             `recommendation="WARN"` 同口径
+# 此前 Node 侧只有"命中=阻断"一档，于是写 spec 时的 `2024-01-01`、写 SAS 程序时
+# 的 `'01JAN2024'd` 被 quickGuard 拦死，而 Python 车道对同样的文本只给 WARN。
+# 判据必须留在这个单一来源里，不能在 patterns.js 另写一份 label 名单。
 # ---------------------------------------------------------------------------
 NODE_DLP_PATTERNS = [
     # 基础受试者编号
-    {"re": r"\b\d{3,4}-\d{4,6}-\d{3,6}\b",      "label": "SUBJECT_ID"},
-    {"re": r"\b\d{3,4}-\d{3,6}\b",               "label": "SITE_SUBJECT_ID"},
-    {"re": r"\bUSUBJID\s*[=:]\s*\S+",  "flags": "i", "label": "USUBJID_ASSIGN"},
-    {"re": r"\bSUBJID\s*[=:]\s*\S+",   "flags": "i", "label": "SUBJID_ASSIGN"},
+    {"re": r"\b\d{3,4}-\d{4,6}-\d{3,6}\b",      "label": "SUBJECT_ID", "severity": "block"},
+    {"re": r"\b\d{3,4}-\d{3,6}\b",               "label": "SITE_SUBJECT_ID", "severity": "block"},
+    {"re": r"\bUSUBJID\s*[=:]\s*\S+",  "flags": "i", "label": "USUBJID_ASSIGN", "severity": "block"},
+    {"re": r"\bSUBJID\s*[=:]\s*\S+",   "flags": "i", "label": "SUBJID_ASSIGN", "severity": "block"},
     # 扩展：字母前缀编号（同 Python Layer 2）— IGNORECASE 认小写绕过 (ST-P1-1)
-    {"re": r"\b[A-Z]{1,4}\d{6,8}\b",   "flags": "i", "label": "ALPHA_SUBJECT_ID"},
+    {"re": r"\b[A-Z]{1,4}\d{6,8}\b",   "flags": "i", "label": "ALPHA_SUBJECT_ID", "severity": "block"},
     # 前导零受试者编号（EDC 形态，如 01001）
-    {"re": r"\b0\d{4,7}\b",                        "label": "LEADING_ZERO_SUBJECT_ID"},
-    {"re": r"\b\d{4}-\d{2}-\d{2}\b",              "label": "ISO_DATE"},
-    # ISO8601 时间戳
-    {"re": r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}",   "label": "ISO8601_DATETIME"},
+    {"re": r"\b0\d{4,7}\b",                        "label": "LEADING_ZERO_SUBJECT_ID", "severity": "block"},
+    # 纯日期形态：与 Python 出域侧一致降为 warn。日期单独出现多半是 spec/文档
+    # 日期；真实患者日期总与受试者编号等其他信号同现，那些信号仍是 block。
+    {"re": r"\b\d{4}-\d{2}-\d{2}\b",              "label": "ISO_DATE", "severity": "warn"},
+    # ISO8601 时间戳——含时间成分是数据导出特征，保持 block（与 Python 同口径）。
+    {"re": r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}",   "label": "ISO8601_DATETIME", "severity": "block"},
     # SAS 日期 (01JAN2024 / 01jan2024) — IGNORECASE (ST-P1-1)
-    {"re": r"\b\d{2}[A-Z]{3}\d{4}\b", "flags": "i", "label": "SAS_DATE"},
+    {"re": r"\b\d{2}[A-Z]{3}\d{4}\b", "flags": "i", "label": "SAS_DATE", "severity": "warn"},
     # 临床报告日期（Rave/EDC 导出格式）
     {"re": r"\b\d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4}\b",
-     "flags": "i", "label": "DD_MMM_YYYY_DATE"},
+     "flags": "i", "label": "DD_MMM_YYYY_DATE", "severity": "warn"},
     # MedDRA 编码
-    {"re": r"\bPT:\s*\d{8}\b",         "flags": "i", "label": "MEDDRA_PT"},
+    {"re": r"\bPT:\s*\d{8}\b",         "flags": "i", "label": "MEDDRA_PT", "severity": "block"},
 ]
 
 
@@ -239,9 +249,16 @@ _OPERATIONAL_PATH_RES = [
     # 相对多段路径，必须以带扩展名的文件名收尾（ADAV-008-CP4\\...zip、
     # YL202-CN-301-01\\20260318.zip——meta.paths 的真实形态）。收尾约束
     # 排除 "A1234567\\n" 类转义序列被误当路径造成数据值逃逸。
-    re.compile(r'[\w\-. ]{1,64}(?:[\\/][\w\-. ]{1,64}){1,}\\[\\/]?'
-               r'[\w\-.]{1,120}\.[A-Za-z]\w{0,7}\b'
-               r'|[\w\-. ]{1,64}[\\/][\w\-.]{1,120}\.[A-Za-z]\w{0,7}\b'),
+    #
+    # 分隔符必须写成 [\\/]+（一个或多个）而非单个：JSON 序列化后的相对路径
+    # 分隔符是双反斜杠（"YL201-CN-302-01\\\\extracted_datasets\\\\x.txt"）。
+    # 旧版单分隔符写法只能从第二段起匹配，**首段（项目目录名）掉在区间外被
+    # token 化**，模型拿到 "[SUBJ:4a5a7549]\\extracted_datasets\\x.txt" 假路径
+    # 去读文件 → not found，工作流断裂（2026-08-21 RBQM_test 实测：glob 结果
+    # 的 YL201-CN-302-01 / CGB3002-DM-0001 首段被 hash）。
+    re.compile(r'[\w\-. ]{1,64}(?:[\\/]+[\w\-. ]{1,64}){1,}[\\/]*'
+               r'[\w\-.]{0,120}\.[A-Za-z]\w{0,7}\b'
+               r'|[\w\-. ]{1,64}[\\/]+[\w\-.]{1,120}\.[A-Za-z]\w{0,7}\b'),
 ]
 # 带扩展名的文件名 token（扩展名首字符须为字母）。允许文件名内部空格
 # （真实交付物大量含空格：DM Status Report_14Aug2026.xlsx、_14 Aug 2026.xlsx），
@@ -338,3 +355,287 @@ def stable_hash(value: object, length: int = 24) -> str:
     else:
         digest = hashlib.sha256(raw).hexdigest()
     return digest[:length]
+
+
+# ============================================================================
+# P1 精准检测：上下文感知扫描
+# ============================================================================
+# 核心设计原则：区分"元数据"（路径、列名、文件名）和"数据内容"（单元格值）
+# 元数据中的模式匹配是正常需求（如 spec 中的示例数据）
+# 只有单元格值中的模式才需要拦截
+# ============================================================================
+
+# CDISC 标准字段名集合 - 这些在列名中出现是正常的，不应触发检测
+_CDISC_COLUMN_NAME_THRESHOLDS = frozenset(CDISC_CORE_FIELDS)
+
+# 低风险列名关键词 - 这些列名中出现受试者编号/日期模式是正常的
+_COLUMN_NAME_LOW_RISK_KEYWORDS = frozenset({
+    "id", "code", "name", "date", "desc", "result", "value",
+    "visit", "period", "seq", "num", "status", "type", "class",
+})
+
+# 高风险列名关键词 - 这些列名中出现模式可能是数据泄露
+_COLUMN_NAME_HIGH_RISK_KEYWORDS = frozenset({
+    "subjid", "usubjid", "subject", "patient", "birth", "death",
+    "ae", "sae", "cm", "lb", "vs", "dm",
+})
+
+# 文件扩展名列表
+_FILE_EXTENSIONS = frozenset({
+    "csv", "xlsx", "xls", "xpt", "sas7bdat", "txt", "json", "xml", "parquet",
+})
+
+# 路径模式检测正则
+_PATH_LIKE_RE = re.compile(
+    r'^[A-Za-z]:[\\/](?:[\w.\- ]+[\\/])*[\w.\- ]*\.(?:' + '|'.join(_FILE_EXTENSIONS) + r')$'
+    r'|^/(?:[\w.\- ]+/)*[\w.\- ]*\.(?:' + '|'.join(_FILE_EXTENSIONS) + r')$'
+    r'|^\\\\[\w.\- ]+(?:\\[\w.\- ]+)+\\(?:[\w.\- ]+\.)(?:' + '|'.join(_FILE_EXTENSIONS) + r')$',
+    re.IGNORECASE,
+)
+
+# 列名检测正则 (变量名模式)
+_COLUMN_NAME_RE = re.compile(r'^[A-Z]{2,8}[A-Z0-9]*[a-z]*$')
+
+# Sheet名/标题检测正则
+_SHEET_TITLE_RE = re.compile(r'^(?:Sheet|Title|Contents|Index|说明|需求|规格|Spec|Requirement)\d*$', re.IGNORECASE)
+
+
+def is_metadata_context(text: str) -> bool:
+    """判断文本是否处于"元数据"上下文，应该跳过敏感模式检测。
+
+    元数据上下文包括：
+    1. 文件路径/文件名
+    2. 列名/变量名
+    3. Sheet 名称
+    4. 文档标题
+
+    设计原则：
+    - 路径中的模式（如 rawdata/101-001_DM.csv）是操作数据，不是临床数据值
+    - 列名中的模式（如 SUBJID 列）是结构定义，不是临床数据值
+    - 只有单元格中的模式才是真正的临床数据值
+    """
+    text = text.strip()
+
+    if not text:
+        return True
+
+    # 1. 检查是否是文件路径
+    if _PATH_LIKE_RE.match(text):
+        return True
+
+    # 2. 检查是否是纯数字/浮点数（数值单元格，不是敏感数据）
+    if re.match(r'^-?\d+(\.\d+)?$', text) and len(text) <= 20:
+        return True
+
+    # 3. 检查是否是列名（纯大写字母组合，2-8字符）
+    if _COLUMN_NAME_RE.match(text) and len(text) <= 12:
+        col_lower = text.lower()
+        # 如果列名包含 CDISC 标准字段，跳过
+        if col_lower in _CDISC_COLUMN_NAME_THRESHOLDS:
+            return True
+        # 包含常见低风险关键词的列名跳过
+        if any(kw in col_lower for kw in _COLUMN_NAME_LOW_RISK_KEYWORDS):
+            return True
+
+    # 4. 检查是否是 Sheet 名
+    if _SHEET_TITLE_RE.match(text):
+        return True
+
+    # 5. 检查是否是多行路径/路径列表（一行多个路径）
+    paths = [p.strip() for p in re.split(r'[,;\n]', text) if p.strip()]
+    if len(paths) >= 2 and all(_PATH_LIKE_RE.match(p) for p in paths):
+        return True
+
+    return False
+
+
+def is_cell_value_context(text: str) -> bool:
+    """判断文本是否处于"单元格值"上下文，应该进行敏感模式检测。
+
+    单元格值特征：
+    1. 混合了数字和字母的短文本
+    2. 包含空格或特殊字符的组合文本
+    3. 看起来像数据行的一行文本
+    """
+    text = text.strip()
+
+    if not text or len(text) > 500:
+        return False
+
+    # 1. 包含空格或连字符的短文本（通常是单元格值）
+    if (' ' in text or '-' in text) and len(text) <= 100:
+        # 排除纯路径（已有 is_metadata_context 处理）
+        if _PATH_LIKE_RE.match(text):
+            return False
+        return True
+
+    # 2. 包含多个单词的文本（描述性文本）
+    words = text.split()
+    if len(words) >= 2 and len(text) <= 200:
+        return True
+
+    # 3. 日期+文本混合（典型的数据行）
+    has_date = any(p.search(text) for p, _ in DATE_PATTERNS)
+    has_alpha = any(c.isalpha() for c in text)
+    if has_date and has_alpha and len(text) <= 200:
+        return True
+
+    return False
+
+
+def scan_text_context_aware(
+    text: str,
+    scan_if_metadata: bool = False,
+) -> dict[str, Any]:
+    """上下文感知的敏感内容扫描。
+
+    核心逻辑：
+    - 元数据上下文（如路径、列名）→ 默认跳过检测
+    - 单元格值上下文 → 进行完整 DLP 检测
+
+    Args:
+        text: 待扫描文本
+        scan_if_metadata: 是否在元数据上下文中也进行扫描（用于收据验证失败时的兜底）
+
+    Returns:
+        dict: {
+            "should_block": bool,      # 是否应该阻断
+            "confidence": float,       # 置信度 0-1
+            "matched_patterns": list,  # 匹配的模式列表
+            "context": str,            # 上下文类型 ("cell_value", "metadata", "unknown")
+            "reason": str,             # 判断原因
+        }
+    """
+    text = text.strip()
+
+    if not text:
+        return {
+            "should_block": False,
+            "confidence": 0.0,
+            "matched_patterns": [],
+            "context": "empty",
+            "reason": "empty text",
+        }
+
+    # Step 1: 判断上下文类型
+    context = "unknown"
+    if is_metadata_context(text):
+        context = "metadata"
+        if not scan_if_metadata:
+            return {
+                "should_block": False,
+                "confidence": 0.0,
+                "matched_patterns": [],
+                "context": context,
+                "reason": "metadata context - skipped",
+            }
+    elif is_cell_value_context(text):
+        context = "cell_value"
+    else:
+        context = "unknown"
+
+    # Step 2: 在选定的上下文中进行模式匹配
+    matched = []
+    evidence = []
+
+    # 受试者编号模式
+    for pattern, desc in SUBJECT_ID_PATTERNS:
+        for match in pattern.finditer(text):
+            matched_text = match.group(0)
+            # 排除文档版本号
+            if desc == "字母前缀编号" and is_document_version_number(matched_text):
+                continue
+            # 排除项目/文档编号
+            if desc == "USUBJID格式" and ends_with_alpha_segment(matched_text):
+                continue
+            matched.append(f"受试者编号({desc})")
+            evidence.append(matched_text)
+
+    # 日期模式
+    for pattern, desc in DATE_PATTERNS:
+        for match in pattern.finditer(text):
+            matched.append(f"日期({desc})")
+            evidence.append(match.group(0))
+
+    # 医学编码模式
+    for pattern, desc in MEDICAL_CODE_PATTERNS:
+        for match in pattern.finditer(text):
+            matched.append(f"医学编码({desc})")
+            evidence.append(match.group(0))
+
+    if not matched:
+        return {
+            "should_block": False,
+            "confidence": 0.0,
+            "matched_patterns": [],
+            "context": context,
+            "reason": "no patterns matched",
+        }
+
+    # Step 3: 根据上下文和匹配结果决定是否阻断
+    matched_set = set(matched)
+
+    # 高置信阻断条件（单元格值上下文）
+    if context == "cell_value":
+        # 条件1: 受试者编号 + 日期 → 高风险
+        has_subj = any("受试者编号" in m for m in matched_set)
+        has_date = any("日期" in m for m in matched_set)
+        if has_subj and has_date:
+            return {
+                "should_block": True,
+                "confidence": 0.95,
+                "matched_patterns": list(matched_set),
+                "context": context,
+                "reason": f"受试者编号+日期在单元格值中 (evidence: {evidence[:3]})",
+            }
+
+        # 条件2: 多个受试者编号信号
+        subj_count = sum(1 for m in matched if "受试者编号" in m)
+        if subj_count >= 2:
+            return {
+                "should_block": True,
+                "confidence": 0.90,
+                "matched_patterns": list(matched_set),
+                "context": context,
+                "reason": f"多个受试者编号信号 ({subj_count})",
+            }
+
+        # 条件3: 医学编码 → 高风险
+        if any("医学编码" in m for m in matched_set):
+            return {
+                "should_block": True,
+                "confidence": 0.95,
+                "matched_patterns": list(matched_set),
+                "context": context,
+                "reason": "医学编码在单元格值中",
+            }
+
+        # 条件4: 单一受试者编号 → 中风险，需要脱敏
+        if has_subj and not has_date:
+            return {
+                "should_block": False,
+                "confidence": 0.60,
+                "matched_patterns": list(matched_set),
+                "context": context,
+                "reason": "单一受试者编号信号 - 需要脱敏",
+            }
+
+    # 元数据上下文 + scan_if_metadata: 宽松判断
+    elif context == "metadata" and scan_if_metadata:
+        if any("受试者编号" in m and "USUBJID格式" not in m for m in matched_set):
+            # 元数据中的非标准受试者编号可能是文件名/列名，放行
+            return {
+                "should_block": False,
+                "confidence": 0.3,
+                "matched_patterns": list(matched_set),
+                "context": context,
+                "reason": "metadata context - relaxed judgment",
+            }
+
+    return {
+        "should_block": False,
+        "confidence": 0.0,
+        "matched_patterns": list(matched_set),
+        "context": context,
+        "reason": "below threshold",
+    }

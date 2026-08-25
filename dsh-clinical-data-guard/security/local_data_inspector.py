@@ -12,44 +12,34 @@ and rejected unless they are descendants of that root.
 from __future__ import annotations
 
 import csv
-import os
 from pathlib import Path
 from typing import Any
+
+from security.path_policy import (
+    PathPolicyError,
+    relative_display_path,
+    resolve_under_root,
+)
 
 
 class LocalDataInspectionError(ValueError):
     """A safe, data-free rejection reason for a local inspection request."""
 
 
-def _inside(root: Path, candidate: Path) -> bool:
-    try:
-        candidate.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
 def resolve_local_data_path(root: str, requested_path: str) -> Path:
-    if not isinstance(root, str) or not root.strip():
-        raise LocalDataInspectionError("local data root is not configured")
-    if not isinstance(requested_path, str) or not requested_path.strip():
-        raise LocalDataInspectionError("path must be a non-empty string")
-
-    base = Path(root).resolve(strict=True)
-    target = Path(requested_path)
-    if not target.is_absolute():
-        target = base / target
-    target = target.resolve(strict=True)
-    if not _inside(base, target):
-        raise LocalDataInspectionError("requested path is outside the configured local data root")
+    try:
+        target = resolve_under_root(root, requested_path, allow_root=False)
+    except (PathPolicyError, TypeError) as exc:
+        raise LocalDataInspectionError("requested path violates the local data policy") from exc
     if not target.is_file():
         raise LocalDataInspectionError("requested path is not a regular file")
     return target
 
 
-def _header_names(values: tuple[Any, ...] | list[Any]) -> list[str]:
-    """Keep only positional, non-value column labels and bound their size."""
-    return [str(value).strip()[:256] if value is not None else "" for value in values]
+def _header_projection(values: tuple[Any, ...] | list[Any]) -> tuple[list[str], bool]:
+    """返回安全列名以及该行是否可被证明为表头。"""
+    from security.header_detect import header_names
+    return header_names(list(values or []), with_verdict=True)
 
 
 def _xlsx_metadata(path: Path) -> dict[str, Any]:
@@ -67,19 +57,21 @@ def _xlsx_metadata(path: Path) -> dict[str, Any]:
             reset = getattr(worksheet, "reset_dimensions", None)
             if callable(reset):
                 reset()
-            header: list[str] = []
+            header: list[str] | None = None
             data_rows = 0
             for values in worksheet.iter_rows(values_only=True):
-                if not header:
+                if header is None:
                     if any(value not in (None, "") for value in values):
-                        header = _header_names(values)
+                        header, is_header = _header_projection(values)
+                        if not is_header:
+                            data_rows += 1
                     continue
                 if any(value not in (None, "") for value in values):
                     data_rows += 1
             sheets.append({
                 "name": worksheet.title,
                 "rowCount": data_rows,
-                "columns": header,
+                "columns": header or [],
             })
         return {"fileType": "xlsx", "sheets": sheets}
     finally:
@@ -94,11 +86,12 @@ def _xls_metadata(path: Path) -> dict[str, Any]:
         sheets: list[dict[str, Any]] = []
         for name in workbook.sheet_names():
             worksheet = workbook.sheet_by_name(name)
-            header = worksheet.row_values(0) if worksheet.nrows else []
+            raw_header = worksheet.row_values(0) if worksheet.nrows else []
+            header, is_header = _header_projection(raw_header)
             sheets.append({
                 "name": name,
-                "rowCount": max(0, worksheet.nrows - (1 if worksheet.nrows else 0)),
-                "columns": _header_names(header),
+                "rowCount": max(0, worksheet.nrows - (1 if is_header else 0)),
+                "columns": header,
             })
         return {"fileType": "xls", "sheets": sheets}
     finally:
@@ -108,11 +101,14 @@ def _xls_metadata(path: Path) -> dict[str, Any]:
 def _csv_metadata(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
         reader = csv.reader(handle)
-        header = next(reader, [])
+        raw_header = next(reader, [])
+        header, is_header = _header_projection(raw_header)
         row_count = sum(1 for _ in reader)
+        if raw_header and not is_header:
+            row_count += 1
     return {
         "fileType": "csv",
-        "sheets": [{"name": "data", "rowCount": row_count, "columns": _header_names(header)}],
+        "sheets": [{"name": "data", "rowCount": row_count, "columns": header}],
     }
 
 
@@ -128,11 +124,31 @@ def _sas_metadata(path: Path) -> dict[str, Any]:
         # Older pyreadstat variants lack metadataonly. Reading no rows still lets
         # the library parse the descriptor, while avoiding record materialization.
         _, meta = pyreadstat.read_sas7bdat(str(path), row_limit=0)
-    columns = list(meta.column_names or [])
+    # pyreadstat 的 column_names 来自 SAS/XPT descriptor，而不是记录值。
+    # 这是数据集的结构元数据，必须原样保留；通用表头 DLP 投影会把诸如
+    # AEACN、AECONTRT 这类合法字段错误改成 COLUMN_n。
+    columns = [str(column).strip()[:256] for column in (meta.column_names or []) if str(column).strip()]
     row_count = int(meta.number_rows or 0)
     return {
         "fileType": "sas7bdat",
-        "sheets": [{"name": path.stem, "rowCount": row_count, "columns": _header_names(columns)}],
+        "sheets": [{"name": path.stem, "rowCount": row_count, "columns": columns}],
+    }
+
+
+def _xpt_metadata(path: Path) -> dict[str, Any]:
+    try:
+        import pyreadstat
+        _, meta = pyreadstat.read_xport(str(path), metadataonly=True)
+    except TypeError:
+        _, meta = pyreadstat.read_xport(str(path), row_limit=0)
+    except Exception as exc:
+        raise LocalDataInspectionError("XPT metadata support is unavailable") from exc
+    # XPT descriptor 同样是安全结构元数据，不能套用面向未知表格首行的
+    # 数据值保护启发式。
+    columns = [str(column).strip()[:256] for column in (meta.column_names or []) if str(column).strip()]
+    return {
+        "fileType": "xpt",
+        "sheets": [{"name": path.stem, "rowCount": int(meta.number_rows or 0), "columns": columns}],
     }
 
 
@@ -148,10 +164,15 @@ def inspect_local_data(root: str, requested_path: str) -> dict[str, Any]:
         result = _csv_metadata(target)
     elif suffix == ".sas7bdat":
         result = _sas_metadata(target)
+    elif suffix == ".xpt":
+        result = _xpt_metadata(target)
     else:
-        raise LocalDataInspectionError("supported local data formats are xlsx, xls, csv, and sas7bdat")
+        raise LocalDataInspectionError("supported local data formats are xlsx, xls, csv, sas7bdat, and xpt")
 
     # The requested display path is retained only as a root-relative path; an
     # absolute local filesystem location never becomes model-visible.
-    result["path"] = str(target.relative_to(Path(root).resolve(strict=True))).replace(os.sep, "/")
+    try:
+        result["path"] = relative_display_path(root, target)
+    except PathPolicyError as exc:
+        raise LocalDataInspectionError("result path violates the local data policy") from exc
     return result

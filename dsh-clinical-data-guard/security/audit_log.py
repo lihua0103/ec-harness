@@ -11,6 +11,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
@@ -21,36 +22,61 @@ MAX_AUDIT_ARCHIVES = 5
 
 # 已确认存在的审计目录缓存（NFR-1: 热路径省去重复 makedirs 系统调用）。
 _KNOWN_DIRS: set[str] = set()
+LOCK_TIMEOUT_SECONDS = 2.0
+LOCK_RETRY_SECONDS = 0.02
+
+
+class AuditLockTimeout(TimeoutError):
+    """审计/授权目录锁在有界等待内不可用。"""
+
+
+def harden_permissions(path: str, mode: int) -> None:
+    """在 POSIX 强制 owner-only；Windows 保留现有 ACL。"""
+    try:
+        os.chmod(path, mode)
+    except PermissionError:
+        if os.name != "nt":
+            raise
 
 
 @contextmanager
-def _exclusive_lock(directory: str) -> Iterator[None]:
-    """跨平台排他锁：追加、轮转与归档清理均需持锁。"""
+def _exclusive_lock(directory: str, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+    """跨平台有界排他锁，避免 Windows ``LK_LOCK`` 长时间阻塞 worker。"""
     lock_path = os.path.join(directory, ".audit.lock")
     handle = open(lock_path, "a+")
+    acquired = False
     try:
         fd = handle.fileno()
-        try:
-            import fcntl  # POSIX
+        deadline = time.monotonic() + max(0.0, timeout)
+        while not acquired:
+            try:
+                try:
+                    import fcntl  # POSIX
 
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        except ImportError:  # Windows
-            import msvcrt
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except ImportError:  # Windows
+                    import msvcrt
 
-            handle.seek(0)
-            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                    handle.seek(0)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                acquired = True
+            except (BlockingIOError, OSError):
+                if time.monotonic() >= deadline:
+                    raise AuditLockTimeout("audit lock acquisition timed out")
+                time.sleep(LOCK_RETRY_SECONDS)
         try:
             yield
         finally:
-            try:
-                import fcntl
+            if acquired:
+                try:
+                    import fcntl
 
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            except ImportError:
-                import msvcrt
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except ImportError:
+                    import msvcrt
 
-                handle.seek(0)
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                    handle.seek(0)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
     finally:
         handle.close()
 
@@ -90,7 +116,7 @@ def _rotate_current(current: str, directory: str, max_bytes: int) -> bool:
     except PermissionError:
         # Windows: 另一进程正打开该文件；本次跳过轮转，数据不丢。
         return False
-    os.chmod(rotated, 0o600)
+    harden_permissions(rotated, 0o600)
     return True
 
 
@@ -107,19 +133,25 @@ def write_audit_record(
     """
     if directory not in _KNOWN_DIRS:
         os.makedirs(directory, mode=0o700, exist_ok=True)
-        os.chmod(directory, 0o700)
+        harden_permissions(directory, 0o700)
         _KNOWN_DIRS.add(directory)
     current = os.path.join(
         directory, f"{prefix}_{datetime.now().strftime('%Y%m')}.jsonl"
     )
 
-    with _exclusive_lock(directory):
+    try:
+        with _exclusive_lock(directory):
+            is_new = not os.path.exists(current)
+            if not is_new and _rotate_current(current, directory, max_bytes):
+                is_new = True
+            _prune_archives(prefix, directory, max_archives)
+            _append_line(current, record)
+            if is_new:
+                harden_permissions(current, 0o600)
+    except AuditLockTimeout:
+        # 审计日志是可观测性通道。锁竞争时跳过轮转并直接 O_APPEND，不能让
+        # quickGuard/LLM 请求排队；授权读改写仍由调用方保持 fail closed。
         is_new = not os.path.exists(current)
-        if not is_new and _rotate_current(current, directory, max_bytes):
-            is_new = True
-        _prune_archives(prefix, directory, max_archives)
-
         _append_line(current, record)
         if is_new:
-            # NFR-1: 仅新建文件时设置权限，热路径避免重复 chmod。
-            os.chmod(current, 0o600)
+            harden_permissions(current, 0o600)
