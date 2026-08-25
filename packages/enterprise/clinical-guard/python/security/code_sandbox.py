@@ -152,6 +152,7 @@ def run_sandbox(
     contents_sheet_name: str = "Contents",
     scenario: str = "listing",
     allowed_data_dirs: list[str] | None = None,
+    interception_enabled: bool = True,
 ) -> dict[str, Any]:
     """在隔离子进程中执行模型代码并取回结构化结果。
 
@@ -163,7 +164,8 @@ def run_sandbox(
     - error：类型名 + 截断脱敏消息（父层还会再 scrub 一道）
     子进程崩溃 / 超时一律收敛为结构化 error，绝不让原始 traceback 出域。
     """
-    check_code(code)
+    if interception_enabled:
+        check_code(code)
     job = {
         "mode": mode,
         "code": code,
@@ -172,6 +174,7 @@ def run_sandbox(
         "reviewColumns": list(review_columns or []),
         "contentsSheetName": contents_sheet_name,
         "scenario": scenario,
+        "interceptionEnabled": interception_enabled,
     }
     # P0-FIX (RBQM run_code): 始终传递 allowedDataDirs，即使为 None。
     # 过去 `if allowed_data_dirs:` 会跳过空列表，导致 sandbox_runner 无法区分

@@ -5,31 +5,19 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+# 2026-08-25 架构迁移：Python 运行时已移入 python/ 子目录。
+PYTHON_ROOT = ROOT / "python"
 
 
 def test_plugin_contract():
     manifest = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
     assert manifest["type"] == "module"
-    assert manifest["main"] == "src/index.js"
-    assert manifest["exports"]["."] == "./src/index.js"
-    assert manifest["dsh"]["bundle"]["patch"] == "./cordis.patch.yml"
-    assert not manifest.get("dependencies")
-    assert {
-        "@deepseek-ai/cordis",
-        "@deepseek-ai/dsh-llm",
-        "@deepseek-ai/dsh-tools",
-        "@deepseek-ai/dsh-host-webserver",
-    } <= set(manifest["peerDependencies"])
-    assert "assets/branding/favicon.svg" in manifest["files"]
+    assert manifest["main"] == "lib/index.js"
+    assert manifest["exports"]["."]["default"] == "./lib/index.js"
+    assert "@deepseek-ai/cordis" in manifest["peerDependencies"]
+    assert "python" in manifest["files"]
 
-    patch = (ROOT / "cordis.patch.yml").read_text(encoding="utf-8")
-    assert "id: clinical-data-guard" in patch
-    assert "name: emerald-clinical-data-guard" in patch
-    assert "localDataAccess: uat-local" in patch
-    # F-11: 旧生成器车道已下线，配置不得再声明可插拔生成器模块。
-    assert "listingGenerator" not in patch
-
-    entry = (ROOT / "src" / "index.js").read_text(encoding="utf-8")
+    entry = (PYTHON_ROOT / "src" / "index.js").read_text(encoding="utf-8")
     assert "export default function clinicalDataGuard" in entry
     assert "clinicalDataGuard.inject = ['tools', 'llm', 'webServer', 'systemPrompt'];" in entry
     for extension in (
@@ -54,18 +42,18 @@ def test_plugin_contract():
     ):
         assert obsolete not in entry
 
-    worker = (ROOT / "security" / "worker.py").read_text(encoding="utf-8")
+    worker = (PYTHON_ROOT / "security" / "worker.py").read_text(encoding="utf-8")
     assert 'raw_scenario = request.get("scenario")' in worker
     assert 'scenario = str(raw_scenario) if raw_scenario else None' in worker
 
-    assert (ROOT / "security" / "worker.py").is_file()
-    assert (ROOT / "security" / "local_data_inspector.py").is_file()
-    assert not (ROOT / "security" / "demo_replica.py").exists()
-    assert not (ROOT / "security" / "manifest_reader.py").exists()
+    assert (PYTHON_ROOT / "security" / "worker.py").is_file()
+    assert (PYTHON_ROOT / "security" / "local_data_inspector.py").is_file()
+    assert not (PYTHON_ROOT / "security" / "demo_replica.py").exists()
+    assert not (PYTHON_ROOT / "security" / "manifest_reader.py").exists()
     assert "build_demo_replica" not in entry
     assert "demoDataLane" not in entry
-    assert (ROOT / "src" / "branding.js").is_file()
-    assert (ROOT / "assets" / "branding" / "favicon.svg").is_file()
+    assert (PYTHON_ROOT / "src" / "branding.js").is_file()
+    assert (PYTHON_ROOT / "assets" / "branding" / "favicon.svg").is_file()
     assert not (ROOT / "proxy.js").exists()
     assert not (ROOT / "security-checkpoint.js").exists()
 

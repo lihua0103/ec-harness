@@ -13,7 +13,10 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
+# 2026-08-25 架构迁移：Python 运行时（security/、assets/、JS 桥接 src/）
+# 已移入 python/ 子目录；ROOT 仍指插件根（含 package.json、excel_header_extractor.py）。
+PYTHON_ROOT = ROOT / "python"
+sys.path.insert(0, str(PYTHON_ROOT))
 
 from security.archive_passwords import extract_dataset_archive, password_candidates
 from security.header_detect import process_csv, process_xls, process_xlsx
@@ -227,8 +230,8 @@ def test_metadata_preserves_proven_clinical_headers() -> None:
 
 def test_header_extractor_has_no_full_read_mode() -> None:
     extractor = (ROOT / "excel_header_extractor.py").read_text(encoding="utf-8")
-    detector = (ROOT / "security" / "header_detect.py").read_text(encoding="utf-8")
-    node_guard = (ROOT / "src" / "tool-result-guard.js").read_text(encoding="utf-8")
+    detector = (PYTHON_ROOT / "security" / "header_detect.py").read_text(encoding="utf-8")
+    node_guard = (PYTHON_ROOT / "src" / "tool-result-guard.js").read_text(encoding="utf-8")
     for obsolete in ("--mode", "--max-full-rows", "dump_xlsx_full", "dump_xls_full", "dump_csv_full"):
         assert obsolete not in extractor
         assert obsolete not in detector
@@ -726,7 +729,7 @@ def test_legacy_listing_generator_module_is_gone() -> None:
     """F-11: 旧生成器已删除，不得被任何路径重新引入。"""
     import importlib
 
-    assert not (ROOT / "security" / "emerald_listing_generator.py").exists()
+    assert not (PYTHON_ROOT / "security" / "emerald_listing_generator.py").exists()
     try:
         importlib.import_module("security.emerald_listing_generator")
     except ModuleNotFoundError:

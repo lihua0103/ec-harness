@@ -16,7 +16,9 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
+# 2026-08-25 架构迁移：Python 运行时已移入 python/ 子目录。
+PYTHON_ROOT = ROOT / "python"
+sys.path.insert(0, str(PYTHON_ROOT))
 
 from security import listing_budget
 from security.listing_code_lane import (

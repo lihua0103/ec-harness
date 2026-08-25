@@ -25,12 +25,16 @@
   "license": "MIT",
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
+    "test": "pnpm run test:ts && pnpm run test:py",
+    "test:ts": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
     "test:e2e": "vitest run tests/e2e",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "test:py": "node ../../../scripts/run-pytest.js",
+    "test:py:unit": "node ../../../scripts/run-pytest.js tests/unit",
+    "test:py:integration": "node ../../../scripts/run-pytest.js tests/integration"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

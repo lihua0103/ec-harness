@@ -31,7 +31,9 @@ from unittest import mock
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
+# 2026-08-25 架构迁移：Python 运行时已移入 python/ 子目录。
+PYTHON_ROOT = ROOT / "python"
+sys.path.insert(0, str(PYTHON_ROOT))
 
 from security.listing_budget import charge_execution, reset_budget
 from security.listing_executor import ListingExecutionError, execute_listing_plan

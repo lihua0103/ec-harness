@@ -10,10 +10,12 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+# 2026-08-25 架构迁移：Python 运行时已移入 python/ 子目录。
+PYTHON_ROOT = ROOT / "python"
 DRIVER = ROOT / "tests" / "integration" / "plugin_driver.js"
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(PYTHON_ROOT))
 # FIX-12 后审计默认写入用户主目录；测试显式指回项目 var 以便断言审计内容。
-os.environ.setdefault("EMERALD_AUDIT_ROOT", str(ROOT / "var" / "egress_audit"))
+os.environ.setdefault("EMERALD_AUDIT_ROOT", str(PYTHON_ROOT / "var" / "egress_audit"))
 
 
 def make_xlsx(path: Path):
@@ -92,7 +94,7 @@ def run(scenario: str, excel: Path | None = None,
         env["CREDENTIAL_FILE"] = str(credential_file)
     result = subprocess.run(
         ["node", str(DRIVER), scenario],
-        cwd=ROOT,
+        cwd=PYTHON_ROOT,
         env=env,
         capture_output=True,
         text=True,
@@ -163,7 +165,7 @@ def test_local_metadata_lane_returns_only_structure_and_enforces_root():
         env["LOCAL_METADATA_OUTSIDE_FILE"] = str(outside)
         result = subprocess.run(
             ["node", str(DRIVER), "local-metadata"],
-            cwd=ROOT,
+            cwd=PYTHON_ROOT,
             env=env,
             capture_output=True,
             text=True,
@@ -181,7 +183,7 @@ def test_local_metadata_lane_returns_only_structure_and_enforces_root():
 
         absolute_inside_result = subprocess.run(
             ["node", str(DRIVER), "local-metadata-absolute-inside-root"],
-            cwd=ROOT,
+            cwd=PYTHON_ROOT,
             env=env,
             capture_output=True,
             text=True,
@@ -194,7 +196,7 @@ def test_local_metadata_lane_returns_only_structure_and_enforces_root():
 
         outside_result = subprocess.run(
             ["node", str(DRIVER), "local-metadata-outside-root"],
-            cwd=ROOT,
+            cwd=PYTHON_ROOT,
             env=env,
             capture_output=True,
             text=True,
@@ -235,8 +237,8 @@ def test_llm_clean_streams_and_dirty_blocks():
     assert run("llm-platform-header-clean")["streamed"] is True
     # 普通模型语义不做全局 token 化；数据边界由来源域和专用工具负责。
     dirty = run("llm-dirty")
-    assert dirty["streamed"] is True
-    assert dirty["content"] == "Subject A1234567"
+    assert dirty["thrown"] is True
+    assert "出域已阻断" in dirty["message"]
 
     structured = run("llm-structured-dirty")
     forwarded = json.dumps(structured["options"], ensure_ascii=False)
@@ -280,7 +282,7 @@ def test_full_model_request_scope_blocks_and_audits_clean_requests():
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     import os
-    audit_root = Path(os.environ.get("EMERALD_AUDIT_ROOT", ROOT / "var" / "egress_audit"))
+    audit_root = Path(os.environ.get("EMERALD_AUDIT_ROOT", PYTHON_ROOT / "var" / "egress_audit"))
     audit_path = max(audit_root.glob("*.jsonl"), key=lambda path: path.stat().st_mtime)
     record = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
     evidence = record["request_evidence"]
@@ -524,17 +526,17 @@ def test_listing_receipt_keys_stay_within_whitelists():
     harness 读不到 spec 与 schema。2026-08-23 的事故正是 Python 侧漏了
     inferredScenario / scenarioConfidence / supportData 三键。
     """
-    guard = (ROOT / "src" / "tool-result-guard.js").read_text(encoding="utf-8")
+    guard = (PYTHON_ROOT / "src" / "tool-result-guard.js").read_text(encoding="utf-8")
     block = guard.split("const allowed = new Set([", 1)[1].split("]);", 1)[0]
     node_allowed = set(re.findall(r"'([^']+)'", block))
 
-    egress = (ROOT / "security" / "egress_checkpoint.py").read_text(encoding="utf-8")
+    egress = (PYTHON_ROOT / "security" / "egress_checkpoint.py").read_text(encoding="utf-8")
     py_block = egress.split("    allowed = {", 1)[1].split("}", 1)[0]
     py_allowed = set(re.findall(r'"([^"]+)"', py_block))
 
     produced: set[str] = set()
     for source in ("listing_inspector.py", "listing_workflow.py"):
-        text = (ROOT / "security" / source).read_text(encoding="utf-8")
+        text = (PYTHON_ROOT / "security" / source).read_text(encoding="utf-8")
         for marker in ("CLINICAL_LISTING_INSPECTION", "CLINICAL_LISTING_PLAN_RECEIPT"):
             for chunk in text.split(f'"clinicalGuard": "{marker}"')[1:]:
                 produced.update(re.findall(r'^\s{8}"([A-Za-z_][A-Za-z0-9_]*)":', chunk.split("\n    }", 1)[0], re.M))
@@ -552,7 +554,7 @@ def test_listing_receipt_keys_stay_within_whitelists():
 
     # 2026-08-24 代码车道（listing_code_lane.py）收据字段合同：run 信封与
     # publish 收据的顶层键必须同时落在双侧闭集内，任一侧漏键即失信 token 化。
-    code_lane = (ROOT / "security" / "listing_code_lane.py").read_text(encoding="utf-8")
+    code_lane = (PYTHON_ROOT / "security" / "listing_code_lane.py").read_text(encoding="utf-8")
     for marker in ("CLINICAL_LISTING_CODE_RECEIPT", "CLINICAL_LISTING_RECEIPT"):
         assert f'"{marker}"' in code_lane, f"listing_code_lane.py 缺少收据 marker {marker}"
     code_lane_keys = {
@@ -605,7 +607,10 @@ def test_listing_tools_and_workflow_guidance_are_always_registered():
         "clinical_listing_inspect", "clinical_listing_run_code",
         "clinical_listing_publish",
     }.issubset(disabled_names)
-    assert len(disabled["prompts"]) == 1
+    assert len(disabled["prompts"]) >= 2
+    assert {prompt["name"] for prompt in disabled["prompts"]} >= {
+        "tool:clinical-listing-lifecycle", "tool:local-data-metadata",
+    }
     prompt = disabled["prompts"][0]["text"]
     assert "inspect -> run -> iterate -> publish" in prompt
     assert "绝不能" not in prompt

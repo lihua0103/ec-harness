@@ -7,28 +7,30 @@ $global:
 
 # 插件列表
 plugins:
-  # 临床数据守护插件（新）
+  # 临床数据守护插件
   - name: '@dsh-guard/clinical-guard'
     config:
-      # 数据安全开关（核心功能，默认开启）
+      # ============ 数据安全控制 ============
+      # 数据出域拦截开关（核心功能，默认开启）
       dataEgressControl:
         enabled: true  # 主开关：false 时不做任何拦截
-        
+
         # SAS 数据集出域 AI 拦截
         sasDatasetEgress:
           enabled: true
           aiInterception: true
-        
+
         # Spec 需求数据出域 AI 拦截
         specDataEgress:
           enabled: true
           aiInterception: true
-      
+
+      # ============ 智能识别功能 ============
       # 表头检测
       headerDetection:
         enabled: true
         aiEnhanced: true
-      
+
       # EDC 字段识别
       edcFieldRecognition:
         enabled: true
@@ -36,16 +38,42 @@ plugins:
           - Medidata
           - Oracle
           - Veeva
-      
+
       # Listing 模板
       listingTemplate:
         enabled: true
         standardTemplates: true
         customTemplates: []
-      
-      # 可选配置
-      # pythonPath: /path/to/python
+
+      # ============ 品牌配置 ============
+      branding:
+        enabled: true
+        brandName: 'Emerald Clinical'      # 完整品牌名称（1-80字符）
+        brandShortName: 'Emerald'          # 简短名称（1-24字符）
+        # faviconPath: ./assets/favicon.svg  # 可选：自定义图标路径
+
+      # ============ 运行时配置 ============
+      # Python 解释器路径（可选，默认自动检测）
+      # pythonPath: python3
+      # pythonPath: /path/to/.venv/bin/python
+
+      # 审计日志路径（可选，默认使用系统临时目录）
       # auditLogPath: /path/to/audit/logs
+
+      # 凭据目录（可选，用于存储加密 ZIP 密码等敏感信息）
+      # credentialsDir: /path/to/credentials
+
+      # 本地数据访问模式（可选）
+      # localDataAccess: uat-local  # uat-local 启用本地数据访问
+
+      # 本地数据根目录（可选，仅在旧版 Harness 需要时使用）
+      # localDataRoot: /path/to/data
+
+      # Listing 操作超时配置（毫秒）
+      listingTimeoutMs:
+        inspect: 30000      # 规格检查超时
+        runCode: 120000     # 代码执行超时（重 I/O 操作）
+        publish: 60000      # 发布超时
   
   # 企业认证插件（示例）
   - name: '@dsh-guard/enterprise-auth'

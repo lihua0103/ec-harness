@@ -80,7 +80,7 @@ function isTrustedListingReceipt(value) {
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
-const extractor = join(here, '..', 'excel_header_extractor.py');
+const extractor = join(here, '..', '..', 'excel_header_extractor.py');
 
 function extractorTimeoutMs(config) {
   const raw = Number(config?.extractorTimeoutMs);

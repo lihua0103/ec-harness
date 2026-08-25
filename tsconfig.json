@@ -5,18 +5,13 @@
     "lib": ["ES2022"],
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
-    "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "outDir": "lib",
-    "rootDir": "src"
+    "types": ["node"]
   },
-  "include": ["packages/*/src/**/*"],
-  "exclude": ["node_modules", "lib", "dist"]
+  "include": ["packages/enterprise/*/src/**/*"],
+  "exclude": ["node_modules", "lib", "dist", "**/python/**", "**/tests/**"]
 }

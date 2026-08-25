@@ -1,0 +1,9 @@
+# Python 开发与测试依赖
+# 安装：pip install -r requirements-dev.txt
+#
+# 运行时依赖见 requirements.txt（由 scripts/setup-python.js 自动安装）。
+# 本文件供开发者手动安装，用于运行 tests/ 下的 pytest 套件。
+
+-r requirements.txt
+
+pytest==8.3.4

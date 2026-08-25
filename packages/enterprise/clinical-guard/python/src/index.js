@@ -433,7 +433,7 @@ const LOCAL_DATA_OUTPUT_SCHEMA = {
 };
 
 function registerLocalMetadataTool(ctx, runtime, config, policy) {
-  if (config.localDataAccess !== 'uat-local') return () => {};
+  // 工具始终注册；开启状态的访问门禁由 worker 决定，关闭状态不设门禁。
   const promptDisposer = ctx.systemPrompt?.section?.({
     name: 'tool:local-data-metadata',
     order: 99,
@@ -514,7 +514,7 @@ export default function clinicalDataGuard(ctx, rawConfig = {}) {
 
     // 2026-08-25: 开关切换时触发进程重启
     onSwitch(switchInfo) {
-      console.log(
+      console.error(
         '[clinical-data-guard] 开关切换: ' + switchInfo.previousEnabled + ' → ' + switchInfo.enabled + '，触发进程重启'
       );
       // 通知 Harness 重启进程

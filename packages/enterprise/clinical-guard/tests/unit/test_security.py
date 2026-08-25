@@ -13,10 +13,12 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
+# 2026-08-25 架构迁移：Python 运行时已移入 python/ 子目录。
+PYTHON_ROOT = ROOT / "python"
+sys.path.insert(0, str(PYTHON_ROOT))
 os.chdir(ROOT)
 # FIX-12 后审计/授权默认写入用户主目录；测试显式指回项目 var 以便断言审计内容。
-os.environ.setdefault("EMERALD_AUDIT_ROOT", str(ROOT / "var" / "egress_audit"))
+os.environ.setdefault("EMERALD_AUDIT_ROOT", str(PYTHON_ROOT / "var" / "egress_audit"))
 
 from security.audit_log import AuditLockTimeout, write_audit_record  # noqa: E402
 from security.egress_checkpoint import EgressCheckpoint, EgressViolation, check_egress  # noqa: E402
@@ -243,7 +245,7 @@ def _allows(text: str) -> bool:
 
 @case
 def every_request_is_audited_without_raw_values():
-    audit_dir = Path(os.environ.get("EMERALD_AUDIT_ROOT", ROOT / "var" / "egress_audit"))
+    audit_dir = Path(os.environ.get("EMERALD_AUDIT_ROOT", PYTHON_ROOT / "var" / "egress_audit"))
     # D-3 (2026-08-22): 只统计 egress 域文件。此前 glob("*.jsonl") 会把
     # ai_ops/listing_ops 一起拼进 records——一旦 listing_ops_*.jsonl 存在
     # （任何 listing execute 测试先运行过），尾部 2 条就不再是本次 egress
@@ -310,7 +312,7 @@ def _run_worker(lines, timeout=20):
     env["PYTHONPATH"] = str(ROOT)
     proc = subprocess.Popen(
         [sys.executable, "-m", "security.worker"],
-        cwd=ROOT, env=env,
+        cwd=PYTHON_ROOT, env=env,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, encoding="utf-8",
     )
@@ -459,7 +461,7 @@ def node_patterns_json_matches_python_source_of_truth():
     """Claude P2-3 / FIX-11: node_patterns.json 与 patterns.py 保持一致。"""
     from security.patterns import NODE_DLP_PATTERNS
     synced = json.loads(
-        (ROOT / "security" / "node_patterns.json").read_text(encoding="utf-8")
+        (PYTHON_ROOT / "security" / "node_patterns.json").read_text(encoding="utf-8")
     )
     expected = [
         {

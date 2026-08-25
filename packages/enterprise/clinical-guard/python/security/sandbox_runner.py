@@ -38,6 +38,7 @@ class DatasetRegistry(Mapping):
     """
 
     _ALLOWED_DATA_DIRS: list[Path] = []
+    _ENFORCE_PATH_POLICY = True
 
     @classmethod
     def set_allowed_dirs(cls, dirs: list[str]) -> None:
@@ -69,6 +70,8 @@ class DatasetRegistry(Mapping):
         except (OSError, ValueError):
             raise SandboxSecurityError(f"invalid path: {path[:50]}")
 
+        if not cls._ENFORCE_PATH_POLICY:
+            return resolved
         if not cls._ALLOWED_DATA_DIRS:
             raise SandboxSecurityError("no allowed data directories configured")
 
@@ -281,19 +284,31 @@ def execute_job(job: dict[str, Any]) -> dict[str, Any]:
 
     mode = str(job.get("mode") or "run")
     code = job.get("code") or ""
+    interception_enabled = bool(job.get("interceptionEnabled", True))
     try:
-        check_code(code)
+        if interception_enabled:
+            check_code(code)
 
         # P0-FIX (RBQM run_code): 区分三种情形，任何一种缺失都必须 fail-closed。
         # 过去 `job.get(...) or []` 把"键不存在"与"显式空列表"折叠成同一分支，
         # 再由 `elif not _ALLOWED_DATA_DIRS` 兜底，导致真实故障（调用方算出空
         # 路径）只在后续 _validate_path 时才以另一句文案暴露，掩盖了根因。
-        if "allowedDataDirs" not in job:
-            raise SandboxSecurityError("no allowed data directories provided")
-        DatasetRegistry.set_allowed_dirs(job["allowedDataDirs"] or [])
+        DatasetRegistry._ENFORCE_PATH_POLICY = interception_enabled
+        if interception_enabled:
+            if "allowedDataDirs" not in job:
+                raise SandboxSecurityError("no allowed data directories provided")
+            DatasetRegistry.set_allowed_dirs(job["allowedDataDirs"] or [])
+        else:
+            DatasetRegistry._ALLOWED_DATA_DIRS = []
 
         datasets = DatasetRegistry(job.get("datasets") or {})
-        namespace = build_namespace(datasets)
+        if interception_enabled:
+            namespace = build_namespace(datasets)
+        else:
+            # 关闭状态完全交由 Harness 控制：不提供受限 builtins 或代码车道门禁。
+            import builtins
+            namespace = build_namespace(datasets)
+            namespace["__builtins__"] = builtins.__dict__
         exec(compile(code, "<listing-code>", "exec"), namespace)  # noqa: S102
         frames = _collect_outputs(namespace)
         if mode == "publish":

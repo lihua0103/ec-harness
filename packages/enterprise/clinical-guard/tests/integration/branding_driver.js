@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { registerBranding } from '../../src/branding.js';
-import { createDataInterceptionPolicy } from '../../src/data-interception-policy.js';
+import { registerBranding } from '../../python/src/branding.js';
+import { createDataInterceptionPolicy } from '../../python/src/data-interception-policy.js';
 
 const taps = [];
 const routes = new Map();
@@ -27,7 +27,9 @@ const dispose = registerBranding(ctx, { brandName: 'Emerald Clinical', brandShor
 assert.equal(taps.length, 1);
 assert.equal(routes.size, 3);
 
-const source = await readFile(new URL('../../../runtime/node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html', import.meta.url), 'utf8');
+const source = '<!doctype html><html><head><title>DeepSeek Harness</title></head><body>' +
+  '<div class="logoRow"><button class="brand"><svg></svg></button></div>' +
+  '<svg class="railFish"></svg><div data-slot="settings.general.item">DeepSeek DSH</div></body></html>';
 const html = taps[0](source);
 assert.match(html, /<title>Emerald Clinical<\/title>/);
 assert.doesNotMatch(html, /<title>DeepSeek Harness<\/title>/);

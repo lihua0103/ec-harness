@@ -166,6 +166,7 @@ def _handle(request: dict[str, Any]) -> dict[str, Any]:
                     credential_ref=str(request.get("credentialRef") or "") or None,
                     credentials_dir=str(context.get("credentialsDir") or "") or None,
                     session_id=str(context.get("sessionId") or "unknown-session"),
+                    data_interception_enabled=data_interception_enabled,
                 ))
             return _result(True, action="listing-publish", receipt=publish_listing_code(
                 local_data_root=str(context.get("localDataRoot") or ""),
@@ -174,6 +175,7 @@ def _handle(request: dict[str, Any]) -> dict[str, Any]:
                 credentials_dir=str(context.get("credentialsDir") or "") or None,
                 session_id=str(context.get("sessionId") or "unknown-session"),
                 output_plane_root=str(context.get("outputPlaneRoot") or "") or None,
+                data_interception_enabled=data_interception_enabled,
             ))
         except ListingWorkflowError as exc:
             # E-3: ListingWorkflowError 的文案本身即模型安全（不含路径/记录），

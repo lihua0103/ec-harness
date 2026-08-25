@@ -2,30 +2,36 @@
 
 ## 1. 环境准备
 
-### 安装 Node.js
+### Node.js
 
-确保安装了 Node.js 22.19.0 或更高版本：
+需要 Node.js 22.19.0+ 或 24.0.0+：
 
 ```bash
-node --version  # 应该 >= 22.19.0
+node --version
 ```
 
-### 安装 pnpm
+### pnpm
 
 ```bash
-# Windows
-npm install -g pnpm
-
-# 或使用 Corepack（推荐）
+# 使用 Corepack（推荐）
 corepack enable
 corepack prepare pnpm@11.7.0 --activate
+
+# 或直接安装
+npm install -g pnpm
 ```
 
-验证安装：
+验证：`pnpm --version` 应 >= 11.7.0
+
+### Python
+
+clinical-guard 插件的数据沙箱依赖 Python 3.9+（用于 SAS/Excel 读取与 pandas 变换）：
 
 ```bash
-pnpm --version  # 应该 >= 11.7.0
+python3 --version
 ```
+
+没有 Python 也能启动，但数据沙箱、Listing 生成与表头检测将不可用。
 
 ## 2. 克隆项目
 
@@ -40,94 +46,105 @@ cd dsh-guard
 pnpm install
 ```
 
-安装时间：约 2-5 分钟（比完整版快 10 倍）
+`pnpm install` 会自动执行 `scripts/setup-python.js`，在
+`packages/enterprise/clinical-guard/python/.venv` 创建虚拟环境并安装
+Python 依赖（pandas、pyreadstat、openpyxl、pyzipper 等）。
 
-## 4. 配置环境
+Python 缺失或安装失败**不会中断** Node 依赖安装，只会打印警告。
+之后可单独重试：
 
-### 复制环境变量模板
+```bash
+# 仅检测环境
+node scripts/setup-python.js --check
+
+# 创建虚拟环境并安装依赖
+node scripts/setup-python.js
+```
+
+## 4. 配置环境变量
 
 ```bash
 cp .env.example .env
 ```
 
-### 编辑 .env 文件
-
-最少需要配置 DeepSeek API Key：
+最少需要配置 API Key：
 
 ```env
 DEEPSEEK_API_KEY=sk-your-actual-api-key-here
 ```
 
-可选配置：
+`.env.example` 中列出了所有可用变量（品牌、数据拦截开关、安全平面、
+审计与限额、超时等），均带默认值说明。生产环境务必设置：
 
 ```env
-# 自定义基础 URL
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-
-# OAuth2 认证
-OAUTH2_CLIENT_ID=your-client-id
-OAUTH2_CLIENT_SECRET=your-client-secret
+EMERALD_HASH_SALT=<随机值>
+EMERALD_SIGNING_SALT=<随机值>
 ```
 
-## 5. 编辑配置文件
+## 5. 编辑插件配置
 
-编辑 `configs/cordis.yml`，启用需要的插件：
+`configs/cordis.yml` 控制插件的启用与参数。clinical-guard 默认启用：
 
 ```yaml
 plugins:
-  # 启用企业认证插件
-  - name: '@dsh-guard/enterprise-auth'
-    disabled: false  # 改为 false 启用
+  - name: '@dsh-guard/clinical-guard'
     config:
-      enabled: true
+      dataEgressControl:
+        enabled: true          # 数据拦截主开关
+      branding:
+        enabled: true
+        brandName: 'Emerald Clinical'
+        brandShortName: 'Emerald'
+```
+
+企业认证插件默认禁用，需要时改 `disabled`：
+
+```yaml
+  - name: '@dsh-guard/enterprise-auth'
+    disabled: false
+    config:
       provider: oauth2
 ```
 
-## 6. 构建企业插件
+## 6. 构建
 
 ```bash
 pnpm build
 ```
 
+构建产物在各插件的 `lib/` 目录。类型检查可单独运行：
+
+```bash
+pnpm typecheck
+```
+
 ## 7. 运行
 
-### 方式一：直接使用官方 CLI（推荐测试）
-
-如果你只想测试，可以直接使用官方包：
-
 ```bash
-# 安装官方 CLI
-pnpm add -g @deepseek-ai/dsh
-
-# 运行
-dsh web
-```
-
-### 方式二：开发模式（企业插件开发）
-
-```bash
-# 在项目目录运行
+# 完整 Web UI（推荐）
 pnpm start
+
+# 无界面模式
+pnpm start:headless
 ```
 
-默认访问：`http://127.0.0.1:3080`
+默认访问 `http://127.0.0.1:3080`（端口由 `.env` 的 `PORT` 控制）。
+
+**关于 headless 模式**：Python 层需要宿主提供 `webServer` 和 `tools`
+两个服务。headless 下这两者不可用，插件会打印警告并跳过 Python 运行时挂载
+（品牌注入、Listing 工具、数据沙箱不可用），TypeScript 核心拦截策略不受影响。
 
 ## 8. 开发你的第一个插件
 
-### 创建插件目录
+### 创建目录
 
 ```bash
 mkdir -p packages/enterprise/my-plugin/src
 cd packages/enterprise/my-plugin
-```
-
-### 初始化 package.json
-
-```bash
 pnpm init
 ```
 
-编辑 `package.json`：
+### package.json
 
 ```json
 {
@@ -135,45 +152,87 @@ pnpm init
   "version": "0.1.0",
   "type": "module",
   "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^3.20.0",
-    "@deepseek-ai/schemastery": "^16.0.0"
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@types/node": "^22.20.0",
+    "typescript": "^6.0.0"
   }
 }
 ```
 
-### 编写插件代码
+### tsconfig.json
 
-创建 `src/index.ts`：
+必须显式设置 `noEmit: false`——根配置为类型检查用途设了 `noEmit: true`，
+子包若不覆盖会静默产出空的 `lib/`：
+
+```json
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "outDir": "lib",
+    "rootDir": "src"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "lib", "tests"]
+}
+```
+
+### src/index.ts
+
+注意 cordis v4 的两个约束：
+
+1. **不导出 `Schema`** —— Schema 由独立的 `@deepseek-ai/schemastery` 提供，
+   本项目未安装。用 TypeScript 接口加默认值常量表达配置契约。
+2. **`Service` 构造签名是 `(ctx, name)`** —— 只接受两个参数。
 
 ```typescript
-import { Context, Schema, Service } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 
 export interface Config {
   enabled: boolean
   message: string
 }
 
-export const Config: Schema<Config> = Schema.object({
-  enabled: Schema.boolean().default(true),
-  message: Schema.string().default('Hello from my plugin!'),
-})
+export const DEFAULT_CONFIG: Config = {
+  enabled: true,
+  message: 'Hello from my plugin!',
+}
 
 export class MyPluginService extends Service {
-  constructor(ctx: Context, public config: Config) {
-    super(ctx, 'myPlugin', true)
-    ctx.logger.info(config.message)
+  public config: Config
+
+  constructor(ctx: Context, config: Partial<Config> = {}) {
+    super(ctx, 'myPlugin')
+    this.config = { ...DEFAULT_CONFIG, ...config }
+    if (!this.config.enabled) return
+    ctx.logger.info(this.config.message)
   }
 }
 
 export const name = '@dsh-guard/enterprise-my-plugin'
+export const Config = DEFAULT_CONFIG
 
-export function apply(ctx: Context, config: Config) {
+export function apply(ctx: Context, config: Partial<Config> = {}) {
   ctx.plugin(MyPluginService, config)
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    myPlugin: MyPluginService
+  }
 }
 ```
 
-### 添加到 Cordis 配置
+### 注册插件
 
 编辑 `configs/cordis.yml`：
 
@@ -185,38 +244,30 @@ plugins:
       message: '我的第一个插件!'
 ```
 
-### 构建并测试
+### 构建并运行
 
 ```bash
-# 返回项目根目录
 cd ../../..
-
-# 构建插件
 pnpm build
-
-# 运行
 pnpm start
 ```
 
+参考现有实现：[auth 插件](../../packages/enterprise/auth/src/index.ts)（最小骨架）、
+[clinical-guard 插件](../../packages/enterprise/clinical-guard/src/index.ts)（含 Python 桥接）。
+
 ## 9. 常见问题
 
-### Q: 提示找不到 dsh 命令？
+### Q: 找不到 dsh 命令？
 
-A: 需要先安装官方 CLI：
+`@deepseek-ai/dsh` 是根依赖，`pnpm install` 后应可用。全局安装：
 
 ```bash
 pnpm add -g @deepseek-ai/dsh
 ```
 
-或者使用 npx：
-
-```bash
-npx @deepseek-ai/dsh web
-```
-
 ### Q: 依赖安装失败？
 
-A: 检查网络，使用国内镜像：
+切换镜像：
 
 ```bash
 pnpm config set registry https://registry.npmmirror.com
@@ -225,31 +276,42 @@ pnpm install
 
 ### Q: 插件没有加载？
 
-A: 检查以下几点：
-1. `cordis.yml` 中 `disabled: false`
-2. 插件已经构建（`pnpm build`）
-3. 查看日志输出是否有错误
+依次检查：`cordis.yml` 中未设 `disabled: true`、已执行 `pnpm build`、
+插件 `lib/` 目录有产出、启动日志中是否有错误。
 
-### Q: TypeScript 类型错误？
+### Q: 构建后 lib/ 是空的？
 
-A: 确保安装了类型依赖：
+子包 tsconfig 缺少 `"noEmit": false`。根配置的 `noEmit: true` 会被继承，
+导致 tsc 静默不产出文件。
+
+### Q: 提示 `Module '@deepseek-ai/cordis' has no exported member 'Schema'`？
+
+cordis v4 不再导出 Schema。见第 8 节的配置写法。
+
+### Q: Python worker 启动失败？
+
+检查虚拟环境与依赖：
 
 ```bash
-pnpm add -D @types/node typescript
+node scripts/setup-python.js --check
+cd packages/enterprise/clinical-guard/python
+.venv/bin/python -c "import security.worker"
 ```
+
+### Q: 数据拦截不生效？
+
+确认 `configs/cordis.yml` 中 `dataEgressControl.enabled` 为 `true`，
+且未通过环境变量 `DATA_INTERCEPTION_ENABLED=0` 关闭。
+也可在 Web UI 的「设置 → 通用设置 → 临床数据出域拦截」中查看当前状态。
 
 ## 10. 下一步
 
-- 阅读 [插件开发指南](PLUGIN_GUIDE.md)
-- 查看 [企业开发规范](DEVELOPMENT_STANDARDS.md)
-- 参考 [精简方案说明](SIMPLIFIED_APPROACH.md)
+- [项目总览与架构](../../README.md)
+- [E2E 测试指南](../E2E_TEST_GUIDE.md)
+- [架构审计报告](../reports/项目架构与代码全面审计报告.md)
 
 ## 获取帮助
 
-- 查看文档：`docs/enterprise/`
+- 文档目录：`docs/`
 - 提交 Issue：GitHub Issues
 - 内部支持：联系技术团队
-
----
-
-祝你开发愉快！🚀

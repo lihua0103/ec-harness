@@ -26,20 +26,25 @@ tempfile.tempdir = str(_TMP_ROOT)
 # 存在引用环，文件句柄要等 gc 才释放；杀毒/索引对新建 xlsx（zip 容器）也有
 # 毫秒级扫描锁。直接 rmtree 必撞 WinError 32。统一在 TemporaryDirectory.cleanup
 # 前打断引用环并短重试；持续锁定仍报错，不掩盖真实句柄泄漏。
-_original_cleanup = tempfile.TemporaryDirectory.cleanup
+#
+# 幂等保护：插件根的 conftest.py 有等价逻辑。若两者都生效，补丁会自我包裹并
+# 导致 RecursionError，因此用标记位确保只打一次。
+_PATCH_FLAG = "_dsh_guard_gc_tolerant_cleanup"
 
+if not getattr(tempfile.TemporaryDirectory.cleanup, _PATCH_FLAG, False):
+    _original_cleanup = tempfile.TemporaryDirectory.cleanup
 
-def _gc_tolerant_cleanup(self) -> None:
-    gc.collect()
-    for attempt in range(5):
-        try:
-            _original_cleanup(self)
-            return
-        except PermissionError:
-            if attempt == 4:
-                raise
-            gc.collect()
-            time.sleep(0.3)
+    def _gc_tolerant_cleanup(self) -> None:
+        gc.collect()
+        for attempt in range(5):
+            try:
+                _original_cleanup(self)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                gc.collect()
+                time.sleep(0.3)
 
-
-tempfile.TemporaryDirectory.cleanup = _gc_tolerant_cleanup
+    setattr(_gc_tolerant_cleanup, _PATCH_FLAG, True)
+    tempfile.TemporaryDirectory.cleanup = _gc_tolerant_cleanup

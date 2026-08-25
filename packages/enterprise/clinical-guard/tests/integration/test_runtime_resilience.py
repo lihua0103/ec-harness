@@ -9,14 +9,16 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
-os.environ.setdefault("EMERALD_AUDIT_ROOT", str(ROOT / "var" / "egress_audit"))
+# 2026-08-25 架构迁移：Python 运行时已移入 python/ 子目录。
+PYTHON_ROOT = ROOT / "python"
+sys.path.insert(0, str(PYTHON_ROOT))
+os.environ.setdefault("EMERALD_AUDIT_ROOT", str(PYTHON_ROOT / "var" / "egress_audit"))
 
 
 def run_node(script: str) -> dict:
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
+        cwd=PYTHON_ROOT,
         env={**os.environ, "PYTHON": sys.executable, "PLUGIN_PYTHON": sys.executable},
         capture_output=True,
         text=True,

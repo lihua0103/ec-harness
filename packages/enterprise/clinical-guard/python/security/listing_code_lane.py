@@ -32,6 +32,7 @@ from security.listing_workflow import (
     _sweep_stale_transient,
 )
 from security.path_policy import read_credential, resolve_under_root, system_temp_root
+from security.patterns import sanitize_error
 from security.project_profile import load_project_profile
 
 DEFAULT_RUN_TIMEOUT_SECONDS = 300.0
@@ -57,6 +58,7 @@ def _scrub(value: Any, limit: int | None = None) -> str:
 
 def _read_credential_or_fail(
     credential_ref: str | None, credentials_dir: str | None,
+    data_interception_enabled: bool = True,
 ) -> bytes | str | None:
     if not credential_ref:
         return None
@@ -66,7 +68,10 @@ def _read_credential_or_fail(
     from security.path_policy import PathPolicyError
 
     try:
-        return read_credential(credentials_dir, credential_ref)
+        if data_interception_enabled:
+            return read_credential(credentials_dir, credential_ref)
+        # 关闭状态由 Harness 全权控制，不再应用凭据路径门禁。
+        return (Path(credentials_dir).expanduser() / credential_ref).read_bytes()
     except PathPolicyError as exc:
         raise ListingWorkflowError(
             "credential reference is invalid", code="CREDENTIAL_REF_INVALID") from exc
@@ -167,36 +172,45 @@ def run_listing_code(
     code: Any = None, credential_ref: str | None = None,
     credentials_dir: str | None = None, session_id: str = "unknown-session",
     timeout_seconds: float | None = None,
+    data_interception_enabled: bool = True,
 ) -> dict[str, Any]:
     """执行模型代码并返回元数据信封；成功则登记为可 publish 状态。"""
     if not isinstance(code, str) or not code.strip():
         raise ListingWorkflowError(
             "code is required", code="SANDBOX_CODE_REJECTED")
-    try:
-        tree = check_code(code)
-    except SandboxViolation as exc:
-        return {
-            "clinicalGuard": "CLINICAL_LISTING_CODE_RECEIPT",
-            "status": "rejected",
-            "stage": "run",
-            "project": project,
-            "scenario": scenario,
-            "code": exc.code,
-            "message": str(exc),
-            "dataClass": "METADATA_ONLY",
-        }
-    credential = _read_credential_or_fail(credential_ref, credentials_dir)
+    tree = None
+    if data_interception_enabled:
+        try:
+            tree = check_code(code)
+        except SandboxViolation as exc:
+            return {
+                "clinicalGuard": "CLINICAL_LISTING_CODE_RECEIPT",
+                "status": "rejected",
+                "stage": "run",
+                "project": project,
+                "scenario": scenario,
+                "code": exc.code,
+                "message": str(exc),
+                "dataClass": "METADATA_ONLY",
+            }
+    credential = _read_credential_or_fail(
+        credential_ref, credentials_dir, data_interception_enabled)
     inspection = _inspect_cached(local_data_root, project, scenario, credential)
     resolved_scenario = str(inspection.get("scenario") or scenario or "")
     if not resolved_scenario:
         raise ListingWorkflowError(
             "listing scenario could not be resolved", code="SCENARIO_UNKNOWN")
-    rejected = _charge_or_receipt(
-        session_id=session_id, project=project, scenario=resolved_scenario, code=code)
-    if rejected is not None:
-        return rejected
+    if data_interception_enabled:
+        rejected = _charge_or_receipt(
+            session_id=session_id, project=project, scenario=resolved_scenario, code=code)
+        if rejected is not None:
+            return rejected
     try:
-        project_path = resolve_under_root(local_data_root, project, allow_root=True)
+        project_path = (
+            resolve_under_root(local_data_root, project, allow_root=True)
+            if data_interception_enabled
+            else Path(local_data_root, project).expanduser().resolve()
+        )
     except Exception as exc:
         raise ListingWorkflowError(
             "project must be a relative path under the local root",
@@ -208,7 +222,12 @@ def run_listing_code(
         raise ListingWorkflowError(
             "project path resolved to empty", code="PROJECT_PATH_INVALID")
     available = _available_dataset_names(project_path, credential)
-    required = _referenced_datasets(tree, available)
+    # 关闭时交给 Harness 自主操作，物化全部可用数据集，不做引用裁剪。
+    required = (
+        _referenced_datasets(tree, available)
+        if data_interception_enabled and tree is not None
+        else available
+    )
     try:
         catalog, files = _sandbox_files(project_path, credential, required)
     except Exception as exc:
@@ -218,7 +237,11 @@ def run_listing_code(
         envelope = run_sandbox(
             code=code, files=files, mode="run",
             timeout_seconds=timeout_seconds or DEFAULT_RUN_TIMEOUT_SECONDS,
-            allowed_data_dirs=_allowed_data_dirs(project_path, catalog),
+            allowed_data_dirs=(
+                _allowed_data_dirs(project_path, catalog)
+                if data_interception_enabled else None
+            ),
+            interception_enabled=data_interception_enabled,
         )
     finally:
         catalog.close()
@@ -320,9 +343,11 @@ def publish_listing_code(
     credential_ref: str | None = None, credentials_dir: str | None = None,
     session_id: str = "unknown-session", output_plane_root: str | None = None,
     timeout_seconds: float | None = None,
+    data_interception_enabled: bool = True,
 ) -> dict[str, Any]:
     """重放最近一次成功代码并发布 Excel 交付物（固定 Writer + 两步改名）。"""
-    credential = _read_credential_or_fail(credential_ref, credentials_dir)
+    credential = _read_credential_or_fail(
+        credential_ref, credentials_dir, data_interception_enabled)
     inspection = _inspect_cached(local_data_root, project, scenario, credential)
     resolved_scenario = str(inspection.get("scenario") or scenario or "")
     key = (session_id, project, resolved_scenario)
@@ -338,15 +363,20 @@ def publish_listing_code(
             "message": "run the transformation code successfully before publishing",
             "dataClass": "METADATA_ONLY",
         }
-    charge_execution(
-        session_id=session_id, project=project, scenario=resolved_scenario,
-        plan={"outputs": [{"name": name} for name in stored["outputs"]]},
-    )
+    if data_interception_enabled:
+        charge_execution(
+            session_id=session_id, project=project, scenario=resolved_scenario,
+            plan={"outputs": [{"name": name} for name in stored["outputs"]]},
+        )
     # 执行态固定在系统统一临时目录（.cache/tmp），与产物域同卷，绝不写 C 盘。
     staging_parent = Path(tempfile.mkdtemp(prefix="emerald-listing-staging-", dir=system_temp_root()))
     staging = staging_parent / uuid.uuid4().hex
     try:
-        project_path = resolve_under_root(local_data_root, project, allow_root=True)
+        project_path = (
+            resolve_under_root(local_data_root, project, allow_root=True)
+            if data_interception_enabled
+            else Path(local_data_root, project).expanduser().resolve()
+        )
         # P0-FIX (RBQM run_code): 同 run_listing_code，空路径必须在传入沙箱前拦截。
         if not str(project_path).strip():
             raise ListingWorkflowError(
@@ -364,7 +394,11 @@ def publish_listing_code(
                 staging=str(staging), review_columns=review_columns,
                 contents_sheet_name=profile.contents_sheet_name,
                 scenario=resolved_scenario,
-                allowed_data_dirs=_allowed_data_dirs(project_path, catalog),
+                allowed_data_dirs=(
+                    _allowed_data_dirs(project_path, catalog)
+                    if data_interception_enabled else None
+                ),
+                interception_enabled=data_interception_enabled,
             )
         finally:
             catalog.close()

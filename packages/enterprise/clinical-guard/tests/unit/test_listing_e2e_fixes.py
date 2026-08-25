@@ -17,7 +17,9 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
+# 2026-08-25 架构迁移：Python 运行时已移入 python/ 子目录。
+PYTHON_ROOT = ROOT / "python"
+sys.path.insert(0, str(PYTHON_ROOT))
 
 from security import worker
 from security import spec_parser
@@ -106,7 +108,7 @@ def test_worker_protocol_smoke_after_preflight() -> None:
     """依赖预检通过后协议层不受影响：ping → pong。"""
     proc = subprocess.Popen(
         [sys.executable, "-m", "security.worker"],
-        cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        cwd=PYTHON_ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
     )
     try:
@@ -125,7 +127,7 @@ def _run_node(script: str, extra_env: dict[str, str] | None = None) -> dict:
         env[key] = value
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
-        cwd=ROOT, env=env, capture_output=True, text=True,
+        cwd=PYTHON_ROOT, env=env, capture_output=True, text=True,
         encoding="utf-8", errors="replace", timeout=90,
     )
     assert result.returncode == 0, result.stderr

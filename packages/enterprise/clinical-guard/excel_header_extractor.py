@@ -3,8 +3,23 @@ Excel 表头提取器 - 提取元数据而不泄露数据值
 """
 import sys
 import json
+import csv
+import re
 import openpyxl
 from pathlib import Path
+
+_SENSITIVE_HEADER = re.compile(
+    r"^(?:[A-Z]{1,4}\d{4,}|\d{4}-\d{2}-\d{2}|\d{5,}|"
+    r"screening|enrolled|已入组|受试者|患者)$",
+    re.IGNORECASE,
+)
+
+
+def _safe_headers(values: list[str]) -> list[str]:
+    return [
+        f"COLUMN_{index + 1}" if _SENSITIVE_HEADER.match(value.strip()) else value
+        for index, value in enumerate(values)
+    ]
 
 def extract_excel_headers(file_path: str) -> dict:
     """
@@ -22,6 +37,28 @@ def extract_excel_headers(file_path: str) -> dict:
         ]
     }
     """
+    path = Path(file_path)
+    if path.suffix.lower() == ".csv":
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = csv.reader(handle)
+            first_row = next(rows, [])
+            row_count = 1 if first_row else 0
+            for _ in rows:
+                row_count += 1
+        column_count = len(first_row)
+        return {
+            "sheets": [{
+                "name": path.stem,
+            "headers": [f"COLUMN_{index + 1}" for index in range(column_count)],
+                "header_cells": [
+                    {"row": 0, "col": index, "value": f"COLUMN_{index + 1}"}
+                    for index in range(column_count)
+                ],
+                "rowCount": row_count,
+                "columnCount": column_count,
+            }]
+        }
+
     wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
     result = {"sheets": []}
     
@@ -40,7 +77,11 @@ def extract_excel_headers(file_path: str) -> dict:
         
         result["sheets"].append({
             "name": sheet_name,
-            "headers": headers,
+            "headers": _safe_headers(headers),
+            "header_cells": [
+                {"row": 0, "col": index, "value": f"COLUMN_{index + 1}"}
+                for index in range(max_col)
+            ],
             "rowCount": max_row,
             "columnCount": max_col
         })
@@ -49,8 +90,8 @@ def extract_excel_headers(file_path: str) -> dict:
     return result
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print(json.dumps({"error": "Usage: python excel_header_extractor.py <file_path>"}))
+    if len(sys.argv) not in (2, 4) or (len(sys.argv) == 4 and sys.argv[2] != "--max-scan-rows"):
+        print(json.dumps({"error": "Usage: python excel_header_extractor.py <file_path> [--max-scan-rows <n>]"}))
         sys.exit(1)
     
     file_path = sys.argv[1]

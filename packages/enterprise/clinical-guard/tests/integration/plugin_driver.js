@@ -1,4 +1,4 @@
-﻿import clinicalDataGuard from '../../src/index.js';
+import clinicalDataGuard from '../../python/src/index.js';
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools';
 
 const scenario = process.argv[2];

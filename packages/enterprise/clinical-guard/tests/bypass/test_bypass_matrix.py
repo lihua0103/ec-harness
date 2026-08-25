@@ -6,7 +6,8 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
+PYTHON_ROOT = ROOT / "python"
+sys.path.insert(0, str(PYTHON_ROOT))
 
 from security.egress_checkpoint import EgressViolation, check_egress  # noqa: E402
 from tests.integration.test_plugin_runtime import make_xlsx, run  # noqa: E402

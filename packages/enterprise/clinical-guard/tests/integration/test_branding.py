@@ -8,6 +8,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# 2026-08-25 架构迁移：Python 运行时已移入 python/ 子目录。
+PYTHON_ROOT = ROOT / "python"
 DRIVER = ROOT / "tests" / "integration" / "branding_driver.js"
 
 
@@ -16,7 +18,7 @@ def test_ui_branding_uses_official_webserver_extension():
     env["NODE_PATH"] = str(ROOT)
     result = subprocess.run(
         ["node", str(DRIVER)],
-        cwd=ROOT,
+        cwd=PYTHON_ROOT,
         env=env,
         capture_output=True,
         text=True,

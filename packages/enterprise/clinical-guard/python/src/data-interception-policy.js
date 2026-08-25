@@ -45,7 +45,7 @@ export function createDataInterceptionPolicy(initialEnabled = true, options = {}
 
       // 开关切换时触发重启回调
       if (previousEnabled !== enabled) {
-        console.log(
+        console.error(
           `[clinical-data-guard] 开关切换: ${previousEnabled} → ${enabled}，触发进程重启`
         );
 

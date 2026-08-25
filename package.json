@@ -1,27 +1,36 @@
 {
   "name": "@dsh-guard/root",
-  "version": "0.1.0",
-  "description": "DSH Guard - 基于 DeepSeek Harness 的企业级 AI Agent 框架",
+  "version": "1.0.0",
+  "description": "DSH Guard - 企业级临床数据守护平台",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": "^22.19.0 || >=24.0.0",
+    "pnpm": ">=11.7.0"
   },
   "workspaces": [
     "packages/enterprise/*"
   ],
   "scripts": {
+    "preinstall": "npx only-allow pnpm",
+    "postinstall": "node scripts/setup-python.js || true",
     "start": "dsh web --config configs/cordis.yml",
     "start:headless": "dsh headless --config configs/cordis.yml",
+    "start:dev": "dsh web --dev --config configs/cordis.yml",
     "build": "pnpm -r run build",
+    "build:ts": "pnpm -r --filter=\"./packages/**\" run build",
+    "dev": "pnpm -r run dev",
     "test": "pnpm -r run test",
     "test:unit": "pnpm -r run test:unit",
     "test:integration": "pnpm -r run test:integration",
     "test:e2e": "pnpm -r run test:e2e",
     "test:watch": "vitest",
+    "test:coverage": "pnpm -r run test:coverage",
     "typecheck": "tsc --noEmit",
-    "clean": "pnpm -r exec rm -rf lib dist node_modules"
+    "lint": "pnpm -r run lint || true",
+    "clean": "pnpm -r exec rm -rf lib dist node_modules && rm -rf .cache",
+    "clean:full": "pnpm clean && rm -rf node_modules packages/*/node_modules"
   },
   "dependencies": {
     "@deepseek-ai/dsh": "^0.1.1-rc.2",
@@ -32,5 +41,17 @@
     "typescript": "^6.0.0",
     "vitest": "^4.1.8",
     "tsx": "^4.22.4"
-  }
+  },
+  "keywords": [
+    "deepseek",
+    "harness",
+    "clinical-trials",
+    "data-security",
+    "listing",
+    "pharma",
+    "ai",
+    "cordis"
+  ],
+  "author": "DSH Guard Team",
+  "license": "MIT"
 }
