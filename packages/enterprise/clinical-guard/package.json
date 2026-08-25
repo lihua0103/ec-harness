@@ -1,0 +1,49 @@
+{
+  "name": "@dsh-guard/clinical-guard",
+  "version": "1.0.0",
+  "description": "临床数据守护插件 - AI驱动的临床试验数据安全和Listing生成",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "files": ["lib", "python"],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "clinical",
+    "listing",
+    "data-guard",
+    "egress-control",
+    "ai"
+  ],
+  "author": "DSH Guard Team",
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:e2e": "vitest run tests/e2e",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "*",
+    "@types/node": "^22.20.0",
+    "typescript": "^6.0.0",
+    "vitest": "^4.1.8"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  }
+}

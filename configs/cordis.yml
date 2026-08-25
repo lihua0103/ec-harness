@@ -7,7 +7,47 @@ $global:
 
 # 插件列表
 plugins:
-  # 企业认证插件（待开发）
+  # 临床数据守护插件（新）
+  - name: '@dsh-guard/clinical-guard'
+    config:
+      # 数据安全开关（核心功能，默认开启）
+      dataEgressControl:
+        enabled: true  # 主开关：false 时不做任何拦截
+        
+        # SAS 数据集出域 AI 拦截
+        sasDatasetEgress:
+          enabled: true
+          aiInterception: true
+        
+        # Spec 需求数据出域 AI 拦截
+        specDataEgress:
+          enabled: true
+          aiInterception: true
+      
+      # 表头检测
+      headerDetection:
+        enabled: true
+        aiEnhanced: true
+      
+      # EDC 字段识别
+      edcFieldRecognition:
+        enabled: true
+        systems:
+          - Medidata
+          - Oracle
+          - Veeva
+      
+      # Listing 模板
+      listingTemplate:
+        enabled: true
+        standardTemplates: true
+        customTemplates: []
+      
+      # 可选配置
+      # pythonPath: /path/to/python
+      # auditLogPath: /path/to/audit/logs
+  
+  # 企业认证插件（示例）
   - name: '@dsh-guard/enterprise-auth'
     disabled: true
     config:
@@ -21,24 +61,3 @@ plugins:
         userInfoUrl: ${OAUTH2_USERINFO_URL}
       sessionTimeout: 3600000
       mfaEnabled: false
-  
-  # 企业审计插件（待开发）
-  - name: '@dsh-guard/enterprise-audit'
-    disabled: true
-    config:
-      enabled: true
-      logLevel: info
-      storage:
-        type: database
-        connection: ${AUDIT_DB_CONNECTION}
-  
-  # 企业合规插件（待开发）
-  - name: '@dsh-guard/enterprise-compliance'
-    disabled: true
-    config:
-      enabled: true
-      rules:
-        - name: data-retention
-          enabled: true
-        - name: pii-detection
-          enabled: true

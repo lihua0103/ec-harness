@@ -15,7 +15,10 @@
     "start": "dsh web --config configs/cordis.yml",
     "start:headless": "dsh headless --config configs/cordis.yml",
     "build": "pnpm -r run build",
-    "test": "vitest run",
+    "test": "pnpm -r run test",
+    "test:unit": "pnpm -r run test:unit",
+    "test:integration": "pnpm -r run test:integration",
+    "test:e2e": "pnpm -r run test:e2e",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "clean": "pnpm -r exec rm -rf lib dist node_modules"
