@@ -1,47 +1,26 @@
 {
-  "name": "@deepseek-ai/dsh-root",
-  "version": "0.1.1-rc.2",
-  "license": "MIT",
+  "name": "dsh-guard",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness 企业二次开发纯净骨架 —— 基于 @deepseek-ai/dsh 运行时的插件扩展基座",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@>=11.7.0",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
-  "workspaces": [
-    "vendor/*",
-    "packages/*/*",
-    "apps/*"
-  ],
   "scripts": {
-    "build": "tsx scripts/build.ts",
-    "build:lib": "npm run build:lib:host && npm run build:lib:client",
-    "build:lib:host": "tsc -b tsconfig.host.json && tsdown --env.DSH_BUILD_FACE host",
-    "build:lib:client": "tsc -b tsconfig.client.json && tsdown --env.DSH_BUILD_FACE client",
-    "build:web": "pnpm --filter @deepseek-ai/dsh-web-frontend run build",
-    "clean": "tsx scripts/clean.ts",
-    "typecheck": "npm run build:lib:host && npm run typecheck:contracts-ready",
-    "typecheck:contracts-ready": "tsc -b tsconfig.client.json",
-    "lint": "npm run build:lib:host && npm run lint:contracts-ready",
-    "lint:contracts-ready": "tsx scripts/run-oxlint.ts .",
-    "lint:fix": "npm run build:lib:host && npm run lint:fix:contracts-ready",
-    "lint:fix:contracts-ready": "tsx scripts/run-oxlint.ts --config .oxlintrc.staged.json packages/typert/generator/tests/fixtures/type-model --fix && tsx scripts/run-oxlint.ts . --fix",
-    "test": "vitest run",
-    "test:gui": "vitest run packages/client packages/host",
-    "dsh": "node --import tsx/esm apps/cli/src/bin.ts",
-    "dev:web": "tsx scripts/dev-web.ts --poll",
-    "mock:llm": "node --import tsx packages/test-support/llm-mock-server/src/bin.ts"
+    "start": "dsh web",
+    "dev": "dsh web --no-open",
+    "dsh": "dsh",
+    "typecheck": "tsc --noEmit",
+    "build": "tsx scripts/build-enterprise.ts"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.1.1-rc.2"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-tool-session-query": "workspace:^",
     "@types/node": "^22.20.0",
-    "execa": "^10.0.0",
-    "oxlint": "1.76.0",
-    "oxlint-tsgolint": "7.0.2001",
-    "tsdown": "^0.22.2",
     "tsx": "^4.22.4",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.8"
-  },
-  "description": "Enterprise baseline of DeepSeek Harness — core harness + WebUI only, pnpm workspace."
+    "typescript": "^6.0.3"
+  }
 }

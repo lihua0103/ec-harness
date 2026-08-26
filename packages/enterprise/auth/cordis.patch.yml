@@ -1,0 +1,3 @@
+# 企业认证插件补丁示例
+- id: enterprise-auth
+  name: '@dsh-guard/enterprise-auth'
