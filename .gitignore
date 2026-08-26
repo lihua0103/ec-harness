@@ -20,3 +20,9 @@ profiles/*/cordis.yml
 
 # pnpm 在不支持 unlink 的挂载盘上留下的空临时文件（如网络盘/虚拟机共享目录）。
 /_tmp_*
+
+# 官方运行时在 $DSH_HOME 下的持久化产物。因 DSH_HOME 就是仓库根
+# （官方 resolveProfileDir 契约，见 ADR-0001），这些目录会生成在此。
+# 内含会话数据，既是运行状态也可能含业务内容，务必不要提交。
+/storages/
+/.dsh/

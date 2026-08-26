@@ -9,9 +9,9 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "build": "pnpm -r --filter './packages/enterprise/**' run build",
-    "typecheck": "pnpm -r --filter './packages/enterprise/**' run typecheck",
-    "test": "pnpm -r --filter './packages/enterprise/**' run test && vitest run --dir tests",
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test && vitest run --dir tests",
     "lint": "oxlint packages scripts tests",
     "check:architecture": "node scripts/check-architecture.mjs",
     "check:secrets": "node scripts/check-secrets.mjs",

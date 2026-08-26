@@ -80,8 +80,16 @@ pnpm 11 起 `strictPeerDependencies` / `saveExact` / `autoInstallPeers` /
 - `tests/architecture/profile-assembly.test.ts`：25 条装配契约测试，按官方真实
   解析规则验证 Bundle 顺序、row id 唯一性、patch 可解析性。
 - `.oxlintrc.json`：此前 lint 无配置文件，只跑默认规则集。
-- 根 `package.json` 的 build/typecheck/test 改用 `-r --filter
-  './packages/enterprise/**'`，新增插件不再需要改四处脚本。
+- 根 `package.json` 的 build/typecheck/test 改用 `pnpm -r run <script>`，新增插件不再
+  需要改四处脚本。**不要写成 `--filter './packages/enterprise/**'`**：npm script 里的
+  单引号在 Windows 上不被 cmd.exe 剥离，过滤器会带着引号字面量下去，pnpm 打印
+  "No projects matched the filters" 然后**退出 0**，构建静默零产出。也不要写成
+  `--filter "@dsh-enterprise/*"`：根包名 `@dsh-enterprise/platform` 同样命中会递归自调。
+  裸 `-r` 在本仓库是准确的——workspace 只含 `packages/enterprise/*`（见决策 3），
+  且 `-r` 默认排除根包。
+- 插件清单统一由 `scripts/enterprise-plugins.mjs` 遍历 `packages/enterprise/*` 得出，
+  `start.mjs` / `clean.mjs` 都从它取；脚本内一律不硬编码包名，否则漏改的那个脚本会
+  静默跳过新插件。
 
 ### 8. 不跟踪 `.agents/` 与 `profiles/*/cordis.yml`
 
@@ -92,7 +100,26 @@ pnpm 11 起 `strictPeerDependencies` / `saveExact` / `autoInstallPeers` /
 ## 后果
 
 正面：启动链路与官方契约一致，`pnpm install --frozen-lockfile` 可用；规范中
-可机检的条款已全部有对应门禁；新增插件的改动面收敛到一个目录加一行 bundles。
+可机检的条款已全部有对应门禁；新增插件不需要改任何脚本。
+
+新增一个企业插件的完整改动面（已实测：加第四个插件 `scripts/` 一行未改，
+六道门禁全过）：
+
+1. `packages/enterprise/<name>/package.json`——`private:true`、`"type":"module"`、
+   `main`/`types` 指向 `lib/index.js`、`files` 与 `exports` 都要含 `cordis.patch.yml`、
+   声明 `dsh.bundle.patch: ./cordis.patch.yml`、build/typecheck/test 三个脚本。
+2. `packages/enterprise/<name>/tsconfig.json`——`composite: true`、`rootDir: src`、
+   `outDir: lib`（`lib/index.js` 这个入口是官方 loader 唯一认的路径）。
+3. `packages/enterprise/<name>/cordis.patch.yml`——**必须至少有一个 row**，
+   `id` 用 `enterprise-` 前缀，`name` 与包名逐字相同（官方按 name 做 Node 解析）。
+   空 `[]` 会通过 YAML 校验但插件根本不会被挂载，装配契约测试会拦下。
+4. `packages/enterprise/<name>/src/index.ts`——默认导出插件函数。
+5. `profiles/enterprise/package.json`——`dependencies` 加 `link:` 一行，
+   `dsh.profile.bundles` 加一行（必须排在 `@deepseek-ai/dsh-web-app` 之后）。
+   两处都要写：前者决定能否解析，后者定 patch 层顺序。
+
+根 `tsconfig.json` 的 `references` 是可选的——`pnpm -r run build` 在每个包目录各跑
+一次 `tsc -b`，不经过根 tsconfig；加它只影响 IDE 与根级 `tsc -b`。
 
 负面与待办：企业插件仍是空壳（`auth` / `tool-audit` / `ui-settings` 的
 `ctx.effect()` 内只有 TODO），实现需各自新增 ADR；CI 尚未建立，五道门禁目前靠
