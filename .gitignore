@@ -1,9 +1,22 @@
 node_modules/
+.pnpm-store/
 .env
-.DS_Store
 *.log
-lib/
+coverage/
 dist/
-.sessions/
-.storages/
-.cache/
+lib/
+.upstream-cache/
+
+*.tsbuildinfo
+
+# 官方每次 boot 都会重写 profile 的根配置（profile-boot.ts prepareProfile
+# 无条件 writeFileSync），跟踪它会造成永久脏工作树。真正该编辑的是
+# cordis.patch.yml。
+profiles/*/cordis.yml
+
+# 上游 agent 笔记：内容与 upstream/deepseek-harness/.agents 逐字重复，
+# 企业层不应再存一份（见 ADR-0001）。
+/.agents/
+
+# pnpm 在不支持 unlink 的挂载盘上留下的空临时文件（如网络盘/虚拟机共享目录）。
+/_tmp_*

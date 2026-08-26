@@ -1,26 +1,36 @@
 {
-  "name": "dsh-guard",
-  "version": "1.0.0",
-  "description": "DeepSeek Harness 企业二次开发纯净骨架 —— 基于 @deepseek-ai/dsh 运行时的插件扩展基座",
+  "name": "@dsh-enterprise/platform",
+  "version": "0.1.0",
   "private": true,
+  "description": "企业 DeepSeek Harness 扩展平台：官方 Harness 基线之上的独立插件与 Profile 层",
   "type": "module",
-  "packageManager": "pnpm@>=11.7.0",
+  "packageManager": "pnpm@11.7.0",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "start": "dsh web",
-    "dev": "dsh web --no-open",
-    "dsh": "dsh",
-    "typecheck": "tsc --noEmit",
-    "build": "tsx scripts/build-enterprise.ts"
-  },
-  "dependencies": {
-    "@deepseek-ai/dsh": "0.1.1-rc.2"
+    "build": "pnpm -r --filter './packages/enterprise/**' run build",
+    "typecheck": "pnpm -r --filter './packages/enterprise/**' run typecheck",
+    "test": "pnpm -r --filter './packages/enterprise/**' run test && vitest run --dir tests",
+    "lint": "oxlint packages scripts tests",
+    "check:architecture": "node scripts/check-architecture.mjs",
+    "check:secrets": "node scripts/check-secrets.mjs",
+    "check:upstream": "node scripts/check-upstream.mjs",
+    "check:all": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run check:architecture && pnpm run check:secrets && pnpm run check:upstream",
+    "upstream:status": "node scripts/upstream.mjs status",
+    "upstream:sync": "node scripts/upstream.mjs sync",
+    "upstream:verify": "node scripts/upstream.mjs verify",
+    "profile:dump": "node scripts/profile.mjs dump",
+    "profile:install": "node scripts/profile.mjs install",
+    "profile:run": "node scripts/profile.mjs run",
+    "clean": "node scripts/clean.mjs",
+    "start": "node scripts/start.mjs"
   },
   "devDependencies": {
-    "@types/node": "^22.20.0",
-    "tsx": "^4.22.4",
-    "typescript": "^6.0.3"
+    "@types/node": "22.20.1",
+    "oxlint": "1.80.0",
+    "tsx": "4.23.12",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
   }
 }

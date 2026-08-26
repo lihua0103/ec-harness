@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enterprise/auth",
+  "name": "@dsh-enterprise/tool-audit",
   "version": "0.1.0",
   "private": true,
   "type": "module",

@@ -1,0 +1,19 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: false
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      '@dsh-enterprise/auth':
+        specifier: link:../../packages/enterprise/auth
+        version: link:../../packages/enterprise/auth
+      '@dsh-enterprise/tool-audit':
+        specifier: link:../../packages/enterprise/tool-audit
+        version: link:../../packages/enterprise/tool-audit
+      '@dsh-enterprise/ui-settings':
+        specifier: link:../../packages/enterprise/ui-settings
+        version: link:../../packages/enterprise/ui-settings

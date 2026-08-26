@@ -1,0 +1,8 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/enterprise/auth" },
+    { "path": "packages/enterprise/tool-audit" },
+    { "path": "packages/enterprise/ui-settings" }
+  ]
+}

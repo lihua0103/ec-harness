@@ -1,0 +1,9 @@
+# 官方 initProfile 为 profile 目录写入的 pnpm 布局约定。
+# profile 是独立的 pnpm 根（不是企业 workspace 成员），
+# 以便 dsh 的两锚点模块解析与 $DSH_HOME/profiles/node_modules
+# 扁平回退目录按官方预期工作。
+packages:
+  - .
+
+nodeLinker: hoisted
+autoInstallPeers: false

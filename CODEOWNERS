@@ -1,0 +1,33 @@
+# 代码所有权
+#
+# 语法见 https://docs.github.com/articles/about-code-owners
+# 后匹配优先：越靠下的规则覆盖上面的。
+
+# 默认所有权
+*                                   @platform-team
+
+# 官方 submodule 指针：移动它等于整体升级运行时，必须走 UPSTREAM_UPGRADE.md
+/.gitmodules                        @platform-team @architecture-review
+/upstream/                          @platform-team @architecture-review
+
+# 架构边界与治理门禁：改这些等于改规则本身
+/scripts/check-architecture.mjs     @architecture-review
+/scripts/check-secrets.mjs          @security-review @architecture-review
+/scripts/upstream.mjs               @platform-team @architecture-review
+/tests/architecture/                @architecture-review
+
+# 依赖与运行时基线
+/package.json                       @platform-team @architecture-review
+/pnpm-workspace.yaml                @platform-team @architecture-review
+/pnpm-lock.yaml                     @platform-team
+
+# 企业装配层：决定哪些插件真正加载
+/profiles/                          @platform-team @architecture-review
+
+# 架构决策记录
+/docs/enterprise/adr/               @architecture-review
+
+# 安全相关插件与手册
+/packages/enterprise/auth/          @security-review @platform-team
+/packages/enterprise/tool-audit/    @security-review @platform-team
+/docs/enterprise/runbooks/SECURITY_AUDIT.md  @security-review

@@ -1,10 +1,21 @@
 @echo off
 setlocal
-
-if not exist .env (
-  echo [DSH Guard] 请先复制 .env.example 为 .env 并填写 DEEPSEEK_API_KEY
+cd /d "%~dp0"
+echo [DSH] ???? DeepSeek Harness WebUI...
+where node >nul 2>nul
+if errorlevel 1 (
+  echo [DSH] ???? Node.js 22.19 ??????
   exit /b 1
 )
-
-echo [DSH Guard] 启动 DeepSeek Harness Web UI...
-pnpm start
+where pnpm >nul 2>nul
+if errorlevel 1 (
+  echo [DSH] ???? pnpm????? pnpm 11?
+  exit /b 1
+)
+node scripts\start.mjs
+set CODE=%ERRORLEVEL%
+if not "%CODE%"=="0" (
+  echo [DSH] ???????? %CODE%?
+  pause
+)
+exit /b %CODE%

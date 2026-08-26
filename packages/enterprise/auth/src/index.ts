@@ -1,18 +1,9 @@
-import { Context } from '@deepseek-ai/cordis'
+import type { Context } from '@deepseek-ai/cordis'
 
-/**
- * 企业认证插件示例
- * 在 Cordis 启动时注册一个只读服务，Web UI 可通过 ctx.enterpriseAuth 读取登录态。
- */
-export function apply(ctx: Context) {
+/** 企业认证扩展的生命周期入口。认证实现必须接入企业身份平台。 */
+export default function enterpriseAuth(ctx: Context): void {
   ctx.effect(() => {
-    const dispose = ctx.set('enterpriseAuth', {
-      provider: 'sso-example',
-      check(token: string) {
-        // TODO: 替换为企业 SSO 校验逻辑
-        return token.startsWith('guard-')
-      },
-    })
-    return () => dispose()
+    // TODO: 注册企业身份服务、凭证解析器和登出清理逻辑。
+    return () => undefined
   })
 }

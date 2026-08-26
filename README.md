@@ -1,78 +1,86 @@
-# DSH Guard
+# DSH Enterprise Platform
 
-DeepSeek Harness 企业二次开发纯净骨架。
+面向企业二次开发的 DeepSeek Harness 扩展平台。
 
-> 基于官方 `@deepseek-ai/dsh` 运行时，通过 pnpm 管理，只保留核心运转配置、企业插件目录与开发文档。
+本项目保留 DeepSeek Harness 的官方核心能力，并把企业代码、企业 Profile、企业治理脚本与官方源码严格隔离：
 
----
+```text
+upstream/deepseek-harness/     官方 Harness 源码基线，由 Git submodule 管理
+packages/enterprise/           企业插件实现
+profiles/enterprise/           企业 Bundle/Profile 装配
+scripts/                       上游同步、架构检查、Profile 运行入口
+docs/enterprise/               企业架构、规范、升级手册
+```
 
-## 环境要求
+企业代码不复制官方实现，不修改官方 `packages/`、`vendor/`、`apps/`。
 
-- **Node.js**: `^22.19.0 || >=24.0.0`
-- **包管理器**: pnpm `>=11.7.0`
+## 环境
 
----
+- Node.js `^22.19.0 || >=24.0.0`
+- pnpm `11.7.0`
+- Git
 
-## 快速开始
+## 初始化
 
 ```sh
-# 1. 安装依赖（会拉取 @deepseek-ai/dsh 运行时）
+git submodule update --init --depth 1
 pnpm install
+pnpm run check:upstream
+pnpm run check:architecture
+```
 
-# 2. 复制环境变量模板并填写 API Key
-cp .env.example .env
-# 编辑 .env，填入 DEEPSEEK_API_KEY
+## 一键启动
 
-# 3. 启动 Web UI
+Windows 双击根目录的 start.bat，或执行：
+
 pnpm start
-# 或 Windows 双击 start.bat
+
+启动器会自动检查并使用 pnpm 安装根项目、官方 Harness 和企业 Profile 依赖；缺少企业插件或官方 Harness 构建产物时会自动构建，然后启动 WebUI。
+
+依赖目录、lib/、dist/、构建缓存和会话文件均已加入 .gitignore，上传代码时只提交源码、配置、文档和 pnpm-lock.yaml。
+
+## 启动 WebUI
+
+```sh
+pnpm run profile:run
 ```
 
-浏览器打开：[http://127.0.0.1:3080](http://127.0.0.1:3080)
+该命令调用官方 Harness 的 `dsh web`，并叠加 `profiles/enterprise/cordis.patch.yml`。
 
----
+## 开发流程
 
-## 项目结构
-
-```
-dsh-guard/
-├── configs/
-│   └── cordis.yml          # Cordis profile 配置
-├── packages/enterprise/
-│   └── auth/               # 企业认证插件示例
-├── scripts/
-│   ├── init.mjs            # 初始化脚本
-│   └── build-enterprise.ts # 企业插件构建脚本
-├── docs/enterprise/
-│   ├── QUICK_START.md
-│   └── PLUGIN_GUIDE.md
-├── package.json            # pnpm 项目配置
-├── pnpm-workspace.yaml     # workspace 配置
-├── start.bat               # Windows 启动脚本
-├── .env.example            # 环境变量模板
-└── README.md               # 本文件
+```sh
+pnpm run typecheck
+pnpm run test
+pnpm run lint
+pnpm run check:architecture
 ```
 
----
+新增企业能力时：
 
-## 企业插件开发
+1. 先阅读 [架构审计](./docs/enterprise/ARCHITECTURE_AUDIT.md)。
+2. 选择官方 Service Definition、Provider、Consumer 或 Event 扩展点。
+3. 在 `packages/enterprise/<capability>/` 新建插件包。
+4. 在 `profiles/enterprise/cordis.patch.yml` 添加企业 row。
+5. 添加插件加载、卸载、装配和必要的 Session replay 测试。
+6. 运行官方基线检查与企业检查。
 
-1. 在 `packages/enterprise/` 下新建插件目录。
-2. 参考 `packages/enterprise/auth/` 编写 `package.json`、`src/index.ts`、`cordis.patch.yml`。
-3. 在 `configs/cordis.yml` 中挂载你的插件。
-4. 运行 `pnpm run build` 构建插件。
-5. 运行 `pnpm start` 验证。
+## 官方升级
 
-详见 [docs/enterprise/PLUGIN_GUIDE.md](./docs/enterprise/PLUGIN_GUIDE.md)。
+```sh
+pnpm run upstream:status
+pnpm run upstream:sync
+pnpm run upstream:verify
+```
 
----
+完整流程见 [UPSTREAM_UPGRADE.md](./docs/enterprise/runbooks/UPSTREAM_UPGRADE.md)。
 
-## 核心依赖
+## 文档
 
-- [`@deepseek-ai/dsh`](https://www.npmjs.com/package/@deepseek-ai/dsh) — DeepSeek Harness 运行时
-
----
-
-## 许可证
-
-企业内部使用，具体许可证以官方运行时 LICENSE 为准。
+- [架构审计](./docs/enterprise/ARCHITECTURE_AUDIT.md)
+- [插件架构](./docs/enterprise/PLUGIN_ARCHITECTURE.md)
+- [企业代码规范](./docs/enterprise/CODING_STANDARDS.md)
+- [开发工作流](./docs/enterprise/DEVELOPMENT_WORKFLOW.md)
+- [升级手册](./docs/enterprise/runbooks/UPSTREAM_UPGRADE.md)
+- [安全与审计](./docs/enterprise/runbooks/SECURITY_AUDIT.md)
+- [ADR 模板](./docs/enterprise/adr/0000-template.md)
