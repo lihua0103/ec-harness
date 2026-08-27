@@ -28,7 +28,7 @@ declare module '@deepseek-ai/cordis' {
  * - 不在 receipt 中输出数据行
  * - systemPrompt 指导模型不要 print 数据
  */
-export function apply(ctx: Context): void {
+export function apply(_ctx: Context): void {
   // 数据安全开关当前只影响 Python Worker 内部行为，
   // 在 tools/pre-execute 层面不拦截，以允许基于元数据的代码生成。
   // 
@@ -36,3 +36,4 @@ export function apply(ctx: Context): void {
 }
 
 export const name = 'data-interceptor'
+
