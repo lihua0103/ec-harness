@@ -118,9 +118,8 @@ first_df.attrs["labels"] = {...}  # 业务字段仍需 labels
   
 - **业务 Sheet**（如 LISTING_DM_01）：
   - Row 1: 返回链接 + Sheet 名称
-  - Row 2: 变量名（英文）
-  - Row 3: Label（中文或描述，来自 attrs["labels"]）
-  - Row 4+: 数据行
+  - Row 2: Label（来自 attrs["labels"]，不再单独展示变量名 oid）
+  - Row 3+: 数据行
   - 自动补齐比较审核列：Flag1, __cmp_FLAG__, __cmp_UpdateDetail__, __cmp_RCcomment__, __cmp_Idate__
 
 ### Report 场景（DM Status Report 标准）
@@ -140,7 +139,7 @@ first_df.attrs["labels"] = {...}  # 业务字段仍需 labels
 
 ### RBQM 场景
 - 无固定 Content/Cover Page
-- 业务 Sheet 结构同 Manual（3 行表头）
+- 业务 Sheet 结构同 Manual（2 行表头：标题行 + Label 行）
 - 可自定义列结构，但必须提供 attrs["labels"]
 
 ## 一次需求输出单个 Excel

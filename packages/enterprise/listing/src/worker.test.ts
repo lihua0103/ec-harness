@@ -90,18 +90,14 @@ print(json.dumps({
     "freeze": ws.freeze_panes,
     "gridlines": ws.sheet_view.showGridLines,
     "filter": ws.auto_filter.ref,
-    "headers": [cell.value for cell in ws[2]],
-    "title": {"value": ws["B1"].value, "font": ws["B1"].font.name,
-              "size": ws["B1"].font.sz, "bold": ws["B1"].font.bold},
-    "label": {"value": ws["A3"].value, "font": ws["A3"].font.name, "size": ws["A3"].font.sz,
-              "bold": ws["A3"].font.bold, "wrap": ws["A3"].alignment.wrap_text,
-              "fill": ws["A3"].fill.fgColor.rgb, "row_height": ws.row_dimensions[3].height},
-    "data": {"font": ws["A4"].font.name, "size": ws["A4"].font.sz,
-             "fill": ws["A4"].fill.fgColor.rgb,
-             "borders": [ws["A4"].border.left.style, ws["A4"].border.right.style,
-                         ws["A4"].border.top.style, ws["A4"].border.bottom.style]},
-    "rbqm_headers": [cell.value for cell in rbqm["Serious AE"][2]],
-    "rbqm_label_fill": rbqm["Serious AE"]["A3"].fill.fgColor.rgb,
+    "label": {"value": ws["A2"].value, "font": ws["A2"].font.name, "size": ws["A2"].font.sz,
+              "bold": ws["A2"].font.bold, "wrap": ws["A2"].alignment.wrap_text,
+              "fill": ws["A2"].fill.fgColor.rgb, "row_height": ws.row_dimensions[2].height},
+    "data": {"font": ws["A3"].font.name, "size": ws["A3"].font.sz,
+             "fill": ws["A3"].fill.fgColor.rgb,
+             "borders": [ws["A3"].border.left.style, ws["A3"].border.right.style,
+                         ws["A3"].border.top.style, ws["A3"].border.bottom.style]},
+    "rbqm_label_fill": rbqm["Serious AE"]["A2"].fill.fgColor.rgb,
     "back_link": ws["A1"].value,
     "back_link_style": {"color": ws["A1"].font.color.rgb,
                         "underline": ws["A1"].font.underline},
@@ -119,15 +115,12 @@ print(json.dumps({
         content_title: { value: 'Comparison Summary', font: 'Times New Roman', size: 16, bold: true, fill: 'FFEDF2F9' },
         content_link: '=HYPERLINK("#\'Serious AE\'!A1","Serious AE")',
         content_link_style: { color: 'FF0000FF', underline: 'single' },
-        freeze: 'A4',
+        freeze: 'A3',
         gridlines: false,
-        filter: 'A3:G4',
-        headers: ['USUBJID', 'AETERM', 'Flag1', '__cmp_FLAG__', '__cmp_UpdateDetail__', '__cmp_RCcomment__', '__cmp_Idate__'],
-        title: { value: 'Serious AE', font: 'Times New Roman', size: 14, bold: true },
+        filter: 'A2:G4',
         label: { value: 'Subject Identifier', font: 'Times New Roman', size: 13, bold: true, wrap: true, fill: 'FFEDF2F9', row_height: 60 },
-        rbqm_headers: ['USUBJID', 'AETERM'],
-        rbqm_label_fill: 'FFEDF2F9',
         data: { font: 'Times New Roman', size: 13, fill: 'FFFFFFFF', borders: ['thin', 'thin', 'thin', 'thin'] },
+        rbqm_label_fill: 'FFEDF2F9',
         back_link: '=HYPERLINK("#\'Content\'!A1","Go back")',
         back_link_style: { color: 'FF0000FF', underline: null },
       })
@@ -230,5 +223,6 @@ print(json.dumps({
   }, 30_000)
 
   })
+
 
 

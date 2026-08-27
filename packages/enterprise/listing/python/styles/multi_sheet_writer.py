@@ -161,24 +161,74 @@ def _row_counter(frame: pd.DataFrame) -> Counter:
     return Counter(tuple(row) for row in values.itertuples(index=False, name=None))
 
 
+def _align_previous_columns(
+    previous: Dict[str, pd.DataFrame], current: Dict[str, pd.DataFrame],
+) -> Dict[str, pd.DataFrame]:
+    """把上一版按位置重命名为当前 sheets 的列名。
+
+    旧版业务 Sheet 不再单独展示变量名（oid），读取时只能拿到匿名列。
+    calculate_changes 做整行多重集比较，列名只要位置对齐即可正确计数。
+    """
+    aligned: Dict[str, pd.DataFrame] = {}
+    for sheet_name, old_frame in previous.items():
+        new_frame = current.get(sheet_name)
+        if new_frame is None:
+            aligned[sheet_name] = old_frame
+            continue
+        new_columns = [str(column) for column in new_frame.columns]
+        renamed = old_frame.copy()
+        if len(renamed.columns) >= len(new_columns):
+            renamed = renamed.iloc[:, :len(new_columns)]
+            renamed.columns = new_columns
+        else:
+            extra = [f"_extra_{index}" for index in range(len(renamed.columns), len(new_columns))]
+            renamed.columns = [*renamed.columns, *extra]
+            for column in extra:
+                renamed[column] = None
+            renamed = renamed[new_columns]
+        aligned[sheet_name] = renamed
+    return aligned
+
+
 def load_previous_version(
     output_file: Path, index_sheet: str = CONTENT_SHEET, scenario: str = "manual",
 ) -> Optional[Dict[str, pd.DataFrame]]:
-    """按场景读取上一版业务页；读取失败即不做变化比较。"""
+    """按场景读取上一版业务页；读取失败即不做变化比较。
+
+    medical/manual/rbqm 业务 Sheet 的 Row 1 是返回链接 + 标题合并区（不携带 oid），
+    因此无法用 ``pd.read_excel(header=...)`` 直接定位变量名。这里改用 openpyxl
+    按单元格逐列读取，把 Row 2+ 视为数据，并按列序重建无列名的 DataFrame。
+    calculate_changes 只做整行多重集比较，列名是否对齐不影响 old/new 计数。
+    """
     if not output_file.exists():
         return None
     try:
-        previous = {}
-        with pd.ExcelFile(output_file) as workbook:
-            for sheet_name in workbook.sheet_names:
+        previous: Dict[str, pd.DataFrame] = {}
+        workbook = load_workbook(output_file, data_only=True, read_only=True)
+        try:
+            for sheet_name in workbook.sheetnames:
                 if sheet_name == index_sheet:
                     continue
+                sheet = workbook[sheet_name]
                 if scenario == "report":
-                    previous[sheet_name] = pd.read_excel(workbook, sheet_name=sheet_name, header=0)
+                    rows_iter = sheet.iter_rows(values_only=True)
+                    header = next(rows_iter, None)
+                    if not header:
+                        continue
+                    columns = [str(value) if value is not None else "" for value in header]
+                    data = [list(row) for row in rows_iter]
+                    previous[sheet_name] = pd.DataFrame(data, columns=columns)
                 else:
-                    # RT01：第 2 行是变量名，第 3 行仅为展示 Label，数据从第 4 行开始。
-                    previous[sheet_name] = pd.read_excel(
-                        workbook, sheet_name=sheet_name, header=1, skiprows=[2])
+                    rows_iter = sheet.iter_rows(min_row=3, values_only=True)
+                    data = [list(row) for row in rows_iter]
+                    if not data:
+                        previous[sheet_name] = pd.DataFrame()
+                        continue
+                    width = max(len(row) for row in data)
+                    columns = [str(index) for index in range(width)]
+                    previous[sheet_name] = pd.DataFrame(data, columns=columns)
+        finally:
+            workbook.close()
         return previous
     except Exception:
         return None
@@ -246,9 +296,13 @@ def _build_content(wb: Workbook, outputs: Dict[str, pd.DataFrame], changes: Dict
 
 
 def _build_listing(wb: Workbook, sheet_name: str, frame: pd.DataFrame) -> None:
+    """业务 Sheet：第 1 行返回链接 + 标题，第 2 行 Label，第 3 行起数据。
+
+    不再单独展示变量名（oid）行 —— Label 行的表头语义已足以阅读。
+    """
     ws = wb.create_sheet(sheet_name)
     ws.sheet_view.showGridLines = False
-    ws.freeze_panes = "A4"
+    ws.freeze_panes = "A3"
     labels = _labels(frame)
     columns = [str(column) for column in frame.columns]
     last_column = max(1, len(columns))
@@ -266,17 +320,16 @@ def _build_listing(wb: Workbook, sheet_name: str, frame: pd.DataFrame) -> None:
         _style_cell(ws.cell(1, column), font=DATA_FONT, fill=PALE_BLUE, alignment=CENTER)
 
     for column, variable in enumerate(columns, 1):
-        _style_cell(ws.cell(2, column, variable), font=HEADER_FONT, fill=PALE_BLUE, alignment=CENTER)
-        _style_cell(ws.cell(3, column, labels[variable]), font=HEADER_FONT, fill=PALE_BLUE, alignment=HEADER_ALIGNMENT)
-        width = max(14.7109375, min(50.7109375, max(len(variable), len(labels[variable])) + 2))
+        _style_cell(ws.cell(2, column, labels[variable]), font=HEADER_FONT, fill=PALE_BLUE, alignment=HEADER_ALIGNMENT)
+        width = max(14.7109375, min(50.7109375, len(labels[variable]) + 2))
         ws.column_dimensions[get_column_letter(column)].width = width
-    ws.row_dimensions[3].height = 60
+    ws.row_dimensions[2].height = 60
 
-    for row_index, values in enumerate(frame.itertuples(index=False, name=None), 4):
+    for row_index, values in enumerate(frame.itertuples(index=False, name=None), 3):
         for column, value in enumerate(values, 1):
             cell = ws.cell(row_index, column, None if pd.isna(value) else value)
             _style_cell(cell, font=DATA_FONT, fill=WHITE, alignment=Alignment(vertical="center"))
-    ws.auto_filter.ref = f"A3:{get_column_letter(last_column)}{max(3, 3 + len(frame))}"
+    ws.auto_filter.ref = f"A2:{get_column_letter(last_column)}{max(2, 2 + len(frame))}"
 
 
 def _report_metadata(outputs: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
@@ -377,6 +430,8 @@ def create_multi_sheet_excel(
     prepared = _prepare_outputs(outputs, scenario)
     index_sheet = REPORT_COVER_SHEET if scenario == "report" else CONTENT_SHEET
     previous = load_previous_version(output_file, index_sheet, scenario) if track_changes else None
+    if previous is not None:
+        previous = _align_previous_columns(previous, prepared)
     changes = calculate_changes(previous, prepared)
 
     wb = Workbook()
@@ -422,6 +477,8 @@ __all__ = [
     "CONTENT_COLUMNS", "CONTENT_SHEET", "COMPARISON_COLUMNS",
     "calculate_changes", "create_multi_sheet_excel", "normalize_sheet_outputs",
 ]
+
+
 
 
 

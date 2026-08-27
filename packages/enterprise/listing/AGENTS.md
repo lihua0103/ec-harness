@@ -37,8 +37,8 @@ ae_listing.attrs["labels"] = {
 
 ## 场景规则
 
-- manual / medical：固定 `Content` 结构、RT01 业务 Sheet 样式，自动补齐比较审核列。
-- report：固定 `Cover Page`，业务页采用 DM Status Report 范例的单层表头、行高与列宽，不补比较审核列。封面值可由首个 DataFrame 的 `attrs["report_metadata"]` 提供。
+- manual / medical：固定 `Content` 结构、RT01 业务 Sheet 样式（2 行表头：第 1 行标题/返回链接，第 2 行 Label，第 3 行起数据；不再单独展示变量名 oid），自动补齐比较审核列。
+- report：固定 `Cover Page`，业务页采用 DM Status Report 范例的单层表头、行高与列宽，不补比较审核列，不展示变量名 oid。封面值可由首个 DataFrame 的 `attrs["report_metadata"]` 提供。
 - rbqm：业务结构按需求生成，不强制比较审核列，但套用 RT01 视觉样式。
 
 完整机械契约见 `docs/enterprise/LISTING_MULTI_SHEET_SPEC.md`。
