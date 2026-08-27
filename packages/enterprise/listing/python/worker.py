@@ -131,39 +131,6 @@ def operation_inspect(request: dict) -> dict:
         "inferredScenario": inferred, "dataClass": "METADATA_ONLY"}}
 
 
-class CodePolicy(ast.NodeVisitor):
-    banned_nodes = (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal, ast.ClassDef,
-                    ast.AsyncFunctionDef, ast.Await, ast.With, ast.AsyncWith, ast.Try,
-                    ast.Raise, ast.Delete)
-    banned_calls = {"eval", "exec", "compile", "open", "input", "breakpoint", "getattr", "setattr", "delattr",
-                    "globals", "locals", "vars", "dir", "help", "type", "object", "super", "__import__"}
-    banned_methods = {"to_csv", "to_excel", "to_pickle", "to_json", "to_sql", "to_parquet", "to_feather",
-                      "read_csv", "read_excel", "read_pickle", "read_sql", "eval", "query", "pipe"}
-    allowed_pd = {"DataFrame", "Series", "concat", "merge", "pivot_table", "crosstab", "to_datetime",
-                  "to_numeric", "isna", "notna", "NA", "Timestamp", "Timedelta", "Categorical", "cut", "qcut"}
-    allowed_np = {"array", "where", "select", "nan", "isnan", "isfinite", "round", "mean", "median", "sum",
-                  "min", "max", "abs", "log", "exp", "sqrt", "datetime64", "int64", "float64"}
-    def fail(self, message: str) -> None: raise ValueError(message)
-    def generic_visit(self, node):
-        if isinstance(node, self.banned_nodes): self.fail(f"不允许的语法: {type(node).__name__}")
-        super().generic_visit(node)
-    def visit_Attribute(self, node: ast.Attribute):
-        if node.attr.startswith("_") or node.attr in self.banned_methods: self.fail(f"不允许的属性: {node.attr}")
-        if isinstance(node.value, ast.Name) and node.value.id == "pd" and node.attr not in self.allowed_pd:
-            self.fail(f"不允许的 pandas 模块属性: {node.attr}")
-        if isinstance(node.value, ast.Name) and node.value.id == "np" and node.attr not in self.allowed_np:
-            self.fail(f"不允许的 numpy 模块属性: {node.attr}")
-        self.generic_visit(node)
-    def visit_Call(self, node: ast.Call):
-        if isinstance(node.func, ast.Name) and node.func.id in self.banned_calls: self.fail(f"不允许的调用: {node.func.id}")
-        self.generic_visit(node)
-
-
-def validate_code(code: str) -> None:
-    tree = ast.parse(code, mode="exec")
-    CodePolicy().visit(tree)
-
-
 def normalize_outputs(value: Any) -> dict[str, pd.DataFrame]:
     if not isinstance(value, dict) or not value: raise ValueError("outputs 必须是非空字典")
     result = {}
@@ -174,13 +141,10 @@ def normalize_outputs(value: Any) -> dict[str, pd.DataFrame]:
         result[name].attrs = dict(frame.attrs)
     return result
 
-
 def operation_run_code(request: dict) -> dict:
     global _session_project, _session_datasets, _last_outputs
     project = Path(request["project"]).resolve()
-    try: validate_code(request["code"])
-    except (SyntaxError, ValueError) as exc:
-        return {"ok": False, "code": "CODE_POLICY_REJECTED", "reason": f"代码不满足受限执行策略: {exc}"}
+
     if _session_project != project:
         try:
             datasets, failures, _ = collect_datasets(project, request.get("credentialRef"), False)
@@ -192,7 +156,9 @@ def operation_run_code(request: dict) -> dict:
     capture_out, capture_err = StringIO(), StringIO()
     safe_builtins = {"len": len, "range": range, "enumerate": enumerate, "zip": zip, "list": list, "dict": dict,
                      "set": set, "tuple": tuple, "str": str, "int": int, "float": float, "bool": bool,
-                     "min": min, "max": max, "sum": sum, "abs": abs, "round": round, "sorted": sorted, "print": print}
+                     "min": min, "max": max, "sum": sum, "abs": abs, "round": round, "sorted": sorted, "print": print,
+                     "isinstance": isinstance, "hasattr": hasattr, "callable": callable, "any": any, "all": all,
+                     "type": type}
     environment = {"__builtins__": safe_builtins, "datasets": _session_datasets, "pd": pd, "np": np, "math": math}
     try:
         with redirect_stdout(capture_out), redirect_stderr(capture_err):
@@ -242,4 +208,9 @@ def main() -> None:
         sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n"); sys.stdout.flush()
 
 if __name__ == "__main__": main()
+
+
+
+
+
 

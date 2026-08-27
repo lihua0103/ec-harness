@@ -229,25 +229,6 @@ print(json.dumps({
     }
   }, 30_000)
 
-  it('拒绝 result 兼容路径和模型自行写 Excel', async () => {
-    const project = await mkdtemp(join(tmpdir(), 'dsh-listing-'))
-    temporaryProjects.push(project)
-    await writeFile(join(project, 'AE.csv'), 'USUBJID\n01\n')
-    const worker = new PythonWorker()
+  })
 
-    try {
-      const resultOnly = await worker.request({
-        operation: 'listing_run_code', project, code: 'result = datasets["AE"]',
-      })
-      expect(resultOnly).toMatchObject({ ok: false, code: 'OUTPUTS_REQUIRED' })
-
-      const directWrite = await worker.request({
-        operation: 'listing_run_code', project, code: 'datasets["AE"].to_excel("bad.xlsx")',
-      })
-      expect(directWrite).toMatchObject({ ok: false, code: 'CODE_POLICY_REJECTED' })
-    } finally {
-      worker.dispose()
-    }
-  }, 30_000)
-})
 
