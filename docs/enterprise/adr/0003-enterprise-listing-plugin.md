@@ -31,14 +31,15 @@ pandas 代码车道，只回聚合元数据信封）→ `clinical_listing_publis
 `catalog` / `writer`），其中 spec 解析（宽容列头、关系型/扁平双形态 ALS、
 autoFilter 修复）与 Excel Writer 样式从原实现移植。
 
-### 2. 持久会话直执行替代沙箱代码车道
+### 2. 持久会话与唯一发布车道
 
-`run` 操作把模型代码 `exec` 进共享命名空间（`datasets` / `pd` / `np` /
-`save_listing`），会话状态跨调用保持，stdout 全量回传（100KB 截断）、
-`result` 变量带 DataFrame 摘要与前 50 行预览。原实现的"无状态子进程 +
-重放最近成功代码 + publish"三段合同随之退役：交付物由代码内
-`save_listing()` 即时产出。超时由 TS 宿主控制（杀进程、状态丢弃、
-回执 retryable，重新 inspect 恢复）。
+TS 宿主维持单个 NDJSON Python worker，并串行执行 `inspect → run_code →
+publish`。`run_code` 在当前会话提供 `datasets` / `pd` / `np`，模型必须生成
+非空 `outputs: dict[str, pandas.DataFrame]`；不接受旧 `result` 变量，也禁止
+模型调用 `to_excel` / `ExcelWriter` 绕过交付边界。`publish` 是唯一 Excel
+发布入口，直接使用会话中最近一次成功的 `outputs` 调用统一 Writer，最终
+只生成一个工作簿。超时由 TS 宿主控制（杀进程并丢弃状态，重新 inspect
+恢复）。
 
 ### 3. 数据可见性口径
 
@@ -57,26 +58,26 @@ run 的 stdout 不脱敏。这是**有意为之**的口径变更：本流程面�
 
 与 ADR-0002 相同：peer 依赖仅 cordis 内核，`ctx.tools` /
 `ctx.systemPrompt` 以结构子集类型访问并 fail-fast。工具注册与系统提示
-引导（inspect → 迭代 → save_listing）是本插件的全部挂载点；不触碰
+引导（inspect → run_code → publish）是本插件的全部挂载点；不触碰
 `tools/*` 事件与 `llm/stream`。
 
-### 6. 输出规范：驱动 AI 实现，程序不写死（2026-08-26 定稿）
+### 6. 输出规范：AI 负责业务内容，Writer 固化交付结构（2026-08-27 修订）
 
-开发原则（用户定调）：**所有代码开发都不能写死定义，智能体插件要最大
-程度利用 AI 推理**。输出规范以"材料 + 说明"供给模型，由模型在生成代码
-时自行落实；程序只保留机械交付职责（`python/output_spec.py` 提供识别
-材料与可选辅助函数，`save_listing` 保留写出/样式/变化记录）：
+AI 根据 spec、ALS 与数据集推理业务列、字段顺序、筛选逻辑及多个业务
+Listing，并通过 `DataFrame.attrs["labels"]` 提供变量 Label；程序不写死
+具体表单或业务 Sheet。为避免模型输出多个文件或任意样式，机械交付结构
+由统一 Writer 固化：
 
-1. 系统字段判定：**SAS 数据集列 − ALS 映射字段 = EDC 系统字段**（ALS
-   定义表单业务字段，多出的即系统附加列；各 EDC 系统 raw data 列名
-   不同，内置角色别名表仅是排序辅助与可配置提示，`edcAliases` 支持
-   企业自有别名扩展）。系统多字段组合确定数据唯一标识；系统列前置
-   保留原列名。**程序绝不去重**——数据完全按 spec 需求输出。
-2. 输出列（rbqm 除外）：template 优先，否则 ALS 字段列 + PreText 表头；
-   rbqm 按会话提供的需求执行。均为模型代码职责。
-3. 重跑变化记录（DM 审核口径）：`save_listing` 与上一版按唯一键计数
-   diff（同键多行按行数增减），新增/删除/字段变化（旧值→新值）写进
-   Contents 页——这是交付物的固定机械机制，保留在程序侧。
+1. 每次 publish 只生成一个 `{SCENARIO}_LISTINGS.xlsx`，业务 Sheet 按
+   `outputs` 动态生成。
+2. `manual` / `medical` 使用固定 `Content`、三层业务页结构，并自动补齐
+   五个比较审核列；`rbqm` 不强制比较列，但复用 RT01 视觉样式。
+3. `report` 使用 DM Status Report 固定 `Cover Page`；业务页为单层表头、
+   第 2 行起数据，不补比较审核列，并套用范例表头行高与列宽。
+4. 字体、填充、边框、冻结窗格、筛选、行高、列宽与链接样式分别来自
+   RT01 Manual Listing 与 `file_show (6).xlsx` 的结构/样式提炼；不复制范例业务数据。
+5. 重跑变化记录在没有可靠业务唯一键时只按完整行多重集计算新增/删除，
+   不伪造 `modified`；变化统计写入 `Content`。
 
 ## 后果
 

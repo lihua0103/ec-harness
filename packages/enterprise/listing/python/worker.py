@@ -12,14 +12,13 @@ import traceback
 from pathlib import Path
 from typing import Any, Optional
 import zipfile
-import shutil
-import tempfile
 import pandas as pd
 import numpy as np
 import math
 
 # 本地导入
 from archive_passwords import extract_with_password
+from styles import create_multi_sheet_excel
 
 
 def read_spec_files(doc_dir: Path) -> dict[str, Any]:
@@ -202,37 +201,47 @@ def operation_inspect(request: dict) -> dict:
     }
 
 
-# 全局 pandas 会话状态
+# 全局 pandas 会话状态（由 NDJSON 主循环在同一进程内持有）
+_session_project: Optional[Path] = None
 _session_datasets: dict[str, pd.DataFrame] = {}
-_last_successful_code: Optional[str] = None
-_last_result: Optional[dict] = None
+_last_outputs: Optional[dict[str, pd.DataFrame]] = None
+
+
+def normalize_outputs(value: Any) -> dict[str, pd.DataFrame]:
+    """验证模型输出契约，禁止 Writer 接受模糊或部分结果。"""
+    if not isinstance(value, dict) or not value:
+        raise ValueError("outputs 必须是非空 dict[str, pandas.DataFrame]")
+
+    normalized: dict[str, pd.DataFrame] = {}
+    for raw_name, frame in value.items():
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise ValueError("每个 outputs 键必须是非空工作表名称")
+        if not isinstance(frame, pd.DataFrame):
+            raise ValueError(f"outputs[{raw_name!r}] 必须是 pandas DataFrame")
+        normalized[raw_name.strip()] = frame.copy()
+    return normalized
 
 
 def operation_run_code(request: dict) -> dict:
-    """
-    run_code 操作：执行 pandas 代码
-    """
-    global _session_datasets, _last_successful_code, _last_result
-    
-    project = request["project"]
+    """执行 pandas 代码，并保存最后一次符合规范的 outputs。"""
+    global _session_project, _session_datasets, _last_outputs
+
+    project_dir = Path(request["project"]).resolve()
     code = request["code"]
     credential_ref = request.get("credentialRef")
-    
-    project_dir = Path(project).resolve()
-    
-    # 加载数据集（首次）
-    if not _session_datasets:
+
+    if _session_project != project_dir:
+        _session_project = project_dir
         _session_datasets = load_datasets(project_dir, credential_ref)
-    
-    # 白名单检查
+        _last_outputs = None
+
     if not validate_code(code):
         return {
             "ok": False,
             "code": "SANDBOX_CODE_REJECTED",
-            "reason": "代码包含禁用的语法：import、文件IO、下划线属性或动态执行",
+            "reason": "代码包含禁用的文件写出、动态执行或导入语法；请只生成 outputs，由 publish 统一写出",
         }
-    
-    # 执行代码
+
     try:
         local_env = {
             "datasets": _session_datasets,
@@ -240,44 +249,37 @@ def operation_run_code(request: dict) -> dict:
             "np": np,
             "math": math,
         }
-        
         exec(code, local_env)
-        
-        # 获取结果
-        if "result" in local_env:
-            result_df = local_env["result"]
-            metadata = extract_metadata({"default": result_df})
-        elif "outputs" in local_env:
-            outputs = local_env["outputs"]
-            metadata = extract_metadata(outputs)
-        else:
+        if "outputs" not in local_env:
             return {
                 "ok": False,
-                "code": "NO_RESULT",
-                "reason": "代码未定义 result 或 outputs 变量",
+                "code": "OUTPUTS_REQUIRED",
+                "reason": "代码必须定义 outputs: dict[str, pandas.DataFrame]；publish 不接受 result 或自行写出的文件",
             }
-        
-        # 保存成功状态
-        _last_successful_code = code
-        _last_result = metadata
-        
+
+        outputs = normalize_outputs(local_env["outputs"])
+        metadata = extract_metadata(outputs)
+        _last_outputs = outputs
         return {
             "ok": True,
             "action": "listing-run-code",
-            "receipt": metadata,
+            "receipt": {
+                "outputCount": len(outputs),
+                "outputs": metadata,
+                "publishReady": True,
+            },
         }
-    
-    except Exception as e:
+    except Exception as exc:
         return {
             "ok": False,
             "code": "CODE_EXECUTION_ERROR",
-            "reason": f"代码执行失败: {str(e)}",
+            "reason": f"代码执行失败: {exc}",
             "retryable": True,
         }
 
 
 def validate_code(code: str) -> bool:
-    """验证代码是否符合白名单"""
+    """阻止绕过统一发布路径以及进程级动态执行。"""
     forbidden = [
         "import ",
         "from ",
@@ -287,163 +289,87 @@ def validate_code(code: str) -> bool:
         "read_excel",
         "to_csv",
         "to_excel",
+        "ExcelWriter",
         "eval(",
         "exec(",
         "compile(",
         "global ",
         "nonlocal ",
     ]
-    
-    for pattern in forbidden:
-        if pattern in code:
-            return False
-    
-    return True
+    return not any(pattern in code for pattern in forbidden)
 
 
 def load_datasets(project_dir: Path, credential_ref: Optional[str]) -> dict[str, pd.DataFrame]:
-    """加载所有数据集到内存"""
+    """加载所有数据集到内存。"""
     datasets = {}
-    
-    # 加载明文数据集
     for ext in [".sas7bdat", ".xpt", ".csv"]:
         for file in project_dir.rglob(f"*{ext}"):
             if file.is_file() and ".clinical-listing" not in file.parts and "_work" not in file.parts:
                 dataset_name = file.stem.upper()
                 try:
-                    if ext == ".csv":
-                        df = pd.read_csv(file)
-                    else:
-                        df = pd.read_sas(file, encoding="utf-8")
-                    
-                    datasets[dataset_name] = df
+                    datasets[dataset_name] = pd.read_csv(file) if ext == ".csv" else pd.read_sas(file, encoding="utf-8")
                 except Exception:
                     pass
-    
-    # 加载归档数据集
-    work_dir = project_dir / "_work"
-    work_dir.mkdir(exist_ok=True)
-    
+
     for zip_file in project_dir.rglob("*.zip"):
-        if zip_file.is_file() and ".clinical-listing" not in zip_file.parts:
-            extract_dir = work_dir / f"extracted_{zip_file.stem}"
-            try:
-                extract_with_password(zip_file, extract_dir, project_dir, credential_ref)
-                
-                # 读取解压后的数据集
-                for ext in [".sas7bdat", ".xpt", ".csv"]:
-                    for file in extract_dir.rglob(f"*{ext}"):
-                        if file.is_file():
-                            dataset_name = file.stem.upper()
-                            try:
-                                if ext == ".csv":
-                                    df = pd.read_csv(file)
-                                else:
-                                    df = pd.read_sas(file, encoding="utf-8")
-                                
-                                datasets[dataset_name] = df
-                            except Exception:
-                                pass
-            except Exception:
-                pass
-    
+        if not zip_file.is_file() or ".clinical-listing" in zip_file.parts:
+            continue
+        extract_dir = project_dir / ".clinical-listing" / "_work" / zip_file.stem
+        try:
+            extract_with_password(zip_file, extract_dir, credential_ref)
+            for ext in [".sas7bdat", ".xpt", ".csv"]:
+                for file in extract_dir.rglob(f"*{ext}"):
+                    if not file.is_file():
+                        continue
+                    try:
+                        datasets[file.stem.upper()] = pd.read_csv(file) if ext == ".csv" else pd.read_sas(file, encoding="utf-8")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
     return datasets
 
 
 def extract_metadata(outputs: dict[str, pd.DataFrame]) -> dict:
-    """提取元数据（不返回数据值）"""
-    metadata = {}
-    
-    for name, df in outputs.items():
-        columns_info = []
-        for col in df.columns:
-            columns_info.append({
-                "name": str(col),
-                "dtype": str(df[col].dtype),
-                "nullCount": int(df[col].isna().sum()),
-            })
-        
-        metadata[name] = {
+    """提取每个候选工作表的结构化回执。"""
+    return {
+        name: {
             "rowCount": len(df),
-            "columns": columns_info,
+            "columns": [
+                {"name": str(col), "dtype": str(df[col].dtype), "nullCount": int(df[col].isna().sum())}
+                for col in df.columns
+            ],
         }
-    
-    return metadata
+        for name, df in outputs.items()
+    }
 
 
 def operation_publish(request: dict) -> dict:
-    """
-    publish 操作：生成 Excel 输出
-    """
-    global _last_successful_code, _last_result, _session_datasets
-    
-    if not _last_successful_code:
+    """通过唯一 Writer 发布当前会话最后一次成功的规范化 outputs。"""
+    if _last_outputs is None:
         return {
             "ok": False,
             "code": "NO_SUCCESSFUL_RUN",
-            "reason": "publish 前必须先成功执行 run_code",
+            "reason": "publish 前必须在当前会话成功执行定义 outputs 的 run_code",
         }
-    
-    project = request["project"]
+
+    project_dir = Path(request["project"]).resolve()
+    if _session_project != project_dir:
+        return {
+            "ok": False,
+            "code": "PROJECT_SESSION_MISMATCH",
+            "reason": "publish 项目与当前 run_code 会话不一致，请重新 inspect/run_code",
+        }
+
     scenario = request.get("scenario", "manual")
-    
-    project_dir = Path(project).resolve()
-    output_dir = project_dir / ".clinical-listing" / "output" / scenario
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    output_file = output_dir / f"{scenario.upper()}_LISTINGS.xlsx"
-    
+    output_file = project_dir / ".clinical-listing" / "output" / scenario / f"{scenario.upper()}_LISTINGS.xlsx"
     try:
-        # 重新执行代码生成结果
-        local_env = {
-            "datasets": _session_datasets,
-            "pd": pd,
-            "np": np,
-            "math": math,
-        }
-        
-        exec(_last_successful_code, local_env)
-        
-        # 获取输出
-        if "result" in local_env:
-            outputs = {"Listing": local_env["result"]}
-        elif "outputs" in local_env:
-            outputs = local_env["outputs"]
-        else:
-            return {
-                "ok": False,
-                "code": "NO_RESULT",
-                "reason": "代码未定义 result 或 outputs",
-            }
-        
-        # 写入 Excel
-        with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
-            # Contents sheet
-            contents_data = []
-            for idx, (sheet_name, df) in enumerate(outputs.items(), 1):
-                contents_data.append({
-                    "No.": idx,
-                    "Listing": sheet_name,
-                    "Description": "",
-                    "Rows": len(df),
-                    "Columns": len(df.columns),
-                })
-            
-            contents_df = pd.DataFrame(contents_data)
-            contents_df.to_excel(writer, sheet_name="Contents", index=False)
-            
-            # 各个 listing sheets
-            for sheet_name, df in outputs.items():
-                # 添加系统字段（如果是 medical/rbqm 场景）
-                if scenario in ["medical", "rbqm"]:
-                    df = df.copy()
-                    df["Flag"] = ""
-                    df["Update Details"] = ""
-                    df["Review Comments"] = ""
-                    df["Initial_Date"] = ""
-                
-                df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
-        
+        statistics = create_multi_sheet_excel(
+            outputs=_last_outputs,
+            output_file=output_file,
+            scenario=scenario,
+            track_changes=request.get("trackChanges", True),
+        )
         return {
             "ok": True,
             "action": "listing-publish",
@@ -451,46 +377,45 @@ def operation_publish(request: dict) -> dict:
                 "outputFile": str(output_file.relative_to(project_dir)),
                 "scenario": scenario,
                 "dataClass": "REAL",
+                "format": "single-workbook-multi-sheet-xlsx",
+                "statistics": statistics,
             },
         }
-    
-    except Exception as e:
+    except Exception as exc:
         return {
             "ok": False,
             "code": "PUBLISH_ERROR",
-            "reason": f"发布失败: {str(e)}",
+            "reason": f"发布失败: {exc}",
+            "traceback": traceback.format_exc(),
         }
+
+
+def dispatch(request: dict) -> dict:
+    operation = request.get("operation")
+    if operation == "listing_inspect":
+        return operation_inspect(request)
+    if operation == "listing_run_code":
+        return operation_run_code(request)
+    if operation == "listing_publish":
+        return operation_publish(request)
+    return {"ok": False, "code": "UNKNOWN_OPERATION", "reason": f"未知操作: {operation}"}
 
 
 def main():
-    """Worker 主入口"""
-    try:
-        request = json.loads(sys.stdin.read())
-        operation = request.get("operation")
-        
-        if operation == "listing_inspect":
-            response = operation_inspect(request)
-        elif operation == "listing_run_code":
-            response = operation_run_code(request)
-        elif operation == "listing_publish":
-            response = operation_publish(request)
-        else:
+    """持久 NDJSON Worker 主循环：一个请求对应一行响应。"""
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        try:
+            response = dispatch(json.loads(line))
+        except Exception as exc:
             response = {
                 "ok": False,
-                "code": "UNKNOWN_OPERATION",
-                "reason": f"未知操作: {operation}",
+                "code": "WORKER_ERROR",
+                "reason": str(exc),
+                "traceback": traceback.format_exc(),
             }
-        
-        print(json.dumps(response))
-    
-    except Exception as e:
-        error_response = {
-            "ok": False,
-            "code": "WORKER_ERROR",
-            "reason": str(e),
-            "traceback": traceback.format_exc(),
-        }
-        print(json.dumps(error_response))
+        print(json.dumps(response), flush=True)
 
 
 if __name__ == "__main__":

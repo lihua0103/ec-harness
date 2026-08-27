@@ -56,7 +56,9 @@ if (command === 'dump') {
   const enterpriseBundles = (manifest.dsh?.profile?.bundles ?? [])
     .filter((name) => name.startsWith('@dsh-enterprise/'))
   for (const bundle of enterpriseBundles) {
-    if (!stdout.includes(`name: '${bundle}'`) && !stdout.includes(`name: ${bundle}`)) {
+    const escapedBundle = bundle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const bundleRow = new RegExp(`^\\s*name:\\s*(['"]?)${escapedBundle}\\1\\s*$`, 'm')
+    if (!bundleRow.test(stdout)) {
       errors.push(`最终配置缺少企业 Bundle：${bundle}`)
     }
   }

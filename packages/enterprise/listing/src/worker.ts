@@ -1,9 +1,10 @@
 /**
- * Python Worker 进程管理
- * 
- * 单进程、JSON over stdin/stdout、请求串行
+ * Python Worker 进程管理。
+ *
+ * 单进程、NDJSON over stdin/stdout、请求严格串行；同一插件实例内的
+ * inspect/run_code/publish 共享 Python 会话状态。
  */
-import type { ChildProcess } from 'node:child_process'
+import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
@@ -26,104 +27,88 @@ export interface WorkerResponse {
   retryable?: boolean
 }
 
-const DEFAULT_WORKER_SCRIPT = fileURLToPath(
-  new URL('../python/worker.py', import.meta.url)
-)
-const DEFAULT_TIMEOUT_MS = 600_000 // 10 minutes
+const DEFAULT_WORKER_SCRIPT = fileURLToPath(new URL('../python/worker.py', import.meta.url))
+const DEFAULT_TIMEOUT_MS = 600_000
 
 export class PythonWorker {
-  private proc: ChildProcess | null = null
+  private proc: ChildProcessWithoutNullStreams | null = null
   private disposed = false
+  private queue: Promise<void> = Promise.resolve()
 
-  async request(
-    request: WorkerRequest,
-    timeoutMs: number = DEFAULT_TIMEOUT_MS
-  ): Promise<WorkerResponse> {
-    if (this.disposed) {
-      throw new Error('Worker已释放')
-    }
+  request(request: WorkerRequest, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<WorkerResponse> {
+    const operation = this.queue.then(() => this.send(request, timeoutMs))
+    this.queue = operation.then(() => undefined, () => undefined)
+    return operation
+  }
 
-    // 启动进程（如果需要）
-    if (!this.proc || this.proc.exitCode !== null) {
-      await this.spawn()
-    }
+  private async send(request: WorkerRequest, timeoutMs: number): Promise<WorkerResponse> {
+    if (this.disposed) throw new Error('Worker已释放')
+    const proc = await this.ensureProcess()
 
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.kill()
-        reject(new Error('Worker超时'))
-      }, timeoutMs)
-
       let stdout = ''
       let stderr = ''
 
-      const onData = (chunk: Buffer) => {
-        stdout += chunk.toString()
+      const cleanup = () => {
+        clearTimeout(timer)
+        proc.stdout.off('data', onStdout)
+        proc.stderr.off('data', onStderr)
+        proc.off('exit', onExit)
       }
-
-      const onError = (chunk: Buffer) => {
+      const fail = (error: Error) => {
+        cleanup()
+        this.kill()
+        reject(error)
+      }
+      const onStdout = (chunk: Buffer) => {
+        stdout += chunk.toString()
+        const newline = stdout.indexOf('\n')
+        if (newline < 0) return
+        const line = stdout.slice(0, newline).trim()
+        cleanup()
+        try {
+          resolve(JSON.parse(line) as WorkerResponse)
+        } catch {
+          this.kill()
+          reject(new Error(`无法解析Worker响应: ${line}`))
+        }
+      }
+      const onStderr = (chunk: Buffer) => {
         stderr += chunk.toString()
       }
-
       const onExit = (code: number | null) => {
-        clearTimeout(timer)
-        this.proc?.stdout?.off('data', onData)
-        this.proc?.stderr?.off('data', onError)
-        this.proc?.off('exit', onExit)
-
-        if (code !== 0) {
-          reject(new Error(`Worker退出码: ${code}\nstderr: ${stderr}`))
-          return
-        }
-
-        try {
-          const response = JSON.parse(stdout)
-          resolve(response)
-        } catch {
-          reject(new Error(`无法解析Worker响应: ${stdout}`))
-        }
+        fail(new Error(`Worker退出码: ${code ?? 'unknown'}\nstderr: ${stderr}`))
       }
+      const timer = setTimeout(() => fail(new Error('Worker超时')), timeoutMs)
 
-      this.proc?.stdout?.on('data', onData)
-      this.proc?.stderr?.on('data', onError)
-      this.proc?.once('exit', onExit)
-
-      // 发送请求
-      this.proc?.stdin?.write(JSON.stringify(request))
-      this.proc?.stdin?.end()
+      proc.stdout.on('data', onStdout)
+      proc.stderr.on('data', onStderr)
+      proc.once('exit', onExit)
+      proc.stdin.write(`${JSON.stringify(request)}\n`)
     })
   }
 
-  private async spawn(): Promise<void> {
+  private async ensureProcess(): Promise<ChildProcessWithoutNullStreams> {
+    if (this.proc && this.proc.exitCode === null) return this.proc
+
     return new Promise((resolve, reject) => {
-      try {
-        this.proc = spawn('python', [DEFAULT_WORKER_SCRIPT], {
-          stdio: ['pipe', 'pipe', 'pipe'],
-        })
-
-        this.proc.on('error', (err) => {
-          reject(new Error(`无法启动Python Worker: ${err.message}`))
-        })
-
-        // 给进程一点启动时间
-        setTimeout(() => {
-          if (this.proc && this.proc.exitCode === null) {
-            resolve()
-          } else {
-            reject(new Error('Python Worker启动失败'))
-          }
-        }, 100)
-      } catch (err) {
-        reject(err)
+      const proc = spawn('python', [DEFAULT_WORKER_SCRIPT], { stdio: ['pipe', 'pipe', 'pipe'] })
+      const onError = (error: Error) => {
+        this.proc = null
+        reject(new Error(`无法启动Python Worker: ${error.message}`))
       }
+      proc.once('error', onError)
+      proc.once('spawn', () => {
+        proc.off('error', onError)
+        this.proc = proc
+        resolve(proc)
+      })
     })
   }
 
   private kill(): void {
-    if (this.proc) {
-      this.proc.kill()
-      this.proc = null
-    }
+    this.proc?.kill()
+    this.proc = null
   }
 
   dispose(): void {
