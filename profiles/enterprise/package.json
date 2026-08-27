@@ -3,21 +3,19 @@
   "version": "0.1.0",
   "private": true,
   "description": "企业 DeepSeek Harness WebUI Profile",
-  "dsh": { 
-    "profile": { 
+  "dsh": {
+    "profile": {
       "bundles": [
-        "@deepseek-ai/dsh-base", 
-        "@deepseek-ai/dsh-web-app", 
-        "@dsh-enterprise/auth", 
-        "@dsh-enterprise/ui-settings", 
-        "@dsh-enterprise/tool-audit", 
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "@dsh-enterprise/ui-settings",
+        "@dsh-enterprise/tool-audit",
         "@dsh-enterprise/branding",
         "@dsh-enterprise/listing"
-      ] 
-    } 
+      ]
+    }
   },
   "dependencies": {
-    "@dsh-enterprise/auth": "link:../../packages/enterprise/auth",
     "@dsh-enterprise/tool-audit": "link:../../packages/enterprise/tool-audit",
     "@dsh-enterprise/ui-settings": "link:../../packages/enterprise/ui-settings",
     "@dsh-enterprise/branding": "link:../../packages/enterprise/branding",

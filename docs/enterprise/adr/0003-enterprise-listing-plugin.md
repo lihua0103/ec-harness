@@ -33,7 +33,7 @@ autoFilter 修复）与 Excel Writer 样式从原实现移植。
 
 ### 2. 持久会话与唯一发布车道
 
-TS 宿主维持单个 NDJSON Python worker，并串行执行 `inspect → run_code →
+TS 宿主为每个 Agent 维持独立 NDJSON Python worker，并串行执行 `inspect → run_code →
 publish`。`run_code` 在当前会话提供 `datasets` / `pd` / `np`，模型必须生成
 非空 `outputs: dict[str, pandas.DataFrame]`；不接受旧 `result` 变量，也禁止
 模型调用 `to_excel` / `ExcelWriter` 绕过交付边界。`publish` 是唯一 Excel
@@ -81,7 +81,7 @@ Listing，并通过 `DataFrame.attrs["labels"]` 提供变量 Label；程序不�
 
 ## 后果
 
-- 企业 row 增至 5 个；`scripts/` 一行未改（自动发现）。
+- 企业 Profile 装配 4 个企业 row；未实现的 auth 空壳不装配；`scripts/` 一行未改（自动发现）。
 - Python 运行时成为部署前提（pandas / openpyxl / xlrd），缺解释器时
   工具回执 `PYTHON_NOT_FOUND` 并附安装指引。
 - 会话状态在 worker 进程内：宿主重启或超时杀进程后丢失，模型需重新
@@ -91,3 +91,4 @@ Listing，并通过 `DataFrame.attrs["labels"]` 提供变量 Label；程序不�
 - 原分支的 `emerald-clinical-data-guard` 其余部分（出域开关、设置页
   UI、post-execute 投影）仍待各自的迁移决策；若未来迁入，与本插件
   在工具命名空间上不冲突（本包工具带 `enterprise_listing_` 前缀）。
+

@@ -244,9 +244,10 @@ print(json.dumps({
       const directWrite = await worker.request({
         operation: 'listing_run_code', project, code: 'datasets["AE"].to_excel("bad.xlsx")',
       })
-      expect(directWrite).toMatchObject({ ok: false, code: 'SANDBOX_CODE_REJECTED' })
+      expect(directWrite).toMatchObject({ ok: false, code: 'CODE_POLICY_REJECTED' })
     } finally {
       worker.dispose()
     }
   }, 30_000)
 })
+

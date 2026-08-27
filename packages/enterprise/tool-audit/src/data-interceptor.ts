@@ -1,61 +1,52 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { minimatch } from 'minimatch'
 import type { DataSecurityService } from '@dsh-enterprise/ui-settings'
 
 export const name = 'enterprise-data-interceptor'
 export const inject = ['dataSecurityService']
 
+interface ToolExecution { name: string }
+
 declare module '@deepseek-ai/cordis' {
-  interface Context {
-    dataSecurityService: DataSecurityService
-  }
-  
+  interface Context { dataSecurityService: DataSecurityService }
   interface Events {
     'data-security/check-file': (filePath: string) => { allowed: boolean; reason?: string }
     'data-security/changed': (enabled: boolean) => void
+    'tools/pre-execute': (exec: ToolExecution, next: () => Promise<{ kind: string }>) => Promise<{ kind: string }>
   }
 }
 
-/**
- * 数据安全拦截器
- * 
- * 功能：当数据安全开关启用时，监控并阻止敏感数据发送给 AI。
- * 
- * 拦截策略：
- * 1. SAS 数据集文件（*.sas7bdat, *.xpt）
- * 2. data/ 或 spec/ 目录下的 Excel 文件（*.xlsx, *.xls）
- * 
- * 实现机制：
- * - 通过自定义事件在工具层与模型层之间建立拦截点
- * - 当开关关闭时，所有检查直接旁路，零性能损耗
- */
+const LISTING_TOOLS = new Set([
+  'enterprise_listing_inspect', 'enterprise_listing_run_code', 'enterprise_listing_publish',
+])
+
+/** 数据安全开启时，在正式工具调度边界阻断会向模型暴露临床数据的 Listing 流程。 */
 export function apply(ctx: Context): void {
-  const minimatch = require('minimatch').minimatch
-
-  // 定义数据安全检查事件处理器
-  ctx.on('data-security/check-file', (filePath: string) => {
-    if (!ctx.dataSecurityService.isEnabled()) {
-      return { allowed: true }
+  ctx.on('tools/pre-execute', (exec: ToolExecution, next: () => Promise<{ kind: string }>) => {
+    if (ctx.dataSecurityService.isEnabled() && LISTING_TOOLS.has(exec.name)) {
+      return Promise.resolve({
+        kind: 'deny',
+        reason: '数据安全策略已启用：临床 Listing 会话可能向模型暴露真实数据。仅在获授权的受信环境中关闭数据安全开关后执行。',
+      })
     }
+    return next()
+  })
 
-    const patterns = ctx.dataSecurityService.getProtectedPatterns()
-
-    for (const pattern of patterns) {
+  ctx.on('data-security/check-file', (filePath: string) => {
+    if (!ctx.dataSecurityService.isEnabled()) return { allowed: true }
+    for (const pattern of ctx.dataSecurityService.getProtectedPatterns()) {
       if (minimatch(filePath, pattern, { nocase: true })) {
         ctx.logger?.warn(`Data security: blocked access to ${filePath}`)
-        return {
-          allowed: false,
-          reason: `数据安全策略已阻止访问敏感文件: ${filePath}。此文件包含受保护的临床数据或 SAS 数据集，不允许发送给 AI 模型。`,
-        }
+        return { allowed: false, reason: `数据安全策略已阻止访问敏感文件: ${filePath}` }
       }
     }
-
     return { allowed: true }
   })
 
-  // 监听状态变化
-  ctx.on('data-security/changed', (enabled: boolean) => {
+  ctx.on('data-security/changed', enabled => {
     ctx.logger?.info(`Data security interception ${enabled ? 'enabled' : 'disabled'}`)
   })
-
   ctx.logger?.info('Data security interceptor initialized')
 }
+
+

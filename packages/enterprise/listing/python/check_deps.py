@@ -1,27 +1,16 @@
-"""检查 Python 依赖是否安装"""
+"""检查 Listing Worker 的 Python 运行期依赖。"""
 import sys
 
-required = {
-    "pandas": "2.0.0",
-    "numpy": "1.24.0",
-    "openpyxl": "3.1.0",
-}
-
+required = {"pandas": "2.0.0", "numpy": "1.24.0", "openpyxl": "3.1.0"}
 missing = []
-outdated = []
-
-for module, min_version in required.items():
+for module in required:
     try:
-        mod = __import__(module)
-        version = getattr(mod, "__version__", "unknown")
-        print(f"✓ {module} {version}")
+        imported = __import__(module)
+        print(f"OK {module} {getattr(imported, '__version__', 'unknown')}")
     except ImportError:
         missing.append(module)
-        print(f"✗ {module} not found")
-
+        print(f"ERROR {module} not found")
 if missing:
-    print(f"\n请安装缺失的依赖：")
-    print(f"pip install {' '.join(missing)}")
+    print("Install missing dependencies: pip install " + " ".join(missing))
     sys.exit(1)
-
-print("\n所有依赖已安装！")
+print("Python dependencies ready")

@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@dsh-enterprise/auth':
-        specifier: link:../../packages/enterprise/auth
-        version: link:../../packages/enterprise/auth
       '@dsh-enterprise/branding':
         specifier: link:../../packages/enterprise/branding
         version: link:../../packages/enterprise/branding

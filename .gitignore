@@ -26,3 +26,7 @@ profiles/*/cordis.yml
 # 内含会话数据，既是运行状态也可能含业务内容，务必不要提交。
 /storages/
 /.dsh/
+
+# 本地归档凭据，禁止提交。
+/.credentials.yaml
+

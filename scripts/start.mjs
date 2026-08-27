@@ -248,6 +248,11 @@ if (missingArtifacts().length > 0) {
   console.log('[DSH] 企业插件构建产物已就绪')
 }
 
+// Listing 运行期依赖：在 WebUI boot 前给出明确错误，不把缺包延迟到首次工具调用。
+const pythonCheck = spawnSync('python', [path.join(root, 'packages', 'enterprise', 'listing', 'python', 'check_deps.py')], {
+  cwd: root, stdio: 'inherit', shell: isWindows,
+})
+if (pythonCheck.error || pythonCheck.status !== 0) fail('Listing Python 依赖检查失败')
 // 4) 官方 CLI 构建产物
 if (!fs.existsSync(path.join(upstream, 'apps', 'cli', 'lib', 'bin.js'))) {
   run(upstream, ['run', 'build'], '官方 Harness 构建产物缺失，正在构建')
@@ -265,3 +270,4 @@ ensureInstall(profile, '企业 Profile', Object.keys(profileManifest.dependencie
 
 console.log(`[DSH] 启动企业 WebUI：http://127.0.0.1:${port}`)
 run(upstream, ['dsh', '--profile', 'enterprise'], '正在启动 DeepSeek Harness WebUI')
+

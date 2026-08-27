@@ -1,422 +1,245 @@
-"""
-Listing Worker - 处理 inspect, run_code, publish 操作
-
-沙箱约束：
-- SAS 数据行级内容不进入返回值
-- 只返回元数据（schema, rowCount, columns）
-- pandas 代码白名单执行
-"""
+"""Listing 持久 Worker：结构化数据加载、受限 pandas 计算和唯一 Excel 发布。"""
+import ast
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 import json
+import math
+from pathlib import Path
 import sys
 import traceback
-from pathlib import Path
 from typing import Any, Optional
 import zipfile
-import pandas as pd
-import numpy as np
-import math
 
-# 本地导入
+import numpy as np
+import pandas as pd
+
 from archive_passwords import extract_with_password
 from styles import create_multi_sheet_excel
 
-
-def read_spec_files(doc_dir: Path) -> dict[str, Any]:
-    """读取 doc/ 目录下的 spec 文件"""
-    documents = []
-    
-    if not doc_dir.exists():
-        return {"documents": documents}
-    
-    for file in doc_dir.rglob("*"):
-        if not file.is_file():
-            continue
-        
-        # 只读取文本和 Excel 文件
-        if file.suffix.lower() in {".txt", ".md", ".doc", ".docx"}:
-            try:
-                content = file.read_text(encoding="utf-8", errors="ignore")
-                documents.append({
-                    "path": str(file.relative_to(doc_dir)),
-                    "type": "text",
-                    "content": content[:50000],  # 限制大小
-                })
-            except Exception:
-                pass
-        elif file.suffix.lower() in {".xlsx", ".xls", ".xlsm"}:
-            # Excel 文件 - 读取 ALS 映射
-            try:
-                als_data = parse_als_file(file)
-                if als_data:
-                    documents.append({
-                        "path": str(file.relative_to(doc_dir)),
-                        "type": "als",
-                        "mappings": als_data["mappings"],
-                        "datasets": als_data["datasets"],
-                    })
-            except Exception:
-                pass
-    
-    return {"documents": documents}
-
-
-def parse_als_file(file_path: Path) -> Optional[dict]:
-    """解析 ALS Excel 文件，提取字段映射"""
-    try:
-        # 读取第一个 sheet
-        df = pd.read_excel(file_path, sheet_name=0)
-        
-        mappings = []
-        datasets = set()
-        
-        # 假设 ALS 格式：Dataset Name, Variable Name, Label, ...
-        for _, row in df.iterrows():
-            dataset = str(row.get("Dataset Name", "")).strip().upper()
-            variable = str(row.get("Variable Name", "")).strip()
-            label = str(row.get("Label", "")).strip()
-            
-            if dataset and variable:
-                datasets.add(dataset)
-                mappings.append({
-                    "datasetName": dataset,
-                    "sourceColumn": variable,
-                    "label": label,
-                })
-        
-        return {
-            "mappings": mappings,
-            "datasets": list(datasets),
-        }
-    except Exception:
-        return None
-
-
-def scan_sas_datasets(project_dir: Path, credential: Optional[str] = None) -> dict[str, Any]:
-    """扫描 SAS 数据集和归档文件"""
-    schema = {}
-    missing = []
-    datasets_info = []
-    
-    # 扫描明文数据集
-    for ext in [".sas7bdat", ".xpt", ".csv"]:
-        for file in project_dir.rglob(f"*{ext}"):
-            if file.is_file() and ".clinical-listing" not in file.parts and "_work" not in file.parts:
-                dataset_name = file.stem.upper()
-                try:
-                    if ext == ".csv":
-                        df = pd.read_csv(file, nrows=0)
-                    else:
-                        df = pd.read_sas(file, encoding="utf-8", chunksize=None, iterator=False)
-                        df = df.head(0)  # 只读取列名
-                    
-                    columns = list(df.columns)
-                    schema[dataset_name] = columns
-                    datasets_info.append({
-                        "name": dataset_name,
-                        "path": str(file.relative_to(project_dir)),
-                        "type": ext[1:],
-                    })
-                except Exception:
-                    pass
-    
-    # 扫描归档文件
-    for zip_file in project_dir.rglob("*.zip"):
-        if zip_file.is_file() and ".clinical-listing" not in zip_file.parts:
-            try:
-                # 尝试读取 central directory
-                with zipfile.ZipFile(zip_file, 'r') as zf:
-                    encrypted = any(info.flag_bits & 0x1 for info in zf.infolist())
-                    
-                    if encrypted:
-                        # 加密归档，标记为需要凭据
-                        missing.append(f"credential:{zip_file.relative_to(project_dir).as_posix()}")
-                    
-                    # 列出成员
-                    for info in zf.infolist():
-                        if not info.is_dir():
-                            member_path = Path(info.filename)
-                            if member_path.suffix.lower() in {".sas7bdat", ".xpt", ".csv"}:
-                                dataset_name = member_path.stem.upper()
-                                datasets_info.append({
-                                    "name": dataset_name,
-                                    "path": f"archive/{zip_file.name}/{info.filename}",
-                                    "type": "archived",
-                                })
-            except Exception:
-                missing.append(f"credential:{zip_file.relative_to(project_dir).as_posix()}")
-    
-    return {
-        "schema": schema,
-        "datasets": datasets_info,
-        "missing": missing,
-    }
-
-
-def operation_inspect(request: dict) -> dict:
-    """
-    inspect 操作：读取 spec、ALS 和数据集 schema
-    """
-    project = request["project"]
-    credential_ref = request.get("credentialRef")
-    
-    project_dir = Path(project).resolve()
-    if not project_dir.exists():
-        return {
-            "ok": False,
-            "code": "PROJECT_NOT_FOUND",
-            "reason": f"项目目录不存在: {project}",
-        }
-    
-    doc_dir = project_dir / "doc"
-    
-    # 1. 读取 spec 文件
-    spec_data = read_spec_files(doc_dir)
-    
-    # 2. 扫描数据集
-    dataset_data = scan_sas_datasets(project_dir, credential_ref)
-    
-    # 3. 推断场景
-    scenario = request.get("scenario")
-    inferred_scenario = None
-    if not scenario:
-        # 按路径推断
-        project_name_lower = project_dir.name.lower()
-        if "medical" in project_name_lower:
-            inferred_scenario = "medical"
-        elif "rbqm" in project_name_lower:
-            inferred_scenario = "rbqm"
-        else:
-            inferred_scenario = "manual"
-    
-    return {
-        "ok": True,
-        "action": "listing-inspect",
-        "inspection": {
-            **spec_data,
-            **dataset_data,
-            "scenario": scenario,
-            "inferredScenario": inferred_scenario,
-            "dataClass": "METADATA_ONLY",
-        },
-    }
-
-
-# 全局 pandas 会话状态（由 NDJSON 主循环在同一进程内持有）
+DATA_EXTENSIONS = {".sas7bdat", ".xpt", ".csv"}
+MAX_CAPTURE_CHARS = 16_384
 _session_project: Optional[Path] = None
 _session_datasets: dict[str, pd.DataFrame] = {}
 _last_outputs: Optional[dict[str, pd.DataFrame]] = None
 
 
-def normalize_outputs(value: Any) -> dict[str, pd.DataFrame]:
-    """验证模型输出契约，禁止 Writer 接受模糊或部分结果。"""
-    if not isinstance(value, dict) or not value:
-        raise ValueError("outputs 必须是非空 dict[str, pandas.DataFrame]")
+def _failure(path: Path, root: Path, stage: str, exc: Exception) -> dict[str, str]:
+    try: display = path.relative_to(root).as_posix()
+    except ValueError: display = str(path)
+    return {"path": display, "stage": stage, "reason": str(exc)}
 
-    normalized: dict[str, pd.DataFrame] = {}
-    for raw_name, frame in value.items():
-        if not isinstance(raw_name, str) or not raw_name.strip():
-            raise ValueError("每个 outputs 键必须是非空工作表名称")
-        if not isinstance(frame, pd.DataFrame):
-            raise ValueError(f"outputs[{raw_name!r}] 必须是 pandas DataFrame")
-        normalized[raw_name.strip()] = frame.copy()
-    return normalized
+
+def _read_frame(path: Path, metadata_only: bool = False) -> pd.DataFrame:
+    if path.suffix.lower() == ".csv":
+        return pd.read_csv(path, nrows=0 if metadata_only else None)
+    frame = pd.read_sas(path, encoding="utf-8")
+    return frame.head(0) if metadata_only else frame
+
+
+def _plain_sources(project: Path) -> list[Path]:
+    return sorted((p for p in project.rglob("*") if p.is_file()
+                   and p.suffix.lower() in DATA_EXTENSIONS
+                   and ".clinical-listing" not in p.parts and "_work" not in p.parts), key=str)
+
+
+def _archives(project: Path) -> list[Path]:
+    return sorted((p for p in project.rglob("*.zip") if p.is_file()
+                   and ".clinical-listing" not in p.parts), key=str)
+
+
+def _register_source(sources: dict[str, str], name: str, display: str) -> None:
+    previous = sources.get(name)
+    if previous is not None:
+        raise ValueError(f"DATASET_NAME_CONFLICT: {name}: {previous}; {display}")
+    sources[name] = display
+
+
+def _extracted_sources(project: Path, credential: Optional[str], failures: list[dict[str, str]]) -> list[tuple[Path, str]]:
+    result: list[tuple[Path, str]] = []
+    for index, archive in enumerate(_archives(project)):
+        extract_dir = project / ".clinical-listing" / "_work" / f"{index:04d}-{archive.stem}"
+        try:
+            extract_with_password(archive, extract_dir, project, credential)
+            for path in sorted(extract_dir.rglob("*"), key=str):
+                if path.is_file() and path.suffix.lower() in DATA_EXTENSIONS:
+                    result.append((path, f"archive/{archive.relative_to(project).as_posix()}/{path.relative_to(extract_dir).as_posix()}"))
+        except Exception as exc:
+            failures.append(_failure(archive, project, "extract-archive", exc))
+    return result
+
+
+def collect_datasets(project: Path, credential: Optional[str], metadata_only: bool) -> tuple[dict[str, pd.DataFrame], list[dict[str, str]], dict[str, str]]:
+    datasets: dict[str, pd.DataFrame] = {}
+    failures: list[dict[str, str]] = []
+    sources: dict[str, str] = {}
+    candidates = [(path, path.relative_to(project).as_posix()) for path in _plain_sources(project)]
+    candidates.extend(_extracted_sources(project, credential, failures))
+    for path, display in candidates:
+        name = path.stem.upper()
+        try:
+            _register_source(sources, name, display)
+            datasets[name] = _read_frame(path, metadata_only)
+        except ValueError:
+            raise
+        except Exception as exc:
+            failures.append(_failure(Path(display), project, "read-dataset", exc))
+    return datasets, failures, sources
+
+
+def read_spec_files(doc_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    documents, failures = [], []
+    if not doc_dir.exists(): return documents, failures
+    for path in sorted(doc_dir.rglob("*"), key=str):
+        if not path.is_file(): continue
+        try:
+            if path.suffix.lower() in {".txt", ".md"}:
+                documents.append({"path": path.relative_to(doc_dir).as_posix(), "type": "text",
+                                  "content": path.read_text(encoding="utf-8", errors="ignore")[:50_000]})
+            elif path.suffix.lower() in {".xlsx", ".xls", ".xlsm"}:
+                frame = pd.read_excel(path, sheet_name=0)
+                mappings, names = [], set()
+                for _, row in frame.iterrows():
+                    dataset = str(row.get("Dataset Name", "")).strip().upper()
+                    variable = str(row.get("Variable Name", "")).strip()
+                    if dataset and variable and dataset != "NAN" and variable != "nan":
+                        names.add(dataset); mappings.append({"datasetName": dataset, "sourceColumn": variable,
+                            "label": str(row.get("Label", "")).strip()})
+                if mappings:
+                    documents.append({"path": path.relative_to(doc_dir).as_posix(), "type": "als",
+                                      "mappings": mappings, "datasets": sorted(names)})
+        except Exception as exc:
+            failures.append(_failure(path, doc_dir, "read-spec", exc))
+    return documents, failures
+
+
+def operation_inspect(request: dict) -> dict:
+    project = Path(request["project"]).resolve()
+    if not project.is_dir():
+        return {"ok": False, "code": "PROJECT_NOT_FOUND", "reason": f"项目目录不存在: {project}"}
+    try:
+        documents, spec_failures = read_spec_files(project / "doc")
+        datasets, failures, sources = collect_datasets(project, request.get("credentialRef"), True)
+    except ValueError as exc:
+        return {"ok": False, "code": "DATASET_NAME_CONFLICT", "reason": str(exc)}
+    scenario = request.get("scenario")
+    inferred = None if scenario else ("medical" if "medical" in project.name.lower() else
+        "rbqm" if "rbqm" in project.name.lower() else "manual")
+    return {"ok": True, "action": "listing-inspect", "inspection": {
+        "documents": documents, "schema": {name: list(frame.columns) for name, frame in datasets.items()},
+        "datasets": [{"name": name, "path": source} for name, source in sources.items()],
+        "failures": [*spec_failures, *failures], "scenario": scenario,
+        "inferredScenario": inferred, "dataClass": "METADATA_ONLY"}}
+
+
+class CodePolicy(ast.NodeVisitor):
+    banned_nodes = (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal, ast.ClassDef,
+                    ast.AsyncFunctionDef, ast.Await, ast.With, ast.AsyncWith, ast.Try,
+                    ast.Raise, ast.Delete)
+    banned_calls = {"eval", "exec", "compile", "open", "input", "breakpoint", "getattr", "setattr", "delattr",
+                    "globals", "locals", "vars", "dir", "help", "type", "object", "super", "__import__"}
+    banned_methods = {"to_csv", "to_excel", "to_pickle", "to_json", "to_sql", "to_parquet", "to_feather",
+                      "read_csv", "read_excel", "read_pickle", "read_sql", "eval", "query", "pipe"}
+    allowed_pd = {"DataFrame", "Series", "concat", "merge", "pivot_table", "crosstab", "to_datetime",
+                  "to_numeric", "isna", "notna", "NA", "Timestamp", "Timedelta", "Categorical", "cut", "qcut"}
+    allowed_np = {"array", "where", "select", "nan", "isnan", "isfinite", "round", "mean", "median", "sum",
+                  "min", "max", "abs", "log", "exp", "sqrt", "datetime64", "int64", "float64"}
+    def fail(self, message: str) -> None: raise ValueError(message)
+    def generic_visit(self, node):
+        if isinstance(node, self.banned_nodes): self.fail(f"不允许的语法: {type(node).__name__}")
+        super().generic_visit(node)
+    def visit_Attribute(self, node: ast.Attribute):
+        if node.attr.startswith("_") or node.attr in self.banned_methods: self.fail(f"不允许的属性: {node.attr}")
+        if isinstance(node.value, ast.Name) and node.value.id == "pd" and node.attr not in self.allowed_pd:
+            self.fail(f"不允许的 pandas 模块属性: {node.attr}")
+        if isinstance(node.value, ast.Name) and node.value.id == "np" and node.attr not in self.allowed_np:
+            self.fail(f"不允许的 numpy 模块属性: {node.attr}")
+        self.generic_visit(node)
+    def visit_Call(self, node: ast.Call):
+        if isinstance(node.func, ast.Name) and node.func.id in self.banned_calls: self.fail(f"不允许的调用: {node.func.id}")
+        self.generic_visit(node)
+
+
+def validate_code(code: str) -> None:
+    tree = ast.parse(code, mode="exec")
+    CodePolicy().visit(tree)
+
+
+def normalize_outputs(value: Any) -> dict[str, pd.DataFrame]:
+    if not isinstance(value, dict) or not value: raise ValueError("outputs 必须是非空字典")
+    result = {}
+    for name, frame in value.items():
+        if not isinstance(name, str) or not name.strip(): raise ValueError("outputs 键必须是非空字符串")
+        if not isinstance(frame, pd.DataFrame): raise ValueError(f"outputs[{name!r}] 不是 DataFrame")
+        result[name] = frame.copy()
+        result[name].attrs = dict(frame.attrs)
+    return result
 
 
 def operation_run_code(request: dict) -> dict:
-    """执行 pandas 代码，并保存最后一次符合规范的 outputs。"""
     global _session_project, _session_datasets, _last_outputs
-
-    project_dir = Path(request["project"]).resolve()
-    code = request["code"]
-    credential_ref = request.get("credentialRef")
-
-    if _session_project != project_dir:
-        _session_project = project_dir
-        _session_datasets = load_datasets(project_dir, credential_ref)
-        _last_outputs = None
-
-    if not validate_code(code):
-        return {
-            "ok": False,
-            "code": "SANDBOX_CODE_REJECTED",
-            "reason": "代码包含禁用的文件写出、动态执行或导入语法；请只生成 outputs，由 publish 统一写出",
-        }
-
-    try:
-        local_env = {
-            "datasets": _session_datasets,
-            "pd": pd,
-            "np": np,
-            "math": math,
-        }
-        exec(code, local_env)
-        if "outputs" not in local_env:
-            return {
-                "ok": False,
-                "code": "OUTPUTS_REQUIRED",
-                "reason": "代码必须定义 outputs: dict[str, pandas.DataFrame]；publish 不接受 result 或自行写出的文件",
-            }
-
-        outputs = normalize_outputs(local_env["outputs"])
-        metadata = extract_metadata(outputs)
-        _last_outputs = outputs
-        return {
-            "ok": True,
-            "action": "listing-run-code",
-            "receipt": {
-                "outputCount": len(outputs),
-                "outputs": metadata,
-                "publishReady": True,
-            },
-        }
-    except Exception as exc:
-        return {
-            "ok": False,
-            "code": "CODE_EXECUTION_ERROR",
-            "reason": f"代码执行失败: {exc}",
-            "retryable": True,
-        }
-
-
-def validate_code(code: str) -> bool:
-    """阻止绕过统一发布路径以及进程级动态执行。"""
-    forbidden = [
-        "import ",
-        "from ",
-        "__",
-        "open(",
-        "read_csv",
-        "read_excel",
-        "to_csv",
-        "to_excel",
-        "ExcelWriter",
-        "eval(",
-        "exec(",
-        "compile(",
-        "global ",
-        "nonlocal ",
-    ]
-    return not any(pattern in code for pattern in forbidden)
-
-
-def load_datasets(project_dir: Path, credential_ref: Optional[str]) -> dict[str, pd.DataFrame]:
-    """加载所有数据集到内存。"""
-    datasets = {}
-    for ext in [".sas7bdat", ".xpt", ".csv"]:
-        for file in project_dir.rglob(f"*{ext}"):
-            if file.is_file() and ".clinical-listing" not in file.parts and "_work" not in file.parts:
-                dataset_name = file.stem.upper()
-                try:
-                    datasets[dataset_name] = pd.read_csv(file) if ext == ".csv" else pd.read_sas(file, encoding="utf-8")
-                except Exception:
-                    pass
-
-    for zip_file in project_dir.rglob("*.zip"):
-        if not zip_file.is_file() or ".clinical-listing" in zip_file.parts:
-            continue
-        extract_dir = project_dir / ".clinical-listing" / "_work" / zip_file.stem
+    project = Path(request["project"]).resolve()
+    try: validate_code(request["code"])
+    except (SyntaxError, ValueError) as exc:
+        return {"ok": False, "code": "CODE_POLICY_REJECTED", "reason": f"代码不满足受限执行策略: {exc}"}
+    if _session_project != project:
         try:
-            extract_with_password(zip_file, extract_dir, credential_ref)
-            for ext in [".sas7bdat", ".xpt", ".csv"]:
-                for file in extract_dir.rglob(f"*{ext}"):
-                    if not file.is_file():
-                        continue
-                    try:
-                        datasets[file.stem.upper()] = pd.read_csv(file) if ext == ".csv" else pd.read_sas(file, encoding="utf-8")
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-    return datasets
-
-
-def extract_metadata(outputs: dict[str, pd.DataFrame]) -> dict:
-    """提取每个候选工作表的结构化回执。"""
-    return {
-        name: {
-            "rowCount": len(df),
-            "columns": [
-                {"name": str(col), "dtype": str(df[col].dtype), "nullCount": int(df[col].isna().sum())}
-                for col in df.columns
-            ],
-        }
-        for name, df in outputs.items()
-    }
+            datasets, failures, _ = collect_datasets(project, request.get("credentialRef"), False)
+        except ValueError as exc:
+            return {"ok": False, "code": "DATASET_NAME_CONFLICT", "reason": str(exc)}
+        if failures:
+            return {"ok": False, "code": "DATASET_LOAD_FAILED", "reason": "一个或多个数据源加载失败", "failures": failures}
+        _session_project, _session_datasets, _last_outputs = project, datasets, None
+    capture_out, capture_err = StringIO(), StringIO()
+    safe_builtins = {"len": len, "range": range, "enumerate": enumerate, "zip": zip, "list": list, "dict": dict,
+                     "set": set, "tuple": tuple, "str": str, "int": int, "float": float, "bool": bool,
+                     "min": min, "max": max, "sum": sum, "abs": abs, "round": round, "sorted": sorted, "print": print}
+    environment = {"__builtins__": safe_builtins, "datasets": _session_datasets, "pd": pd, "np": np, "math": math}
+    try:
+        with redirect_stdout(capture_out), redirect_stderr(capture_err):
+            exec(compile(request["code"], "<listing-code>", "exec"), environment)
+        if "outputs" not in environment:
+            return {"ok": False, "code": "OUTPUTS_REQUIRED", "reason": "代码必须定义 outputs: dict[str, pandas.DataFrame]"}
+        outputs = normalize_outputs(environment["outputs"])
+        _last_outputs = outputs
+        metadata = {name: {"rowCount": len(frame), "columns": [{"name": str(column),
+            "dtype": str(frame[column].dtype), "nullCount": int(frame[column].isna().sum())} for column in frame.columns]}
+            for name, frame in outputs.items()}
+        return {"ok": True, "action": "listing-run-code", "receipt": {"outputCount": len(outputs),
+            "outputs": metadata, "publishReady": True, "stdout": capture_out.getvalue()[:MAX_CAPTURE_CHARS],
+            "stderr": capture_err.getvalue()[:MAX_CAPTURE_CHARS]}}
+    except Exception as exc:
+        return {"ok": False, "code": "CODE_EXECUTION_ERROR", "reason": f"代码执行失败: {exc}", "retryable": True,
+                "stdout": capture_out.getvalue()[:MAX_CAPTURE_CHARS], "stderr": capture_err.getvalue()[:MAX_CAPTURE_CHARS]}
 
 
 def operation_publish(request: dict) -> dict:
-    """通过唯一 Writer 发布当前会话最后一次成功的规范化 outputs。"""
-    if _last_outputs is None:
-        return {
-            "ok": False,
-            "code": "NO_SUCCESSFUL_RUN",
-            "reason": "publish 前必须在当前会话成功执行定义 outputs 的 run_code",
-        }
-
-    project_dir = Path(request["project"]).resolve()
-    if _session_project != project_dir:
-        return {
-            "ok": False,
-            "code": "PROJECT_SESSION_MISMATCH",
-            "reason": "publish 项目与当前 run_code 会话不一致，请重新 inspect/run_code",
-        }
-
+    if _last_outputs is None: return {"ok": False, "code": "NO_SUCCESSFUL_RUN", "reason": "publish 前必须成功执行 run_code"}
+    project = Path(request["project"]).resolve()
+    if _session_project != project: return {"ok": False, "code": "PROJECT_SESSION_MISMATCH", "reason": "项目与当前会话不一致"}
     scenario = request.get("scenario", "manual")
-    output_file = project_dir / ".clinical-listing" / "output" / scenario / f"{scenario.upper()}_LISTINGS.xlsx"
+    output = project / ".clinical-listing" / "output" / scenario / f"{scenario.upper()}_LISTINGS.xlsx"
     try:
-        statistics = create_multi_sheet_excel(
-            outputs=_last_outputs,
-            output_file=output_file,
-            scenario=scenario,
-            track_changes=request.get("trackChanges", True),
-        )
-        return {
-            "ok": True,
-            "action": "listing-publish",
-            "receipt": {
-                "outputFile": str(output_file.relative_to(project_dir)),
-                "scenario": scenario,
-                "dataClass": "REAL",
-                "format": "single-workbook-multi-sheet-xlsx",
-                "statistics": statistics,
-            },
-        }
+        statistics = create_multi_sheet_excel(_last_outputs, output, scenario, track_changes=request.get("trackChanges", True))
+        return {"ok": True, "action": "listing-publish", "receipt": {"outputFile": str(output.relative_to(project)),
+            "scenario": scenario, "dataClass": "REAL", "format": "single-workbook-multi-sheet-xlsx", "statistics": statistics}}
     except Exception as exc:
-        return {
-            "ok": False,
-            "code": "PUBLISH_ERROR",
-            "reason": f"发布失败: {exc}",
-            "traceback": traceback.format_exc(),
-        }
+        return {"ok": False, "code": "PUBLISH_ERROR", "reason": f"发布失败: {exc}", "traceback": traceback.format_exc()}
 
 
 def dispatch(request: dict) -> dict:
     operation = request.get("operation")
-    if operation == "listing_inspect":
-        return operation_inspect(request)
-    if operation == "listing_run_code":
-        return operation_run_code(request)
-    if operation == "listing_publish":
-        return operation_publish(request)
+    if operation == "listing_inspect": return operation_inspect(request)
+    if operation == "listing_run_code": return operation_run_code(request)
+    if operation == "listing_publish": return operation_publish(request)
     return {"ok": False, "code": "UNKNOWN_OPERATION", "reason": f"未知操作: {operation}"}
 
 
-def main():
-    """持久 NDJSON Worker 主循环：一个请求对应一行响应。"""
+def main() -> None:
     for line in sys.stdin:
-        if not line.strip():
-            continue
-        try:
-            response = dispatch(json.loads(line))
-        except Exception as exc:
-            response = {
-                "ok": False,
-                "code": "WORKER_ERROR",
-                "reason": str(exc),
-                "traceback": traceback.format_exc(),
-            }
-        print(json.dumps(response), flush=True)
+        if not line.strip(): continue
+        try: response = dispatch(json.loads(line))
+        except Exception as exc: response = {"ok": False, "code": "WORKER_ERROR", "reason": str(exc), "traceback": traceback.format_exc()}
+        sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n"); sys.stdout.flush()
 
+if __name__ == "__main__": main()
 
-if __name__ == "__main__":
-    main()

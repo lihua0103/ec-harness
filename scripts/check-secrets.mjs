@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 
 const root = process.cwd()
 const findings = []
@@ -10,7 +11,7 @@ const findings = []
  */
 const SCAN_DIRS = ['packages', 'profiles', 'scripts', 'tests', 'docs', 'configs']
 const SKIP_DIRS = new Set(['node_modules', 'lib', 'dist', 'coverage', '.git', '.pnpm-store'])
-const SCAN_EXT = new Set(['.ts', '.js', '.mjs', '.cjs', '.json', '.yml', '.yaml', '.md', '.bat', '.sh'])
+const SCAN_EXT = new Set(['.ts', '.js', '.mjs', '.cjs', '.json', '.yml', '.yaml', '.md', '.bat', '.sh', '.py'])
 
 /** 高置信度凭证形态。占位符与示例值由 ALLOW 白名单排除。 */
 const RULES = [
@@ -59,18 +60,21 @@ function scanFile(file) {
   }
 }
 
-function walk(dir) {
-  if (!fs.existsSync(dir)) return
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (SKIP_DIRS.has(entry.name)) continue
-    const full = path.join(dir, entry.name)
-    if (entry.isDirectory()) walk(full)
-    else if (SCAN_EXT.has(path.extname(entry.name))) scanFile(full)
-  }
+// 只扫描 Git 已跟踪文件：既覆盖根目录，也不读取用户未提交的本地凭据。
+const tracked = spawnSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' })
+if (tracked.status !== 0) {
+  console.error('error: 无法获取 Git 已跟踪文件列表')
+  process.exit(1)
 }
-
-for (const dir of SCAN_DIRS) walk(path.join(root, dir))
-
+for (const relative of tracked.stdout.split('\0').filter(Boolean)) {
+  const segments = relative.split(/[\\/]/)
+  if (segments.some(segment => SKIP_DIRS.has(segment))) continue
+  const top = segments[0]
+  if (segments.length > 1 && !SCAN_DIRS.includes(top)) continue
+  const fullPath = path.join(root, relative)
+  if (!fs.existsSync(fullPath)) continue
+    if (SCAN_EXT.has(path.extname(relative))) scanFile(path.join(root, relative))
+}
 // .env 一旦被提交即为事故：此处只判定是否存在于工作树，交由 .gitignore 兜住。
 const envFile = path.join(root, '.env')
 if (fs.existsSync(envFile)) {
@@ -86,3 +90,7 @@ if (findings.length > 0) {
   process.exit(1)
 }
 console.log('secret scan passed')
+
+
+
+

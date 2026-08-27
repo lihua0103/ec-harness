@@ -19,7 +19,7 @@
 ```text
 upstream/deepseek-harness/     官方 Harness 基线，git submodule，只读
 packages/enterprise/           企业插件实现（每个包 = 一个 Bundle = 一个 patch 层）
-  auth/                        企业身份与凭证
+  auth/                        企业身份预留（未装配）
   tool-audit/                  工具调用审计与脱敏
   ui-settings/                 企业设置面板
   branding/                    企业白标（标题/正文品牌词/标志/favicon/manifest）
@@ -54,7 +54,7 @@ pnpm 11 起，workspace 级设置由 `pnpm-workspace.yaml` 承载。`strictPeerD
 
 `profiles/*/cordis.yml` 由官方每次 boot 无条件重写，必须 gitignore；该编辑的文件是 `cordis.patch.yml`。
 
-当前装配现状：162 个官方 row + 5 个企业 row（`enterprise-auth` / `enterprise-tool-audit` / `enterprise-ui-settings` / `enterprise-branding` / `enterprise-listing`），profile 自有 patch 为空。
+当前装配现状：162 个官方 row + 4 个企业 row（`enterprise-tool-audit` / `enterprise-ui-settings` / `enterprise-branding` / `enterprise-listing`），profile 自有 patch 为空。
 
 ## 4. 治理：可执行的规范
 
@@ -87,7 +87,7 @@ npm script 里的单引号在 Windows 上是字面量。`pnpm -r --filter './pac
 
 `emerald-clinical-data-guard` 是这套插件模型上的第一个重量级业务实现，它同时说明了扩展点的表达力上限。**该插件目前仍在 `feat/data-egress-switch-refactor` 分支，尚未迁入本骨架**，迁移方案需要单独 ADR。其平台层部分已先行迁出：品牌白标功能独立为 `@dsh-enterprise/branding`（[ADR-0002](./docs/enterprise/adr/0002-enterprise-branding-plugin.md)），注入车道从 tapIndex 全量变换改为官方结构化注入行 + title 逃生口。
 
-它的安全模型是构造性归零出域通道，而不是"检测数据像不像临床数据"。模型只被允许写 pandas 代码，代码在 AST 白名单、受限运行时、子进程隔离三重约束下执行，回程只允许聚合元数据信封（行数、列名、dtype、空值数），真实记录永不进入模型上下文。正则模式匹配只是 defense-in-depth 的最外层，安全性由沙箱的能力边界保证。
+当前 Listing 是受信环境中的受限 pandas 执行车道：AST 策略拒绝导入、动态执行、私有属性、文件读写与模块逃逸，并在独立子进程中运行；它不等同于 OS 级强沙箱。数据安全开关默认开启，并在 Harness 的 tools/pre-execute 边界阻断全部 Listing 工具；只有获授权的受信部署显式关闭开关后，模型才可处理真实临床数据。inspect 只返回结构元数据，run_code 回执只返回行数、列名、dtype、空值数及有界 stdout/stderr。
 
 模型可见的工具是 `clinical_listing_inspect` → `clinical_listing_run_code`（可多轮迭代）→ `clinical_listing_publish`，加一个 `local_data_metadata`。挂载点用 `tools/post-execute`（结果投影）、`llm/stream`（最终出域检查）、`ctx.tools.register`、`ctx.systemPrompt.section`、`ctx.webServer.tapIndex`。刻意不用 `tools/pre-execute` 拦截通用工具——拦截式设计要穷举攻击面，投影式设计只需定义允许出域的形状。
 
@@ -100,7 +100,7 @@ Node `^22.19.0 || >=24.0.0`（与上游对齐，刻意排除官方不支持的 N
 ```sh
 git submodule update --init --depth 1
 pnpm install
-pnpm run check:all          # 五道门禁
+pnpm run check:all          # 全量门禁（含真实 Profile 启动 smoke）
 
 pnpm start                  # 一键启动（或双击 start.bat / ./start.sh）
 pnpm run profile:run        # 只跑 dsh web，叠加企业 patch
@@ -116,7 +116,7 @@ pnpm run upstream:verify
 
 ## 8. 现状与待办
 
-骨架、装配契约、门禁与跨平台启动链路已可用，`pnpm install --frozen-lockfile` 可用。企业插件中 `branding`（ADR-0002）与 `listing`（ADR-0003，临床 Listing 引导流程，不限 AI 操作）已落地实现；`auth` / `tool-audit` / `ui-settings` 仍是空壳（`ctx.effect()` 内只有 TODO），各自的实现需要新增 ADR。CI 尚未建立，六道门禁靠人工执行 `pnpm run check:all`。临床护栏插件其余部分（出域开关、设置页 UI）的迁入方案待定。
+骨架、装配契约、门禁与跨平台启动链路已可用，`pnpm install --frozen-lockfile` 可用。企业插件中 `branding`（ADR-0002）与 `listing`（ADR-0003，临床 Listing 引导流程，不限 AI 操作）已落地实现；`auth` 尚未实现且未装配；`tool-audit` 与 `ui-settings` 已接通数据安全执行门禁和加固后的本地设置 API。CI 尚未建立，六道门禁靠人工执行 `pnpm run check:all`。临床护栏插件其余部分（出域开关、设置页 UI）的迁入方案待定。
 
 ## 9. 文档索引
 
@@ -130,3 +130,5 @@ pnpm run upstream:verify
 - [上游升级手册](./docs/enterprise/runbooks/UPSTREAM_UPGRADE.md)
 - [安全与审计](./docs/enterprise/runbooks/SECURITY_AUDIT.md)
 - [插件分发](./docs/enterprise/runbooks/PLUGIN_DISTRIBUTION.md)
+
+

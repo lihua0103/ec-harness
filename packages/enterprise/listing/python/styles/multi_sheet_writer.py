@@ -157,21 +157,28 @@ def _prepare_outputs(outputs: Dict[str, pd.DataFrame], scenario: str) -> Dict[st
 
 def _row_counter(frame: pd.DataFrame) -> Counter:
     values = frame.astype(object).where(pd.notna(frame), None)
+    values = values.replace("", None)
     return Counter(tuple(row) for row in values.itertuples(index=False, name=None))
 
 
 def load_previous_version(
-    output_file: Path, index_sheet: str = CONTENT_SHEET,
+    output_file: Path, index_sheet: str = CONTENT_SHEET, scenario: str = "manual",
 ) -> Optional[Dict[str, pd.DataFrame]]:
-    """只读取上一版业务页用于机械变化计数；读取失败即不做变化比较。"""
+    """按场景读取上一版业务页；读取失败即不做变化比较。"""
     if not output_file.exists():
         return None
     try:
         previous = {}
         with pd.ExcelFile(output_file) as workbook:
             for sheet_name in workbook.sheet_names:
-                if sheet_name != index_sheet:
-                    previous[sheet_name] = pd.read_excel(workbook, sheet_name=sheet_name, header=2)
+                if sheet_name == index_sheet:
+                    continue
+                if scenario == "report":
+                    previous[sheet_name] = pd.read_excel(workbook, sheet_name=sheet_name, header=0)
+                else:
+                    # RT01：第 2 行是变量名，第 3 行仅为展示 Label，数据从第 4 行开始。
+                    previous[sheet_name] = pd.read_excel(
+                        workbook, sheet_name=sheet_name, header=1, skiprows=[2])
         return previous
     except Exception:
         return None
@@ -369,7 +376,7 @@ def create_multi_sheet_excel(
 
     prepared = _prepare_outputs(outputs, scenario)
     index_sheet = REPORT_COVER_SHEET if scenario == "report" else CONTENT_SHEET
-    previous = load_previous_version(output_file, index_sheet) if track_changes else None
+    previous = load_previous_version(output_file, index_sheet, scenario) if track_changes else None
     changes = calculate_changes(previous, prepared)
 
     wb = Workbook()
@@ -415,3 +422,6 @@ __all__ = [
     "CONTENT_COLUMNS", "CONTENT_SHEET", "COMPARISON_COLUMNS",
     "calculate_changes", "create_multi_sheet_excel", "normalize_sheet_outputs",
 ]
+
+
+

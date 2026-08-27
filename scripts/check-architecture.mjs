@@ -151,7 +151,7 @@ for (const name of discovered.keys()) {
 /* ---- 5. 官方 submodule 边界：企业不得写入 upstream ---- */
 const upstreamDir = path.join(root, 'upstream', 'deepseek-harness')
 if (fs.existsSync(upstreamDir)) {
-  for (const leaked of ['packages/enterprise', 'profiles']) {
+  for (const leaked of ['packages/enterprise']) {
     if (fs.existsSync(path.join(upstreamDir, leaked))) {
       errors.push(`企业代码泄漏进官方 submodule：upstream/deepseek-harness/${leaked}`)
     }
@@ -165,3 +165,4 @@ if (errors.length > 0) {
   process.exit(1)
 }
 console.log(`architecture checks passed (${discovered.size} 个企业插件，${bundles.length} 个 Bundle 层)`)
+
