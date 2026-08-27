@@ -1,3 +1,4 @@
 # 企业 Listing 插件配置
-- id: enterprise-listing
-  name: '@dsh-enterprise/listing'
+- insert:
+    - id: enterprise-listing
+      name: '@dsh-enterprise/listing'

@@ -16,7 +16,7 @@
     "check:architecture": "node scripts/check-architecture.mjs",
     "check:secrets": "node scripts/check-secrets.mjs",
     "check:upstream": "node scripts/check-upstream.mjs",
-    "check:all": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run check:architecture && pnpm run check:secrets && pnpm run check:upstream",
+    "check:all": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run check:architecture && pnpm run check:secrets && pnpm run check:upstream && pnpm run profile:verify",
     "upstream:status": "node scripts/upstream.mjs status",
     "upstream:sync": "node scripts/upstream.mjs sync",
     "upstream:verify": "node scripts/upstream.mjs verify",
@@ -24,7 +24,8 @@
     "profile:install": "node scripts/profile.mjs install",
     "profile:run": "node scripts/profile.mjs run",
     "clean": "node scripts/clean.mjs",
-    "start": "node scripts/start.mjs"
+    "start": "node scripts/start.mjs",
+    "profile:verify": "node scripts/profile.mjs verify"
   },
   "devDependencies": {
     "@types/node": "22.20.1",
