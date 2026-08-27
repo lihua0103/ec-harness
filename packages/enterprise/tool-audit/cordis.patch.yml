@@ -1,3 +1,4 @@
 - insert:
     - id: enterprise-tool-audit
       name: '@dsh-enterprise/tool-audit'
+      inject: ['dataSecurityService']

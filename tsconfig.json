@@ -3,6 +3,8 @@
   "references": [
     { "path": "packages/enterprise/auth" },
     { "path": "packages/enterprise/tool-audit" },
-    { "path": "packages/enterprise/ui-settings" }
+    { "path": "packages/enterprise/ui-settings" },
+    { "path": "packages/enterprise/branding" },
+    { "path": "packages/enterprise/listing" }
   ]
 }

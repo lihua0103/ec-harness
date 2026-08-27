@@ -1,0 +1,9 @@
+# 企业白标品牌层（ADR-0002）。
+# 品牌名/短名在此配置，禁止写死在插件代码；favicon 固定为包内
+# assets/branding/favicon.svg。业务部署（如临床）在此覆盖为自己的品牌。
+- insert:
+    - id: enterprise-branding
+      name: '@dsh-enterprise/branding'
+      config:
+        brandName: Emerald Clinical Trials
+        brandShortName: Emerald

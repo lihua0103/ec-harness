@@ -7,10 +7,11 @@
     "declaration": true,
     "sourceMap": true,
     "composite": true,
+    "rewriteRelativeImportExtensions": true,
+    "types": ["node"],
     "rootDir": "src",
     "outDir": "lib",
-    "skipLibCheck": true,
-    "types": ["node"]
+    "skipLibCheck": true
   },
   "include": ["src/**/*.ts"]
 }

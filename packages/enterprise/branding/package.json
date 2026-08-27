@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enterprise/tool-audit",
+  "name": "@dsh-enterprise/branding",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,6 +7,7 @@
   "types": "lib/index.d.ts",
   "files": [
     "lib",
+    "assets",
     "cordis.patch.yml"
   ],
   "exports": {
@@ -25,10 +26,6 @@
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run"
-  },
-  "dependencies": {
-    "@dsh-enterprise/ui-settings": "workspace:*",
-    "minimatch": "^10.2.6"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"

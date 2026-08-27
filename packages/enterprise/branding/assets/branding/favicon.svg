@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+  <!-- Emerald Clinical 品牌色：绿色主色调 -->
+  <rect width="64" height="64" rx="8" fill="#10B981"/>
+  
+  <!-- 简化的几何图形，灵感来自logo的方块元素 -->
+  <rect x="8" y="8" width="20" height="20" rx="2" fill="#34D399"/>
+  <rect x="32" y="8" width="24" height="20" rx="2" fill="#059669"/>
+  <rect x="8" y="32" width="24" height="24" rx="2" fill="#059669"/>
+  <rect x="36" y="36" width="20" height="20" rx="2" fill="#34D399"/>
+  
+  <!-- 字母 E 的抽象表达 -->
+  <path d="M44 16 L52 16 L52 20 L48 20 L48 24 L52 24 L52 28 L44 28 Z" fill="white" opacity="0.9"/>
+</svg>

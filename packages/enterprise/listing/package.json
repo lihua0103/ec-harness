@@ -1,14 +1,10 @@
 {
-  "name": "@dsh-enterprise/tool-audit",
+  "name": "@dsh-enterprise/listing",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
-  "files": [
-    "lib",
-    "cordis.patch.yml"
-  ],
   "exports": {
     ".": {
       "types": "./lib/index.d.ts",
@@ -23,12 +19,7 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc -b --pretty false",
-    "test": "vitest run"
-  },
-  "dependencies": {
-    "@dsh-enterprise/ui-settings": "workspace:*",
-    "minimatch": "^10.2.6"
+    "typecheck": "tsc -b --pretty false"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
@@ -36,10 +27,22 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
     "@types/node": "22.20.1",
-    "typescript": "6.0.3",
-    "vitest": "4.1.11"
+    "typescript": "6.0.3"
   },
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
-  }
+    "node": "^22.19.0 || >=24.0.0",
+    "python": ">=3.10"
+  },
+  "pythonDependencies": [
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "openpyxl>=3.1.0",
+    "xlrd>=2.0.0"
+  ],
+  "files": [
+    "lib",
+    "python",
+    "cordis.patch.yml",
+    "AGENTS.md"
+  ]
 }

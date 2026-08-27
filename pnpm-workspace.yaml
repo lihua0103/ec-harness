@@ -17,5 +17,6 @@ autoInstallPeers: false
 
 # 安装期允许执行构建脚本的包白名单。等价于授权该包在沙箱外于本机执行代码，
 # 新增条目必须走 ADR。
+# esbuild=true：vitest 依赖；pnpm 11 脚手架曾在此留占位符，2026-08-26 落定。
 allowBuilds:
   esbuild: true

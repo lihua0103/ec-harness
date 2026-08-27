@@ -1,9 +1,17 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { DataSecurityService } from './data-security-service.js'
 
-/** 企业设置 UI 的 Host 侧扩展入口。Client 组件应独立放置并通过公开 slots 注册。 */
-export default function enterpriseSettings(ctx: Context): void {
+export const name = 'enterprise-ui-settings'
+export const inject = ['webServer']
+
+export function apply(ctx: Context): void {
+  ctx.plugin(DataSecurityService)
+
   ctx.effect(() => {
-    // TODO: 注册企业设置 namespace 与公开 RPC/slot 数据。
+    // 未来在此注册其他企业设置 UI 扩展
     return () => undefined
   })
 }
+
+// 导出类型供其他插件使用
+export type { DataSecurityService, DataSecurityConfig } from './data-security-service.js'
