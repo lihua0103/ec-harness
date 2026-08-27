@@ -190,7 +190,22 @@ if (Number(pnpmVersion.split('.')[0]) < 11) {
   fail(`pnpm 版本过低（需要 11+，workspace 设置已迁至 pnpm-workspace.yaml）：当前 ${pnpmVersion}`)
 }
 
-ensureDirectory(upstream, '官方 DeepSeek Harness（未初始化请执行 git submodule update --init --depth 1）')
+// 自动初始化 submodule（如果未初始化）
+if (!fs.existsSync(path.join(upstream, '.git'))) {
+  console.log('[DSH] 检测到 upstream/deepseek-harness 未初始化')
+  console.log('[DSH] 正在自动初始化 Git Submodule...')
+  const submoduleResult = spawnSync('git', ['submodule', 'update', '--init', '--depth', '1'], {
+    cwd: root,
+    stdio: 'inherit',
+    shell: isWindows
+  })
+  if (submoduleResult.error || submoduleResult.status !== 0) {
+    fail('Submodule 初始化失败。请手动执行: git submodule update --init --depth 1')
+  }
+  console.log('[DSH] Submodule 初始化完成')
+}
+
+ensureDirectory(upstream, '官方 DeepSeek Harness')
 ensureDirectory(path.join(upstream, 'apps', 'cli'), '官方 CLI')
 ensureDirectory(profile, '企业 Profile')
 
