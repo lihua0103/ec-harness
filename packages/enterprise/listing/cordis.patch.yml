@@ -1,4 +1,3 @@
 # 企业 Listing 插件配置
-- include:
-    - name: enterprise-listing
-      path: .
+- id: enterprise-listing
+  name: '@dsh-enterprise/listing'

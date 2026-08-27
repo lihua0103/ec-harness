@@ -19,8 +19,7 @@ describe('registerBranding', () => {
       get: (key: string) => {
         if (key === 'webServer') {
           return {
-            on: () => {},
-            off: () => {},
+            tapIndex: () => () => {},
           }
         }
         return undefined
@@ -45,16 +44,16 @@ describe('registerBranding', () => {
   })
 
   it('应该使用默认品牌名称', () => {
-    let capturedHandler: ((html: string) => string) | null = null
+    let capturedTransform: ((html: string) => string) | undefined
     
     const mockCtx = {
       get: (key: string) => {
         if (key === 'webServer') {
           return {
-            on: (_event: string, handler: (html: string) => string) => {
-              capturedHandler = handler
+            tapIndex: (transform: (html: string) => string) => {
+              capturedTransform = transform
+              return () => {}
             },
-            off: () => {},
           }
         }
         return undefined
@@ -63,26 +62,28 @@ describe('registerBranding', () => {
 
     registerBranding(mockCtx, {})
     
-    expect(capturedHandler).not.toBeNull()
+    expect(capturedTransform).toBeDefined()
+    
+    if (!capturedTransform) throw new Error('Transform not captured')
     
     const testHtml = '<html><head><title>Old Title</title></head><body></body></html>'
-    const result = capturedHandler!(testHtml)
+    const result = capturedTransform(testHtml)
     
     expect(result).toContain('<title>DSH Enterprise</title>')
     expect(result).toContain('globalThis["__DSH_ENTERPRISE_BRAND__"]')
   })
 
   it('应该替换所有品牌相关的HTML元素', () => {
-    let capturedHandler: ((html: string) => string) | null = null
+    let capturedTransform: ((html: string) => string) | undefined
     
     const mockCtx = {
       get: (key: string) => {
         if (key === 'webServer') {
           return {
-            on: (_event: string, handler: (html: string) => string) => {
-              capturedHandler = handler
+            tapIndex: (transform: (html: string) => string) => {
+              capturedTransform = transform
+              return () => {}
             },
-            off: () => {},
           }
         }
         return undefined
@@ -107,7 +108,9 @@ describe('registerBranding', () => {
       </html>
     `
     
-    const result = capturedHandler!(testHtml)
+    if (!capturedTransform) throw new Error('Transform not captured')
+    
+    const result = capturedTransform(testHtml)
     
     expect(result).toContain('<title>Custom Brand</title>')
     expect(result).toContain('<meta name="application-name" content="Custom Brand">')

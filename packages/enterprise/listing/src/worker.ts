@@ -3,7 +3,8 @@
  * 
  * 单进程、JSON over stdin/stdout、请求串行
  */
-import { spawn, ChildProcess } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 export interface WorkerRequest {
@@ -12,14 +13,14 @@ export interface WorkerRequest {
   scenario?: string
   credentialRef?: string
   code?: string
-  [key: string]: any
+  [key: string]: unknown
 }
 
 export interface WorkerResponse {
   ok: boolean
   action?: string
-  inspection?: any
-  receipt?: any
+  inspection?: unknown
+  receipt?: unknown
   code?: string
   reason?: string
   retryable?: boolean
@@ -78,18 +79,18 @@ export class PythonWorker {
         try {
           const response = JSON.parse(stdout)
           resolve(response)
-        } catch (err) {
+        } catch {
           reject(new Error(`无法解析Worker响应: ${stdout}`))
         }
       }
 
-      this.proc!.stdout!.on('data', onData)
-      this.proc!.stderr!.on('data', onError)
-      this.proc!.once('exit', onExit)
+      this.proc?.stdout?.on('data', onData)
+      this.proc?.stderr?.on('data', onError)
+      this.proc?.once('exit', onExit)
 
       // 发送请求
-      this.proc!.stdin!.write(JSON.stringify(request))
-      this.proc!.stdin!.end()
+      this.proc?.stdin?.write(JSON.stringify(request))
+      this.proc?.stdin?.end()
     })
   }
 

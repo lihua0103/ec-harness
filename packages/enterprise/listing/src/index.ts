@@ -21,13 +21,21 @@ export const name = 'enterprise-listing'
 const FAST_TIMEOUT_MS = 30_000
 const HEAVY_TIMEOUT_MS = 900_000
 
+interface CommandContext {
+  command: (definition: unknown, handler: (args: unknown) => Promise<unknown>) => () => void
+  logger?: { info: (message: string) => void }
+  acceptHmr?: (url: string, handler: (replacement: { apply: (ctx: Context) => Array<() => void> }) => void) => void
+  effect: (fn: () => () => void) => void
+}
+
 export function apply(ctx: Context): void {
   const worker = new PythonWorker()
   const disposers: Array<() => void> = []
+  const cmdCtx = ctx as unknown as CommandContext
 
   // Tool 1: enterprise_listing_inspect
   disposers.push(
-    (ctx as any).command(
+    cmdCtx.command(
       {
         name: 'enterprise_listing_inspect',
         description:
@@ -55,14 +63,19 @@ export function apply(ctx: Context): void {
           required: ['project'],
         },
       },
-      async (args: { project: string; scenario?: string; credentialRef?: string }) => {
+      async (args: unknown) => {
+        const { project, scenario, credentialRef } = args as { 
+          project: string
+          scenario?: string
+          credentialRef?: string 
+        }
         try {
           const result = await worker.request(
             {
               operation: 'listing_inspect',
-              project: args.project,
-              scenario: args.scenario,
-              credentialRef: args.credentialRef,
+              project,
+              scenario,
+              credentialRef,
             },
             HEAVY_TIMEOUT_MS
           )
@@ -75,10 +88,11 @@ export function apply(ctx: Context): void {
           }
 
           return result.inspection
-        } catch (err: any) {
+        } catch (err: unknown) {
+          const error = err as { message?: string; code?: string }
           throw Object.assign(
-            new Error(err.message || 'inspect 执行失败'),
-            { code: err.code || 'INSPECT_ERROR', expose: true }
+            new Error(error.message || 'inspect 执行失败'),
+            { code: error.code || 'INSPECT_ERROR', expose: true }
           )
         }
       }
@@ -87,7 +101,7 @@ export function apply(ctx: Context): void {
 
   // Tool 2: enterprise_listing_run_code
   disposers.push(
-    (ctx as any).command(
+    cmdCtx.command(
       {
         name: 'enterprise_listing_run_code',
         description:
@@ -113,14 +127,19 @@ export function apply(ctx: Context): void {
           required: ['project', 'code'],
         },
       },
-      async (args: { project: string; code: string; credentialRef?: string }) => {
+      async (args: unknown) => {
+        const { project, code, credentialRef } = args as {
+          project: string
+          code: string
+          credentialRef?: string
+        }
         try {
           const result = await worker.request(
             {
               operation: 'listing_run_code',
-              project: args.project,
-              code: args.code,
-              credentialRef: args.credentialRef,
+              project,
+              code,
+              credentialRef,
             },
             FAST_TIMEOUT_MS
           )
@@ -133,10 +152,11 @@ export function apply(ctx: Context): void {
           }
 
           return result.receipt
-        } catch (err: any) {
+        } catch (err: unknown) {
+          const error = err as { message?: string; code?: string }
           throw Object.assign(
-            new Error(err.message || 'run_code 执行失败'),
-            { code: err.code || 'RUN_CODE_ERROR', expose: true }
+            new Error(error.message || 'run_code 执行失败'),
+            { code: error.code || 'RUN_CODE_ERROR', expose: true }
           )
         }
       }
@@ -145,7 +165,7 @@ export function apply(ctx: Context): void {
 
   // Tool 3: enterprise_listing_publish
   disposers.push(
-    (ctx as any).command(
+    cmdCtx.command(
       {
         name: 'enterprise_listing_publish',
         description:
@@ -167,13 +187,17 @@ export function apply(ctx: Context): void {
           required: ['project', 'scenario'],
         },
       },
-      async (args: { project: string; scenario: string }) => {
+      async (args: unknown) => {
+        const { project, scenario } = args as {
+          project: string
+          scenario: string
+        }
         try {
           const result = await worker.request(
             {
               operation: 'listing_publish',
-              project: args.project,
-              scenario: args.scenario,
+              project,
+              scenario,
             },
             HEAVY_TIMEOUT_MS
           )
@@ -186,20 +210,21 @@ export function apply(ctx: Context): void {
           }
 
           return result.receipt
-        } catch (err: any) {
+        } catch (err: unknown) {
+          const error = err as { message?: string; code?: string }
           throw Object.assign(
-            new Error(err.message || 'publish 执行失败'),
-            { code: err.code || 'PUBLISH_ERROR', expose: true }
+            new Error(error.message || 'publish 执行失败'),
+            { code: error.code || 'PUBLISH_ERROR', expose: true }
           )
         }
       }
     )
   )
 
-  ctx.logger?.info('[listing] Enterprise listing plugin loaded')
+  cmdCtx.logger?.info('[listing] Enterprise listing plugin loaded')
 
-  if ((ctx as any).acceptHmr) {
-    ;(ctx as any).acceptHmr(import.meta.url, (replacement: any) => {
+  if (cmdCtx.acceptHmr) {
+    cmdCtx.acceptHmr(import.meta.url, (replacement) => {
       disposers.push(...replacement.apply(ctx))
     })
   }
