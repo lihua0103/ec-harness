@@ -64,7 +64,77 @@ export function apply(ctx: Context): void {
 
   listing.systemPrompt.section({
     name: 'tool:enterprise-listing', order: 116,
-    text: `处理临床 Listing 时必须使用 enterprise_listing_inspect → enterprise_listing_run_code → enterprise_listing_publish。run_code 必须定义 outputs 字典；每个键是一个业务 Listing 的工作表名，每个值必须是 pandas DataFrame。字段显示名通过 DataFrame.attrs["labels"] = {变量名: Label} 提供。不要在代码中调用 Excel/CSV 写出 API，也不要自行生成单 Sheet 文件。一次需求中的所有 Listing 必须放入同一个 outputs，确认 run_code 回执列出全部工作表后再调用 publish。publish 是唯一交付路径，只生成一个 Excel。manual/medical 使用 RT01 标准结构，包含固定 Content 并自动补齐比较审核列；report 使用 DM Status Report 标准，包含固定 Cover Page、单层表头业务页，且不补比较审核列，可通过首个 DataFrame.attrs["report_metadata"] 提供 sponsor、protocol_no、project_id、report_date；rbqm 可自定义业务列结构但复用 RT01 视觉样式。只有用户明确要求单个 Listing 时才可仅提供一个数据工作表。`,
+    text: `# 临床 Listing 工具使用规范
+
+## 强制工作流
+1. enterprise_listing_inspect：加载数据集
+2. enterprise_listing_run_code：生成 outputs 字典，每个键是工作表名，每个值是 pandas DataFrame
+3. enterprise_listing_publish：唯一交付路径，生成单个规范化 Multi-Sheet Excel
+
+**禁止**在 run_code 代码中调用 to_excel/to_csv 等写出 API，publish 会自动处理全部格式化和样式。
+
+## DataFrame.attrs 必需字段
+
+### Manual/Medical/RBQM 场景
+每个 DataFrame 必须设置：
+\`\`\`python
+df.attrs["labels"] = {
+    "USUBJID": "Subject Identifier",
+    "AGE": "Age (Years)",
+    "SEX": "Sex"
+}
+\`\`\`
+
+### Report 场景
+首个 DataFrame 必须设置：
+\`\`\`python
+first_df.attrs["report_metadata"] = {
+    "sponsor": "XX Pharma",
+    "protocol_no": "ABC-001",
+    "project_id": "WX12345",
+    "report_date": "2026-08-27"
+}
+first_df.attrs["labels"] = {...}  # 业务字段仍需 labels
+\`\`\`
+
+## 输出结构规范
+
+### Manual/Medical 场景（RT01 标准）
+最终 Excel 包含：
+- **Content Sheet（自动生成）**：
+  - Row 1: "Comparison Summary" 标题
+  - Row 2: 表头 ["Listing Seq.", "Form Name", "New/Modified ?", "Total", "New", "Modified", "Old"]
+  - Row 3+: 每个业务表的变化统计
+  
+- **业务 Sheet**（如 LISTING_DM_01）：
+  - Row 1: 返回链接 + Sheet 名称
+  - Row 2: 变量名（英文）
+  - Row 3: Label（中文或描述，来自 attrs["labels"]）
+  - Row 4+: 数据行
+  - 自动补齐比较审核列：Flag1, __cmp_FLAG__, __cmp_UpdateDetail__, __cmp_RCcomment__, __cmp_Idate__
+
+### Report 场景（DM Status Report 标准）
+最终 Excel 包含：
+- **Cover Page（自动生成）**：
+  - Row 1: "数据管理状态报告\nDM Status Report"
+  - Row 2: 空行
+  - Row 3: "申办方：\nSponsor:" + 值（来自 report_metadata.sponsor）
+  - Row 4: "方案编号：\nProtocol No:" + 值
+  - Row 5: "康德弘翼项目编号：\nWuXi Project ID:" + 值
+  - Row 6: "最新报告生成日期：" + 值
+  
+- **业务 Sheet**（如 Matrix by Study）：
+  - Row 1: 表头（单层，来自 DataFrame.columns）
+  - Row 2+: 数据行
+  - 不补齐比较审核列
+
+### RBQM 场景
+- 无固定 Content/Cover Page
+- 业务 Sheet 结构同 Manual（3 行表头）
+- 可自定义列结构，但必须提供 attrs["labels"]
+
+## 一次需求输出单个 Excel
+一次需求的所有 Listing 表必须放入同一个 outputs 字典，publish 只调用一次。确认 run_code 回执列出全部工作表后再 publish。`,
   })
 
   registerTool(listing, {
@@ -124,3 +194,4 @@ export function apply(ctx: Context): void {
   })
   listing.logger?.info('Enterprise Listing tools registered (agent-isolated Python workers)')
 }
+
