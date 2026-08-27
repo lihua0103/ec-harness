@@ -67,11 +67,21 @@ export function apply(ctx: Context): void {
     text: `# 临床 Listing 工具使用规范
 
 ## 强制工作流
-1. enterprise_listing_inspect：加载数据集
+1. enterprise_listing_inspect：加载数据集元数据（列名、行数、文件路径）
 2. enterprise_listing_run_code：生成 outputs 字典，每个键是工作表名，每个值是 pandas DataFrame
 3. enterprise_listing_publish：唯一交付路径，生成单个规范化 Multi-Sheet Excel
 
 **禁止**在 run_code 代码中调用 to_excel/to_csv 等写出 API，publish 会自动处理全部格式化和样式。
+
+## 数据安全约束
+inspect 只返回元数据（列名、路径、行数统计），不返回实际数据行。run_code 在沙箱内执行，数据集已预加载为 DataFrame，可通过变量名直接引用。
+
+**严禁**在代码中尝试输出数据内容：
+- 不要 print(df) / print(df.head()) / print(df.sample())
+- 不要在 receipt 中返回 df.to_dict() / df.values
+- 只基于 Spec/ALS 的列名和业务逻辑编写转换代码
+
+模型只需关注：读取 Spec → 理解需求 → 编写 pandas 转换逻辑 → 定义 outputs 和 attrs。数据处理和输出由 Worker 沙箱安全执行。
 
 ## DataFrame.attrs 必需字段
 
@@ -194,4 +204,5 @@ first_df.attrs["labels"] = {...}  # 业务字段仍需 labels
   })
   listing.logger?.info('Enterprise Listing tools registered (agent-isolated Python workers)')
 }
+
 

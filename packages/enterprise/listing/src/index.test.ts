@@ -43,10 +43,14 @@ describe('enterprise-listing plugin', () => {
 
   it('向模型注入不可绕过的 Multi-Sheet 发布约束', () => {
     expect(promptSections).toHaveLength(1)
-    expect(promptSections[0]?.text).toContain('必须定义 outputs 字典')
-    expect(promptSections[0]?.text).toContain('publish 是唯一交付路径')
-    expect(promptSections[0]?.text).toContain('manual/medical 使用 RT01 标准结构')
-    expect(promptSections[0]?.text).toContain('report 使用 DM Status Report 标准')
+    const text = promptSections[0]?.text || ''
+    expect(text).toContain('enterprise_listing_run_code')
+    expect(text).toContain('唯一交付路径')
+    expect(text).toContain('pandas DataFrame')
+    expect(text).toContain('RT01 标准')
+    expect(text).toContain('DM Status Report')
+    expect(text).toContain('严禁')
+    expect(text).toContain('数据安全约束')
   })
 
   it('按 Agent 隔离并转发 inspect → run_code → publish', async () => {
@@ -66,3 +70,5 @@ describe('enterprise-listing plugin', () => {
     expect(dispose).toHaveBeenCalledOnce()
   })
 })
+
+
