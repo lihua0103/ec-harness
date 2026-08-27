@@ -225,8 +225,13 @@ const plugins = listEnterprisePlugins(root)
 if (plugins.length === 0) fail(`packages/enterprise 下没有找到任何企业插件：${root}`)
 const missingArtifacts = () => plugins.filter((plugin) => !fs.existsSync(plugin.libEntry))
 
-if (missingArtifacts().length > 0) {
-  run(root, ['run', 'build'], '企业插件构建产物缺失，正在构建')
+// Git 拉取会更新源码但不更新产物时间戳，导致 tsc -b 误判 up-to-date。
+// 改为：只要有任何产物缺失或 tsbuildinfo 存在（说明曾构建过但可能陈旧），都先清理缓存全量重建。
+const hasBuildCache = plugins.some((plugin) => fs.existsSync(plugin.buildInfo))
+if (missingArtifacts().length > 0 || hasBuildCache) {
+  // 清理全部 tsbuildinfo，强制完整重新编译
+  for (const plugin of plugins) fs.rmSync(plugin.buildInfo, { force: true })
+  run(root, ['run', 'build'], '企业插件构建（强制全量以避免增量缓存陈旧）')
 
   // `tsc -b` 只比对 tsconfig.tsbuildinfo 与源文件时间戳，**不检查产物是否还在**。
   // 手动删过 lib/（或上次 clean 只删了一半）就会得到
@@ -270,4 +275,5 @@ ensureInstall(profile, '企业 Profile', Object.keys(profileManifest.dependencie
 
 console.log(`[DSH] 启动企业 WebUI：http://127.0.0.1:${port}`)
 run(upstream, ['dsh', '--profile', 'enterprise'], '正在启动 DeepSeek Harness WebUI')
+
 
