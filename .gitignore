@@ -27,6 +27,19 @@ profiles/*/cordis.yml
 /storages/
 /.dsh/
 
-# 本地归档凭据，禁止提交。
+# 本地归档凭证，禁止提交。
 /.credentials.yaml
+/profiles/.credentials.yaml
+/profiles/settings.yaml
 
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 会话数据
+/sessions/
+
+# 临时测试文件
+*.backup
+*.new
