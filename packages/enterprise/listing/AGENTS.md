@@ -14,6 +14,18 @@
 - spec/ALS：字段和业务规则，不是数据源。
 - 标准范例：只定义工作簿结构和样式，不是数据源。
 
+## 数据拦截（2026-08-28 现行口径，ADR-0007/0009）
+
+拦截只剩一种场景，按数据源头判定，不按字段名，无模式扫描：
+
+- **dataset**：数据集（sas7bdat/xpt/csv，含加密归档解出）的原始行值不出域 → inspect 回执只含元数据（列名/行数/dtype/nullCount/uniqueCount），行样本默认根本不构建。
+
+其余一律不碰：**doc/ 整目录零拦截**——文本与 Excel（ALS/DVP 等）单元格值全量直通（截断上限只作协议护栏并显式标记 truncated）、run_code 的 stdout/stderr 原样、AI 产物与 publish 回执原样、错误消息原样。
+
+通用工具（shell/文件读写）触碰数据集文件会被 tool-audit 护栏拒绝（同一开关；enterprise_* 车道豁免）。
+
+开关是**宿主侧**的（设置页 DataSecurityService，模型不可见）：默认开、fail-closed；关闭 = 零拦截（含通用车道护栏）。sandbox 执行面按 ADR-0009 全量放开：标准 builtins、任意 import、文件 IO 与 DataFrame 读写方法都可用，且开关节不触碰执行面。`list_files`/`scan_excel_structures` 仍限项目根内，这是便利助手契约；run_code 中的 `open`/`os` 等标准能力不受该围栏限制。
+
 ## AI 输出合同
 
 代码必须定义：
@@ -32,8 +44,11 @@ ae_listing.attrs["labels"] = {
 
 - `outputs` 的每个值必须是 pandas DataFrame。
 - 一次需求的所有 Listing 必须放进同一个 `outputs`。
-- 禁止自行调用 `to_excel`、`ExcelWriter` 或生成其他 Excel。
+- 不要用 `to_excel`、`ExcelWriter` 等写交付文件；中间/临时文件可自行生成。
 - 发布结果始终是一个 `{SCENARIO}_LISTINGS.xlsx`。
+- 可选：`attrs["_skip_default_template"] = True` 跳过审核列注入；
+  `attrs["_layout"] = {header_rows, header_columns, anchor_cell, freeze_panes,
+  back_link, column_widths}` 接管业务页排版（非法即发布失败）。
 
 ## 场景规则
 

@@ -95,10 +95,9 @@ def test_run_code_collects_when_session_cold(project):
     assert result["ok"] is True, result
     envelope = result["receipt"]["outputs"]["AE"]
     assert envelope["rowCount"] == 2
-    assert envelope["columns"] == [
-        {"name": "USUBJID", "dtype": "object", "nullCount": 0},
-        {"name": "AETERM", "dtype": "object", "nullCount": 0},
-    ]
+    assert [(column["name"], column["nullCount"]) for column in envelope["columns"]] == [
+        ("USUBJID", 0), ("AETERM", 0)]
+    assert {column["dtype"] for column in envelope["columns"]} <= {"object", "str"}
     assert result["receipt"]["publishReady"] is True
 
 

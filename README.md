@@ -19,8 +19,7 @@
 ```text
 upstream/deepseek-harness/     官方 Harness 基线，git submodule，只读
 packages/enterprise/           企业插件实现（每个包 = 一个 Bundle = 一个 patch 层）
-  auth/                        企业身份预留（未装配）
-  tool-audit/                  工具调用审计与脱敏
+  tool-audit/                  通用车道数据集护栏（tools/pre-execute，ADR-0007）
   ui-settings/                 企业设置面板
   branding/                    企业白标（标题/正文品牌词/标志/favicon/manifest）
   listing/                     临床 Listing 引导流程（spec/ALS → SAS → Excel，不限 AI 操作）
@@ -58,7 +57,7 @@ pnpm 11 起，workspace 级设置由 `pnpm-workspace.yaml` 承载。`strictPeerD
 
 ## 4. 治理：可执行的规范
 
-架构规范如果只写在文档里，实际约束力为零。本平台的原则是每条可机检的条款都必须有对应门禁，`pnpm run check:all` 串起六道：
+架构规范如果只写在文档里，实际约束力为零。本平台的原则是每条可机检的条款都必须有对应门禁，`pnpm run check:all` 串起八步（lint→typecheck→test→architecture→secrets→python→upstream→profile:verify）：
 
 | 门禁 | 覆盖内容 |
 |---|---|
@@ -87,11 +86,13 @@ npm script 里的单引号在 Windows 上是字面量。`pnpm -r --filter './pac
 
 `emerald-clinical-data-guard` 是这套插件模型上的第一个重量级业务实现，它同时说明了扩展点的表达力上限。**该插件目前仍在 `feat/data-egress-switch-refactor` 分支，尚未迁入本骨架**，迁移方案需要单独 ADR。其平台层部分已先行迁出：品牌白标功能独立为 `@dsh-enterprise/branding`（[ADR-0002](./docs/enterprise/adr/0002-enterprise-branding-plugin.md)），注入车道从 tapIndex 全量变换改为官方结构化注入行 + title 逃生口。
 
-当前 Listing 是受信环境中的受限 pandas 执行车道：AST 策略拒绝导入、动态执行、私有属性、文件读写与模块逃逸，并在独立子进程中运行；它不等同于 OS 级强沙箱。数据安全开关默认开启，并在 Harness 的 tools/pre-execute 边界阻断全部 Listing 工具；只有获授权的受信部署显式关闭开关后，模型才可处理真实临床数据。inspect 只返回结构元数据，run_code 回执只返回行数、列名、dtype、空值数及有界 stdout/stderr。
+当前 Listing 是受信环境中的标准 pandas 执行车道：ADR-0009 已放开 import、文件 IO、动态执行与 DataFrame 读写方法，并在独立子进程中运行；它不等同于 OS 级强沙箱。数据安全开关默认开启，只控制 Listing 回执投影与通用工具的数据集车道；关闭后两类出域拦截均为零，Listing 工具本身不受开关阻断。inspect 数据集只返回结构元数据，run_code 回执只返回输出元数据及有界 stdout/stderr。
 
 模型可见的工具是 `clinical_listing_inspect` → `clinical_listing_run_code`（可多轮迭代）→ `clinical_listing_publish`，加一个 `local_data_metadata`。挂载点用 `tools/post-execute`（结果投影）、`llm/stream`（最终出域检查）、`ctx.tools.register`、`ctx.systemPrompt.section`、`ctx.webServer.tapIndex`。刻意不用 `tools/pre-execute` 拦截通用工具——拦截式设计要穷举攻击面，投影式设计只需定义允许出域的形状。
 
 数据平面判定按路径归属而非内容形态：`data > spec > document > output`，`.sas7bdat` / `.xpt` 无论放在哪都属 data 域。执行车道分为 `fast`（30s）与 `heavy`（600–900s）双 worker，NDJSON over stdio，全链路 fail-closed。`dataInterceptionEnabled` 是唯一的运行态出域开关，关闭时旁路结果投影与流检查，但不影响 Listing 工具本身。
+
+本分支的 `@dsh-enterprise/listing`（ADR-0007 + ADR-0009 现行口径）落地**按源头判定的出域单点**：唯一硬红线是数据集（sas7bdat/xpt/csv）原始行值不出域，inspect 只给元数据；doc/ 文本与 Excel、stdout/AI 产物/错误消息一律不碰。开关是宿主侧的（`DataSecurityService` 设置页），默认开 + fail-closed，关闭 = 零拦截；模型接触不到开关，且开关节不触碰执行面。固定输出模板（Content/Cover/ALS）保留为输出标准，AI 可经 `_skip_default_template` / `_layout` 跳过或接管排版。
 
 ## 7. 环境与常用命令
 
@@ -100,9 +101,9 @@ Node `^22.19.0 || >=24.0.0`（与上游对齐，刻意排除官方不支持的 N
 ```sh
 git submodule update --init --depth 1
 pnpm install
-pnpm run check:all          # 全量门禁（含真实 Profile 启动 smoke）
+pnpm run check:all          # 全量门禁（Profile 装配验证；启动实点用 scripts\start.bat）
 
-pnpm start                  # 一键启动（或双击 start.bat / ./start.sh）
+pnpm start                  # 一键启动（或双击 scripts\start.bat / ./scripts/start.sh）
 pnpm run profile:run        # 只跑 dsh web，叠加企业 patch
 pnpm run profile:install    # 独立安装 profile 依赖
 pnpm run profile:dump       # 导出最终装配结果
@@ -112,17 +113,19 @@ pnpm run upstream:sync
 pnpm run upstream:verify
 ```
 
-新增一个企业插件的完整改动面（已实测：加第四个插件时 `scripts/` 一行未改，六道门禁全过）：建包 manifest（`private:true`、`type:module`、`main`/`types` 指向 `lib/index.js`、`files` 与 `exports` 均含 `cordis.patch.yml`、声明 `dsh.bundle.patch`）、tsconfig（`composite`、`rootDir: src`、`outDir: lib`）、至少含一个 row 的 `cordis.patch.yml`、`src/index.ts` 默认导出插件函数，最后在 `profiles/enterprise/package.json` 的 `dependencies` 与 `dsh.profile.bundles` 各加一行。根 `tsconfig.json` 的 `references` 是可选的，只影响 IDE 与根级 `tsc -b`。
+新增一个企业插件的完整改动面（已实测：加第四个插件时 `scripts/` 一行未改，全部门禁通过）：建包 manifest（`private:true`、`type:module`、`main`/`types` 指向 `lib/index.js`、`files` 与 `exports` 均含 `cordis.patch.yml`、声明 `dsh.bundle.patch`）、tsconfig（`composite`、`rootDir: src`、`outDir: lib`）、至少含一个 row 的 `cordis.patch.yml`、`src/index.ts` 默认导出插件函数，最后在 `profiles/enterprise/package.json` 的 `dependencies` 与 `dsh.profile.bundles` 各加一行。根 `tsconfig.json` 的 `references` 是可选的，只影响 IDE 与根级 `tsc -b`。
 
 ## 8. 现状与待办
 
-骨架、装配契约、门禁与跨平台启动链路已可用，`pnpm install --frozen-lockfile` 可用。企业插件中 `branding`（ADR-0002）与 `listing`（ADR-0003，临床 Listing 引导流程，不限 AI 操作）已落地实现；`auth` 尚未实现且未装配；`tool-audit` 与 `ui-settings` 已接通数据安全执行门禁和加固后的本地设置 API。CI 尚未建立，六道门禁靠人工执行 `pnpm run check:all`。临床护栏插件其余部分（出域开关、设置页 UI）的迁入方案待定。
+骨架、装配契约、门禁与跨平台启动链路已可用，`pnpm install --frozen-lockfile` 可用。企业插件中 `branding`（ADR-0002）、`listing`（ADR-0003 + ADR-0007 数据集单规则红线）、`tool-audit`（ADR-0007 通用车道护栏）与 `ui-settings`（开关本体 + 配置单源）均已落地实现；`auth` 已于 08-27 移除（无 ADR 记录，教训见 PLUGIN_SYSTEM_AUDIT_20260828.md §C-1）。CI 尚未建立，门禁靠人工执行 `pnpm run check:all`。临床护栏插件其余部分（出域开关、设置页 UI）的迁入方案待定。
 
 ## 9. 文档索引
 
 - [ADR-0001：企业扩展层的边界、分发与 pnpm 基线](./docs/enterprise/adr/0001-enterprise-extension-boundary.md)
 - [ADR-0002：企业品牌插件](./docs/enterprise/adr/0002-enterprise-branding-plugin.md)
 - [ADR-0003：临床 Listing 引导插件](./docs/enterprise/adr/0003-enterprise-listing-plugin.md)
+- [ADR-0005：Listing 场景化数据红线（按源头判定 + 可关闭开关 + 模板保留）](./docs/enterprise/adr/0005-listing-v2-scenario-redline.md)
+- [ADR-0006：数据拦截两规则口径与宿主侧开关](./docs/enterprise/adr/0006-data-guard-two-rules-host-switch.md)
 - [架构审计](./docs/enterprise/ARCHITECTURE_AUDIT.md)
 - [插件架构](./docs/enterprise/PLUGIN_ARCHITECTURE.md)
 - [企业代码规范](./docs/enterprise/CODING_STANDARDS.md)
@@ -130,5 +133,3 @@ pnpm run upstream:verify
 - [上游升级手册](./docs/enterprise/runbooks/UPSTREAM_UPGRADE.md)
 - [安全与审计](./docs/enterprise/runbooks/SECURITY_AUDIT.md)
 - [插件分发](./docs/enterprise/runbooks/PLUGIN_DISTRIBUTION.md)
-
-

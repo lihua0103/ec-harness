@@ -147,21 +147,26 @@ describe('数据拦截（ADR-0007：单规则 + 宿主开关 + doc/ 零拦截）
     } finally { worker.dispose() }
   }, 30_000)
 
-  it('sandbox 执行安全独立于开关：__import__/open 仍阻断', async () => {
+  it('ADR-0009：执行面全开且不受开关影响', async () => {
     const root = await guardProject()
     const worker = new PythonWorker()
     try {
-      for (const code of ['open("/etc/passwd")', '__import__("os")']) {
-        const blocked = await worker.request(
-          { operation: 'listing_run_code', project: root, code, dataInterception: false }, 30_000)
-        expect(blocked.ok).toBe(false)
-      }
-      // AST 禁用表：read_*/to_* 恒阻断
-      for (const code of ["pd.read_csv('AE.csv')", "datasets['AE'].to_csv('x.csv')"]) {
-        const blocked = await worker.request(
-          { operation: 'listing_run_code', project: root, code, dataInterception: false }, 30_000)
-        expect(blocked.ok).toBe(false)
-      }
+      const roundtrip = join(root, 'adr0009-roundtrip.csv')
+      const code = [
+        'import os',
+        `with open(${JSON.stringify(join(root, 'AE.csv'))}, encoding='utf-8') as fh:`,
+        '    header = fh.readline().strip()',
+        `pd.DataFrame({'A': [1, 2]}).to_csv(${JSON.stringify(roundtrip)}, index=False)`,
+        `back = pd.read_csv(${JSON.stringify(roundtrip)})`,
+        `outputs = {'ADR0009': pd.DataFrame({`,
+        "    'rowCount': [len(back)],",
+        "    'openOk': [header == 'USUBJID,AETERM'],",
+        "    'importOk': [os.name in ('nt', 'posix')],",
+        '})}',
+      ].join('\n')
+      const result = await worker.request(
+        { operation: 'listing_run_code', project: root, code, dataInterception: false }, 30_000)
+      expect(result).toMatchObject({ ok: true, receipt: { outputCount: 1, publishReady: true } })
     } finally { worker.dispose() }
   }, 30_000)
 

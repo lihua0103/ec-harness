@@ -13,6 +13,25 @@ import {
 
 const pattern = buildDatasetPattern(DEFAULT_DATASET_EXTENSIONS)
 const next = (): Promise<PreToolDecisionLike> => Promise.resolve({ kind: 'allow' })
+const toolExec = (name: string, args: unknown): ToolExecutionLike => ({ name, arguments: args })
+
+function waterfallHarness(service?: GuardContext['dataSecurityService']) {
+  const listeners: Array<(exec: ToolExecutionLike, next: () => Promise<PreToolDecisionLike>) => Promise<PreToolDecisionLike>> = []
+  const dispose = vi.fn()
+  const ctx: GuardContext = {
+    on: (_event, listener) => { listeners.push(listener); return dispose },
+    dataSecurityService: service,
+  }
+  const disposer = registerDatasetGuard(ctx)
+  return { listeners, dispose, disposer }
+}
+
+function guardHarness(service?: GuardContext['dataSecurityService']) {
+  const listeners: Array<(exec: ToolExecutionLike, next: () => Promise<PreToolDecisionLike>) => Promise<PreToolDecisionLike>> = []
+  const ctx: GuardContext = { on: (_e, l) => { listeners.push(l); return () => undefined }, dataSecurityService: service }
+  registerDatasetGuard(ctx)
+  return listeners[0]
+}
 
 describe('buildDatasetPattern / findDatasetReference', () => {
   it('匹配命令字符串里的数据集文件引用（含 Windows 反斜杠路径与大小写）', () => {
@@ -70,60 +89,38 @@ describe('guardFlags（fail-closed）', () => {
 })
 
 describe('registerDatasetGuard（pre-execute waterfall）', () => {
-  function harness(service?: GuardContext['dataSecurityService']) {
-    const listeners: Array<(exec: ToolExecutionLike, next: () => Promise<PreToolDecisionLike>) => Promise<PreToolDecisionLike>> = []
-    const dispose = vi.fn()
-    const ctx: GuardContext = {
-      on: (_event, listener) => { listeners.push(listener); return dispose },
-      dataSecurityService: service,
-    }
-    const disposer = registerDatasetGuard(ctx)
-    return { listeners, dispose, disposer }
-  }
-
-  const exec = (name: string, args: unknown): ToolExecutionLike => ({ name, arguments: args })
-
   it('shell 引用数据集 → deny；理由含车道引导', async () => {
-    const { listeners } = harness()
-    const decision = await listeners[0](exec('pwsh', { command: 'python read dm.sas7bdat' }), next)
+    const { listeners } = waterfallHarness()
+    const decision = await listeners[0](toolExec('pwsh', { command: 'python read dm.sas7bdat' }), next)
     expect(decision).toMatchObject({ kind: 'deny' })
     expect((decision as { reason?: string }).reason).toContain('enterprise_listing_run_code')
   })
 
   it('不含数据集引用 → allow（next 放行）', async () => {
-    const { listeners } = harness()
-    await expect(listeners[0](exec('pwsh', { command: 'ls doc/' }), next)).resolves.toEqual({ kind: 'allow' })
+    const { listeners } = waterfallHarness()
+    await expect(listeners[0](toolExec('pwsh', { command: 'ls doc/' }), next)).resolves.toEqual({ kind: 'allow' })
   })
 
   it('enterprise_* 自有车道豁免（listing 回执有自己的投影出口）', async () => {
-    const { listeners } = harness()
-    await expect(listeners[0](exec('enterprise_listing_run_code', { project: '/p', code: "x = 'dm.sas7bdat'" }), next))
+    const { listeners } = waterfallHarness()
+    await expect(listeners[0](toolExec('enterprise_listing_run_code', { project: '/p', code: "x = 'dm.sas7bdat'" }), next))
       .resolves.toEqual({ kind: 'allow' })
   })
 
   it('宿主开关关闭 → 零拦截（deny 语义整体旁路）', async () => {
-    const { listeners } = harness({ isEnabled: () => false })
-    await expect(listeners[0](exec('pwsh', { command: 'cat dm.sas7bdat' }), next)).resolves.toEqual({ kind: 'allow' })
+    const { listeners } = waterfallHarness({ isEnabled: () => false })
+    await expect(listeners[0](toolExec('pwsh', { command: 'cat dm.sas7bdat' }), next)).resolves.toEqual({ kind: 'allow' })
   })
 
   it('返回的 disposer 即事件退订（可卸载）', () => {
-    const { disposer, dispose } = harness()
+    const { disposer, dispose } = waterfallHarness()
     expect(disposer).toBe(dispose)
   })
 })
 
 describe('FP 专项：合法工作流不误伤（2026-08-28 收口）', () => {
-  function harness(service?: GuardContext['dataSecurityService']) {
-    const listeners: Array<(exec: ToolExecutionLike, next: () => Promise<PreToolDecisionLike>) => Promise<PreToolDecisionLike>> = []
-    const ctx: GuardContext = { on: (_e, l) => { listeners.push(l); return () => undefined }, dataSecurityService: service }
-    registerDatasetGuard(ctx)
-    return listeners[0]
-  }
-  const next = (): Promise<PreToolDecisionLike> => Promise.resolve({ kind: 'allow' })
-  const exec = (name: string, args: unknown): ToolExecutionLike => ({ name, arguments: args })
-
   it('常规命令全放行：ls/git add -A/mkdir/python 计算/文档写入', async () => {
-    const guard = harness()
+    const guard = guardHarness()
     for (const args of [
       { command: 'ls -la doc/' },
       { command: 'git add -A && git commit -m "listings"' },
@@ -131,29 +128,29 @@ describe('FP 专项：合法工作流不误伤（2026-08-28 收口）', () => {
       { command: 'python -c "print(1+1)"' },
       { path: 'notes/README.md', content: '# 说明\n流程见 inspect 回执。' },
     ]) {
-      await expect(guard(exec('pwsh', args), next)).resolves.toEqual({ kind: 'allow' })
+      await expect(guard(toolExec('pwsh', args), next)).resolves.toEqual({ kind: 'allow' })
     }
   })
 
   it('纯写出型工具豁免：写文档提及数据集文件名不拦（名字来自元数据，非内容）', async () => {
-    const guard = harness()
-    await expect(guard(exec('Write', { path: 'notes/dm-notes.md', content: '数据源: raw/dm.sas7bdat,见 inspect 元数据' }), next))
+    const guard = guardHarness()
+    await expect(guard(toolExec('Write', { path: 'notes/dm-notes.md', content: '数据源: raw/dm.sas7bdat,见 inspect 元数据' }), next))
       .resolves.toEqual({ kind: 'allow' })
-    await expect(guard(exec('edit', { file_path: 'x.py', old_string: 'a', new_string: "p='dm.csv'" }), next))
+    await expect(guard(toolExec('edit', { file_path: 'x.py', old_string: 'a', new_string: "p='dm.csv'" }), next))
       .resolves.toEqual({ kind: 'allow' })
   })
 
   it('带空格文件名仍命中（勘误 V-5:token 逐段匹配,空格不构成绕过）', async () => {
-    const guard = harness()
-    const decision = await guard(exec('pwsh', { command: 'cat "my data.csv"' }), next)
+    const guard = guardHarness()
+    const decision = await guard(toolExec('pwsh', { command: 'cat "my data.csv"' }), next)
     expect(decision).toMatchObject({ kind: 'deny' })
   })
 
   it('读取型工具引用数据集仍然拒绝（豁免只针对纯写出）', async () => {
-    const guard = harness()
-    await expect(guard(exec('pwsh', { command: 'python read dm.sas7bdat' }), next))
+    const guard = guardHarness()
+    await expect(guard(toolExec('pwsh', { command: 'python read dm.sas7bdat' }), next))
       .resolves.toMatchObject({ kind: 'deny' })
-    await expect(guard(exec('Read', { file_path: 'raw/dm.csv' }), next))
+    await expect(guard(toolExec('Read', { file_path: 'raw/dm.csv' }), next))
       .resolves.toMatchObject({ kind: 'deny' })
   })
 })

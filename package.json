@@ -26,8 +26,7 @@
     "clean": "node scripts/clean.mjs",
     "start": "node scripts/start.mjs",
     "profile:verify": "node scripts/profile.mjs verify",
-    "check:python": "python packages/enterprise/listing/python/check_deps.py",
-    "profile:smoke": "node scripts/profile-smoke.mjs"
+    "check:python": "python packages/enterprise/listing/python/check_deps.py"
   },
   "devDependencies": {
     "@types/node": "22.20.1",

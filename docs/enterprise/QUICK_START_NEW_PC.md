@@ -4,15 +4,15 @@
 
 现在启动脚本已经支持**自动初始化 submodule**，你只需要：
 
-\\\ash
+```bash
 # 1. 克隆仓库
 git clone https://github.com/lihua0103/ec-harness.git
 cd ec-harness
 git checkout feat/clinical/harness
 
 # 2. 直接启动（会自动处理 submodule 和依赖）
-start.bat
-\\\
+scripts\start.bat
+```
 
 启动脚本会自动：
 ✅ 检测并初始化 upstream/deepseek-harness submodule
@@ -27,18 +27,18 @@ start.bat
 - **pnpm**: >= 11.0.0
 - **Git**: 任意版本
 
-\\\ash
+```bash
 # 检查环境
 node --version
 pnpm --version
 
 # 如果未安装 pnpm
 npm install -g pnpm
-\\\
+```
 
 ## 测试 Multi-Sheet 功能
 
-\\\ash
+```bash
 # 生成示例 Excel 文件
 cd packages/enterprise/listing/python
 python generate_templates.py
@@ -48,7 +48,7 @@ python generate_templates.py
 # - template_medical.xlsx
 # - template_rbqm.xlsx
 # - template_report.xlsx
-\\\
+```
 
 ## 完整测试文档
 
@@ -60,27 +60,27 @@ python generate_templates.py
 
 ### Q: 网络问题导致 submodule 初始化失败
 
-\\\ash
+```bash
 # 手动初始化
 git submodule update --init --depth 1
-\\\
+```
 
 ### Q: 端口 3080 被占用
 
-\\\ash
+```bash
 # 使用不同端口
 set DSH_PORT=3081
-start.bat
-\\\
+scripts\start.bat
+```
 
 ### Q: 构建失败
 
-\\\ash
+```bash
 # 清理重建
 pnpm run clean
 pnpm install
 pnpm run build
-\\\
+```
 
 ---
 

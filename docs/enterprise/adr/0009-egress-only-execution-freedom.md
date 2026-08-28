@@ -74,3 +74,9 @@ pytest 143 全绿(2026-08-28 实测;160→143:24 条封堵用例退役、7 条�
 用例新增);四包 tsc -b 零错误;出域投影用例零回归(test_data_guard/
 test_worker_dispatch 全绿)。Windows 侧以 check:all 收口(见
 DEFECT_FIX_PLAN_20260828.md 批 4)。
+
+Windows 收口补充(2026-08-28):check:all 八步全绿(oxlint 仅存量警告),
+四包 tsc/Vitest、架构、密钥、Python 依赖、upstream 与 profile 装配均通过;
+scripts/start.bat 以 DSH_PORT=3090 实点启动,HTTP 200 且企业品牌标题生效。
+doc/ Excel 直通、通用车道 deny/关闭放行、run_code 中文错误与执行自由由
+对应 Python/TS 集成测试覆盖。

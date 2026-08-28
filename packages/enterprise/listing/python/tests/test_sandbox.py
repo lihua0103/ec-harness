@@ -7,6 +7,7 @@ pd.read_*/to_* 不再设卡);②list_files/scan_excel_structures 助手自带的
 白名单封堵用例已随决策退役(历史见 git 与 SECURITY_SCAN §六)。
 """
 import pandas as pd
+import os
 import pytest
 from openpyxl import Workbook
 
@@ -26,7 +27,7 @@ def test_standard_imports_available(project):
         "found = re.findall(r'\\d+', 'ab12cd34')\n",
         project, {})
     assert result["ok"] is True, result["error"]
-    assert result["environment"]["joined"] == "a/b"
+    assert result["environment"]["joined"] == os.path.join("a", "b")
 
 
 def test_import_pandas_submodule_unguarded(project):

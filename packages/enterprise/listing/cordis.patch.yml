@@ -2,3 +2,11 @@
 - insert:
     - id: enterprise-listing
       name: '@dsh-enterprise/listing'
+      # 部署参数（CODING_STANDARDS：不写死在插件代码）
+      config:
+        # report 场景 Cover Page 行标签（申办方特定文案；缺省用代码内中性默认值）
+        reportCoverLabels:
+          - "申办方：\nSponsor:"
+          - "方案编号：\nProtocol No:"
+          - "康德弘翼项目编号：\nWuXi Project ID:"
+          - "最新报告生成日期："

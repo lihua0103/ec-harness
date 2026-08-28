@@ -220,7 +220,7 @@ def operation_publish(request: dict) -> dict:
             track_changes=request.get("trackChanges", True),
             cover_labels=request.get("coverLabels"))
         return {"ok": True, "action": "listing-publish", "receipt": {
-            "outputFile": str(output.relative_to(project)),
+            "outputFile": output.relative_to(project).as_posix(),
             "scenario": scenario, "dataClass": "REAL",
             "format": "single-workbook-multi-sheet-xlsx", "statistics": statistics}}
     except Exception as exc:

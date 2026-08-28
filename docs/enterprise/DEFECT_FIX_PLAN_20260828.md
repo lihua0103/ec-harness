@@ -1,6 +1,6 @@
 # 缺陷修复计划(2026-08-28,基于 ADR-0008 全文核对)
 
-- 状态:批 0~3 已执行(2026-08-28;沙箱侧)。D-5 杂物物理删除与 D-9 移档、D-6 Windows 收口(批 4)留待后续——用户指令"除删文件外全部完成"。执行记录见文末。
+- 状态:批 0~4 已执行并由本批提交收口(2026-08-28;D-5/D-9/D-6 于 Windows 侧完成)。执行记录见文末。
 - 日期:2026-08-28
 - 输入:ADR-0008 全文 + SECURITY_SCAN_20260828.md + PLUGIN_SYSTEM_AUDIT §七 + 用户 2026-08-28 终裁
 - 核对方法:文档声称逐项对盘核实;pytest/tsc 沙箱实测;git 索引与磁盘差集比对
@@ -113,14 +113,15 @@ scripts\start.bat   # 实点 ADR-0007 四步(以 ADR-0009 口径复验)
 git add -A && git commit -m "ADR-0009 出域单点:执行面放开,杂物清理,文档债收口"
 ```
 
-## 执行记录(2026-08-28,沙箱侧)
+## 执行记录(2026-08-28)
 
 | 批 | commit | 内容与状态 |
 |---|---|---|
 | 0 | 61dc8a9 | D-2/D-3 全量入库(44 文件 5294 行,含 ADR-0005~0008/python 层/护栏);D-4 两处索引脏删除记录。基线=ADR-0008 形态(pytest 160 绿),可随时 revert 回执行护栏态 |
 | 1 | d34f257 | D-1 落地:ADR-0009 出域单点(sandbox 执行面全量放开/test_sandbox 重写/系统提示与工具描述切换/ENVIRONMENT_HINT/SECURITY_SCAN §六/ADR-0008 取代横幅);D-10 CHANGELOG NUL 修复。pytest 143 绿(24 条封堵用例退役+7 条自由用例新增),四包 tsc 零错 |
 | 3 | 7b663a8 | D-7:13 份过时交付文档归档横幅;D-8:CODEOWNERS auth 死条目删除+runbook 示例改 ui-settings 实形;D-9 非删除部分:两份 ADR-0004 加编号冲突横幅(物理移档留 Windows 批) |
+| 4 | 本批提交 | D-5:杂物/退役 shim/styles/lib 测试残留物理删除;D-9:0004-listing-session-log.md 移入 adr/archived/(不改号);D-6:Windows pytest 143 绿、check:all 八步绿、scripts/start.bat 以 DSH_PORT=3090 实点 HTTP 200(标题 Emerald Clinical Trials)。回归中顺带修正 ADR-0009 旧口径文档/测试、pandas 3 dtype 与 Windows 路径兼容、DSH_PORT 未传给官方 Web CLI、lint 阻断项、失效 profile:smoke 脚本。默认 3080 被外部进程占用,实点改用 3090;启动实例已停止 |
 
 沙箱内可跑门禁全绿:pytest 143、tsc×4、check-architecture(4 插件/6 Bundle 层)、check-secrets、check:python。
 
-**剩余项**:D-5 杂物物理删除(文件删除权限已对会话开通,用户指令本轮不删)、D-9 移档、D-6 批 4(check:all 含 oxlint/vitest、start.bat 实点、终批 commit——沙箱跑不了原生二进制)。
+**剩余项**:无;D-5/D-9/D-6 缺陷、回归与终批提交均已收口。

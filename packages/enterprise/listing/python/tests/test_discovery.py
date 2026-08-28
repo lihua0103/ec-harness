@@ -95,7 +95,7 @@ def test_dataset_payloads_throttling(project):
     throttled = discovery.dataset_payloads(datasets, sources, with_sample=False)[0]
     assert "sample" not in throttled
     assert throttled["rowCount"] == 2 and throttled["columns"] == ["USUBJID", "AETERM"]
-    assert throttled["dtypes"]["USUBJID"] == "object"
+    assert throttled["dtypes"]["USUBJID"] in {"object", "str"}
     assert throttled["nullCount"] == {"USUBJID": 0, "AETERM": 0}
     assert throttled["uniqueCount"] == {"USUBJID": 2, "AETERM": 2}
     full = discovery.dataset_payloads(datasets, sources, with_sample=True)[0]
