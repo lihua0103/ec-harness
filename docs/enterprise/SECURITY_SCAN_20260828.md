@@ -1,5 +1,13 @@
 # 安全漏洞扫描报告(2026-08-28,颗粒级)
 
+> **第三轮修订(2026-08-28,ADR-0009 出域单点)**:用户终裁"任何一层都不
+> 限制 harness AI 的代码执行面,唯一红线=数据行值出域"。据此 **§一 V-1 的
+> AST/GuardedModule 执行面防线与 §五 FP-1/2/3 的白名单机制整体退役**
+> (R-1 宿主破坏面/R-2 stdout 行值/R-3 网络出域显式接受,登记于
+> ADR-0009 §风险登记);**V-2/V-3 与 §五 的 V-4/6/7a/8 闭合全部保留**。
+> V-1 形态已入库 commit 61dc8a9,可随时 revert。详见
+> adr/0009-egress-only-execution-freedom.md。
+
 方法:静态逐行细读 + **实战探针**(攻击 PoC 在沙箱/管线真实执行复现后再定性,修复后同探针复验)。范围:四企业插件全部源码(TS/Python)、worker 协议、Excel 交付管线、设置 API、归档解压、通用车道护栏。
 
 ---
@@ -73,3 +81,14 @@ pytest **153** 全绿(新增:六条逃逸链回归 + 护栏零损耗 + 公式中
 ### 验证(第二轮)
 
 pytest **160** 全绿(新增:import 白名单 4 用例/C 惰性导入回归/to_* 放行/捕获上限/back_link 白名单/回执名上限);四包 tsc 零错误;check-architecture+check-secrets 过;双面探针复验:5 条攻击链全灭(pwned 未落盘)+ 3 条合法链(to_numpy().sum()/import re+statistics/pd.to_numeric)全通。护栏 FP 套件:常规命令 5 类全放行、纯写出工具豁免、带空格文件名仍命中、读取型仍拒。
+
+---
+
+## 六、第三轮(2026-08-28 终裁日深夜):出域单点政策反转记录
+
+用户终裁:"不管在哪一层,都不限制 harness AI 的代码执行面;始终限制的只有数据行值出域。"决策与风险登记见 **ADR-0009**,本节只记录扫描报告视角的变化:
+
+- **退役(按政策,非失效)**:V-1 防线(AST 禁用表/GuardedModule/子模块封死)与 FP-1/2/3 补偿机制(枚举写出器/rng·datetime·json 注入/safe_import 白名单)。六条逃逸链回归测试随批删除,新增执行自由回归(import os/open 读写/pd.read_csv+to_csv/eval-exec)。**该形态已入库(commit 61dc8a9),随时可 revert。**
+- **保留(全部与执行面无关)**:V-2 Excel 公式中和;V-3 worker 环境白名单;V-4 回执 120 字符上限;V-6 X-DSH-Settings 头;V-7a 捕获流 1MB 上限+truncated;V-7b stat 竞态跳过;V-8 back_link =HYPERLINK 白名单;FP-4 dataset-guard 纯写出工具豁免。
+- **风险移交**:R-1(无限制执行的宿主破坏面)/R-2(stdout 行值)/R-3(网络出域)按非对抗威胁模型接受,登记于 ADR-0009 §风险登记。
+- **验证**:pytest 143 全绿(160→143:24 条封堵用例退役、7 条自由用例新增);四包 tsc 零错误;出域投影用例零回归。

@@ -114,7 +114,7 @@ export function apply(ctx: Context, config: ListingConfig = {}): void {
 2. enterprise_listing_run_code：生成 outputs 字典，每个键是工作表名，每个值是 pandas DataFrame
 3. enterprise_listing_publish：唯一交付路径，生成单个规范化 Multi-Sheet Excel
 
-**禁止**在 run_code 代码中调用 to_excel/to_csv 等写出 API，publish 会自动处理全部格式化和样式。
+**交付纪律**：交付一律走 enterprise_listing_publish（自动处理全部格式化和样式）；run_code 中不要用 to_excel/to_csv 写交付文件——中间/临时文件随意（执行面不受限，别绕过统一交付即可）。
 
 ## 标准输出范例（推荐跟随，非强制）
 
@@ -156,13 +156,12 @@ df.attrs["_layout"] = {
 - **通用工具（shell/文件读写）触碰数据集文件会被部署方拒绝**：这是数据车道管控，请改用 enterprise_listing_inspect / enterprise_listing_run_code
 数据拦截开关由部署方在设置页控制，与模型无关。
 
-## Sandbox 约束（程序执行安全，恒生效）
-- import 白名单：numpy/pandas（护栏内）与 re/json/datetime/statistics/collections/itertools/functools/decimal/fractions/random/operator/string/numbers/bisect/heapq/math/textwrap——os/sys/shutil/pathlib/socket 等不可用
-- 可用命名空间：datasets（会话数据集）、pd、np、math、rng（采样 Generator）、datetime、json、list_files(subdir)、scan_excel_structures(relpath)
-- 可用内建含 dir/repr/map/filter 与 Exception/ValueError 等异常类——请写标准 except，无需裸 except
-- pd.to_datetime/to_numeric/to_list/to_numpy/to_dict 等纯转换函数照常可用；被阻断的是：读取器（read_*）、写出器（to_csv/to_excel/to_pickle 等）、双下划线属性、名字 query/eval/exec
-- 程序函数 list_files(subdir) / scan_excel_structures(path) 限项目根内，../ 越界即错
-- 执行失败回执附 environmentHint（环境自描述），一次读明无需试错
+## Sandbox 环境（ADR-0009：执行面全开）
+- 标准 Python 全量可用：标准内建（open/eval/exec 等）与 import（os/sys/shutil/pathlib 等）不受任何限制
+- 预置命名空间：datasets（会话数据集）、pd、np、math、rng（采样 Generator）、datetime、json、list_files(subdir)、scan_excel_structures(relpath)
+- list_files / scan_excel_structures 是限项目根的便利助手（../ 越界即错）；其他路径请用 open/os 自行处理
+- 唯一红线是数据红线而非执行红线：数据集行值不出域（回执出口投影），代码执行本身不设卡
+- stdout 原样回显：请勿 print 数据集行值（纪律）；执行失败回执附 environmentHint（环境自描述）
 
 ## 一次需求输出单个 Excel
 一次需求的所有 Listing 表必须放入同一个 outputs 字典，publish 只调用一次。确认 run_code 回执列出全部工作表后再 publish。`,
@@ -190,7 +189,7 @@ df.attrs["_layout"] = {
 
   registerTool(listing, {
     name: 'enterprise_listing_run_code',
-    description: '在当前隔离 Python 会话执行受限 pandas 代码。代码必须定义 outputs: dict[str, DataFrame]；禁止自行写 Excel/CSV。stdout 原样回显。',
+    description: '在当前 Python 会话执行 pandas 代码（标准 Python 全量可用，ADR-0009）。代码必须定义 outputs: dict[str, DataFrame]；交付经 publish。stdout 原样回显（勿打印行值）。',
     parameters: { type: 'object', properties: {
       project: { type: 'string', description: 'harness 项目绝对路径' },
       code: { type: 'string', description: '多行 Python/pandas 代码，必须定义 outputs' },
