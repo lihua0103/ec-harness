@@ -1,11 +1,67 @@
+import { readFile } from 'node:fs/promises'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 
 export interface BrandingConfig {
+  /** 完整品牌名（1..80 字符，禁尖括号；env DSH_BRAND_NAME 兜底）。 */
   brandName?: string
+  /** 短名（1..24 字符，禁尖括号；env DSH_BRAND_SHORT_NAME 兜底）。 */
   brandShortName?: string
 }
 
+/** 官方结构化注入行的结构子集（webserver 包，按名镜像——见 ADR-0002 决策 3）。 */
+export type IndexInjectionRow =
+  | { kind: 'html'; placement: 'head' | 'body'; html: string }
+
+/** 本插件用到的 `ctx.webServer` 服务面（结构子集）。 */
+interface WebServerLike {
+  tapIndex(transform: (html: string) => string): () => void
+  register(route: {
+    kind: 'exact' | 'prefix'
+    path: string
+    handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
+  }): () => void
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'webserver/index-inject': (table: IndexInjectionRow[]) => void
+  }
+}
+
 const BRAND_GLOBAL = '__DSH_ENTERPRISE_BRAND__'
+const FAVICON_URL = new URL('../assets/branding/favicon.svg', import.meta.url)
+
+/** 解析并校验品牌配置（ADR-0002 决策 4）：patch config → env 兜底 → 中性默认。 */
+export function validateBrandingConfig(config: BrandingConfig = {}): { brandName: string; brandShortName: string } {
+  const brandName = config.brandName || process.env.DSH_BRAND_NAME || 'DSH Enterprise'
+  const brandShortName = config.brandShortName || process.env.DSH_BRAND_SHORT_NAME || 'DSH'
+  for (const [field, value, max] of [
+    ['brandName', brandName, 80],
+    ['brandShortName', brandShortName, 24],
+  ] as const) {
+    if (value.length < 1 || value.length > max) {
+      throw new Error(`[branding] ${field} 长度必须是 1..${max}（当前 ${value.length}）`)
+    }
+    if (/[<>]/.test(value)) {
+      throw new Error(`[branding] ${field} 不允许包含尖括号（防 HTML 注入）`)
+    }
+  }
+  return { brandName, brandShortName }
+}
+
+/** HTML 文本/属性上下文转义。 */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
+/** script 上下文安全 JSON：`</script>` 经 `<` 失效。 */
+function jsonForScript(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, '\\u003c')
+}
 
 const CLIENT_SCRIPT = `
 ;(function() {
@@ -15,7 +71,7 @@ const CLIENT_SCRIPT = `
   function brandReplace(value) {
     return value
       .replace(/DeepSeek(?: Harness)?/gi, function() { return brand.brandName })
-      .replace(/\bDSH\b/g, function() { return brand.brandShortName })
+      .replace(/\\bDSH\\b/g, function() { return brand.brandShortName })
   }
   function inNoBrand(node) {
     for (var anc = node; anc; anc = anc.parentElement) {
@@ -105,41 +161,73 @@ const CLIENT_SCRIPT = `
 `
 
 /**
- * 注册品牌白标：注入全局品牌对象、替换 manifest/favicon、在页面加载时执行客户端脚本。
- * 通过 webServer.tapIndex() 方法实现，不修改 harness 源码。
+ * 注册品牌白标（ADR-0002）：
+ * - 结构化注入行（`webserver/index-inject`）承载全局品牌对象与客户端脚本；
+ * - `tapIndex` 仅做无法表达为行的字符串替换（title / application-name / icon link）；
+ * - `/favicon.svg` 与 `/manifest.webmanifest` 两条 no-store 具名路由（此前 404，修审计 B-6）；
+ * - 品牌值经长度/字符校验 + HTML 转义后才进入替换与 script 上下文（防注入）。
  */
 export function registerBranding(ctx: Context, config: BrandingConfig): () => void {
-  const webServer = ctx.get('webServer')
+  const webServer = (ctx as unknown as { get?: (name: string) => WebServerLike | undefined }).get?.('webServer')
   if (!webServer) throw new Error('[branding] webServer 服务不存在')
 
-  const brandName = config.brandName || 'DSH Enterprise'
-  const brandShortName = config.brandShortName || 'DSH'
+  const { brandName, brandShortName } = validateBrandingConfig(config)
   const brandObj = { brandName, brandShortName }
 
-  const globalVar = `globalThis[${JSON.stringify(BRAND_GLOBAL)}] = ${JSON.stringify(brandObj)}`
+  const globalVar = `globalThis[${JSON.stringify(BRAND_GLOBAL)}] = ${jsonForScript(brandObj)}`
+  const safeName = escapeHtml(brandName)
 
   const transform = (html: string): string => {
     let result = html
     result = result.replace(
       /<meta name="application-name"[^>]*>/i,
-      `<meta name="application-name" content="${brandName}">`
+      `<meta name="application-name" content="${safeName}">`,
     )
-    result = result.replace(/<title>[^<]*<\/title>/i, `<title>${brandName}</title>`)
+    result = result.replace(/<title>[^<]*<\/title>/i, `<title>${safeName}</title>`)
     result = result.replace(
       /<link rel="icon"[^>]*>/gi,
-      '<link rel="icon" type="image/svg+xml" href="/favicon.svg">'
+      '<link rel="icon" type="image/svg+xml" href="/favicon.svg">',
     )
-    if (!result.includes(BRAND_GLOBAL)) {
-      const scriptTag = `<script>${globalVar}</script>`
-      result = result.replace('</head>', `${scriptTag}</head>`)
-    }
-    if (!result.includes('MutationObserver(schedule)')) {
-      const brandScriptTag = `<script>${CLIENT_SCRIPT}</script>`
-      result = result.replace('</body>', `${brandScriptTag}</body>`)
-    }
     return result
   }
 
-  // 使用 tapIndex 而不是 on('webserver/index-inject')
-  return webServer.tapIndex(transform)
+  const disposers: Array<() => void> = []
+
+  disposers.push(ctx.on('webserver/index-inject', rows => {
+    rows.push({ kind: 'html', placement: 'head', html: `<script>${globalVar}</script>` })
+    rows.push({ kind: 'html', placement: 'body', html: `<script>${CLIENT_SCRIPT}</script>` })
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact', path: '/favicon.svg',
+    handler: async (_req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const body = await readFile(fileURLToPath(FAVICON_URL))
+        res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'no-store' })
+        res.end(body)
+      } catch {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
+        res.end('favicon not found')
+      }
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact', path: '/manifest.webmanifest',
+    handler: (_req: IncomingMessage, res: ServerResponse) => {
+      const manifest = JSON.stringify({
+        name: brandName,
+        short_name: brandShortName,
+        icons: [{ src: '/favicon.svg', sizes: 'any', type: 'image/svg+xml' }],
+        display: 'standalone',
+        start_url: '/',
+      })
+      res.writeHead(200, { 'Content-Type': 'application/manifest+json', 'Cache-Control': 'no-store' })
+      res.end(manifest)
+    },
+  }))
+
+  disposers.push(webServer.tapIndex(transform))
+
+  return () => { for (const dispose of disposers.splice(0)) dispose() }
 }

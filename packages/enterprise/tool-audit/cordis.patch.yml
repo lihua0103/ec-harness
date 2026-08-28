@@ -1,4 +1,6 @@
 - insert:
     - id: enterprise-tool-audit
       name: '@dsh-enterprise/tool-audit'
-      inject: ['dataSecurityService']
+      # tools 服务确保事件挂点存在；dataSecurityService 刻意软依赖
+      # （未装配 = 护栏 fail-closed 恒开，而不是加载失败）
+      inject: ['tools']

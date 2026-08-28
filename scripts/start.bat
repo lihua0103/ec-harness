@@ -1,6 +1,8 @@
 @echo off
 setlocal
-cd /d "%~dp0"
+rem start.mjs locates the repo root via process.cwd(), so it must run
+rem from the repo root; this script lives one level below the root.
+cd /d "%~dp0.."
 
 echo [DSH] Starting DeepSeek Harness WebUI...
 where node >nul 2>nul

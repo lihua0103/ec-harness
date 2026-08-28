@@ -43,3 +43,7 @@ __pycache__/
 # 临时测试文件
 *.backup
 *.new
+
+# 数据安全运行时状态（ui-settings DataSecurityService / 审计）
+/profiles/enterprise/.data-security.json
+/profiles/enterprise/.data-audit.jsonl

@@ -18,9 +18,9 @@
 ```json
 {
   "dependencies": {
-    "@dsh-enterprise/auth": "link:../../packages/enterprise/auth"
+    "@dsh-enterprise/ui-settings": "link:../../packages/enterprise/ui-settings"
   },
-  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@dsh-enterprise/auth"] } }
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@dsh-enterprise/ui-settings"] } }
 }
 ```
 

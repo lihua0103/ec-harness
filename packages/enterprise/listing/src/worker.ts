@@ -13,14 +13,55 @@ const DEFAULT_WORKER_SCRIPT = fileURLToPath(new URL('../python/worker.py', impor
 const DEFAULT_TIMEOUT_MS = 600_000
 const MAX_PROTOCOL_LINE_BYTES = 16 * 1024 * 1024
 
+/**
+ * Python 解释器候选链（审计 P1-4：不再写死单一 'python'）。
+ * 可经 DSH_PYTHON 显式指定；否则按平台顺序探测：Windows 上 'python' 缺失时
+ * 常见兜底是 py 启动器（py -3）；类 Unix 优先 python3。
+ */
+function pythonCandidates(): Array<{ command: string; preArgs: string[] }> {
+  const explicit = process.env.DSH_PYTHON
+  if (explicit) return [{ command: explicit, preArgs: [] }]
+  return process.platform === 'win32'
+    ? [{ command: 'python', preArgs: [] }, { command: 'py', preArgs: ['-3'] }]
+    : [{ command: 'python3', preArgs: [] }, { command: 'python', preArgs: [] }]
+}
+
+/**
+ * spawn 环境：**最小继承** + 强制 Python UTF-8。
+ * 漏洞扫描 V-6：worker 进程曾继承宿主全部环境变量（含可能的凭据），
+ * 配合沙箱逃逸面即 os.environ 可读。白名单只留解释器启动刚需：
+ * Windows 缺 SYSTEMROOT/PATH 会导致 python/py 启动失败。
+ */
+function minimalSpawnEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {}
+  const keys = process.platform === 'win32'
+    ? ['PATH', 'SYSTEMROOT', 'SYSTEMDRIVE', 'COMSPEC', 'PATHEXT', 'WINDIR', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE']
+    : ['PATH', 'LANG', 'LC_ALL', 'TMPDIR', 'HOME']
+  for (const key of keys) {
+    const value = process.env[key]
+    if (value !== undefined) env[key] = value
+  }
+  env.PYTHONUTF8 = '1'
+  env.PYTHONIOENCODING = 'utf-8'
+  return env
+}
+
 function abortError(): Error {
   return Object.assign(new Error('Listing Worker 请求已取消'), { name: 'AbortError', code: 'ABORT_ERR' })
+}
+
+function pythonSpawnError(error: Error): Error {
+  return Object.assign(
+    new Error(`无法启动Python Worker（尝试过 ${pythonCandidates().map(c => c.command).join(', ')}）: ${error.message}`),
+    { code: 'PYTHON_NOT_FOUND' },
+  )
 }
 
 export class PythonWorker {
   private proc: ChildProcessWithoutNullStreams | null = null
   private disposed = false
   private queue: Promise<void> = Promise.resolve()
+  private spawnAttempt: Promise<ChildProcessWithoutNullStreams> | null = null
 
   request(request: WorkerRequest, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<WorkerResponse> {
     if (signal?.aborted) return Promise.reject(abortError())
@@ -69,9 +110,35 @@ export class PythonWorker {
 
   private async ensureProcess(): Promise<ChildProcessWithoutNullStreams> {
     if (this.proc && this.proc.exitCode === null) return this.proc
+    if (!this.spawnAttempt) {
+      this.spawnAttempt = this.spawnPython().finally(() => { this.spawnAttempt = null })
+    }
+    return this.spawnAttempt
+  }
+
+  /** 依次尝试解释器候选；全部 ENOENT 才判 PYTHON_NOT_FOUND。 */
+  private async spawnPython(): Promise<ChildProcessWithoutNullStreams> {
+    let lastError: Error | null = null
+    for (const candidate of pythonCandidates()) {
+      try {
+        return await this.trySpawn(candidate.command, candidate.preArgs)
+      } catch (error) {
+        lastError = error as Error
+        // 非"命令不存在"类失败不换候选（如权限错），直接上抛。
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+    }
+    throw pythonSpawnError(lastError ?? new Error('no candidates'))
+  }
+
+  private trySpawn(command: string, preArgs: string[]): Promise<ChildProcessWithoutNullStreams> {
     return new Promise((resolve, reject) => {
-      const proc = spawn('python', [DEFAULT_WORKER_SCRIPT], { stdio: ['pipe', 'pipe', 'pipe'] })
-      const onError = (error: Error) => { this.proc = null; reject(new Error(`无法启动Python Worker: ${error.message}`)) }
+      const proc = spawn(command, [...preArgs, DEFAULT_WORKER_SCRIPT], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: minimalSpawnEnv(),
+        windowsHide: true,
+      })
+      const onError = (error: Error) => { this.proc = null; reject(error) }
       proc.once('error', onError)
       proc.once('spawn', () => { proc.off('error', onError); this.proc = proc; resolve(proc) })
     })

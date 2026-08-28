@@ -14,6 +14,7 @@ const isWindows = process.platform === 'win32'
 const pnpm = isWindows ? 'pnpm.cmd' : 'pnpm'
 const env = { ...process.env, DSH_HOME: home, CI: 'true', PNPM_CONFIG_CONFIRM_MODULES_PURGE: 'false' }
 // 官方默认监听端口（packages/boot/cmdline：`port: ctx.webStartup.port ?? 3080`）。
+// DSH_PORT 必须同时用于预清理和内层 Web CLI，避免检查与绑定端口错位。
 const port = Number(process.env.DSH_PORT ?? 3080)
 
 function fail(message) {
@@ -274,6 +275,6 @@ const profileManifest = JSON.parse(fs.readFileSync(path.join(profile, 'package.j
 ensureInstall(profile, '企业 Profile', Object.keys(profileManifest.dependencies ?? {}))
 
 console.log(`[DSH] 启动企业 WebUI：http://127.0.0.1:${port}`)
-run(upstream, ['dsh', '--profile', 'enterprise'], '正在启动 DeepSeek Harness WebUI')
+run(upstream, ['dsh', '--profile', 'enterprise', '--port', String(port)], '正在启动 DeepSeek Harness WebUI')
 
 

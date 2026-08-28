@@ -164,8 +164,8 @@ export const ENTERPRISE_SETTINGS_HTML = `
             <span id="status" class="status loading">加载中...</span>
           </div>
           <div class="setting-description">
-            启用后将阻止 SAS 数据集（.sas7bdat、.xpt）和 data/spec 目录下的敏感 Excel 文件发送给 AI 模型。
-            默认启用，确保临床试验数据安全。
+            启用后，数据集文件（.sas7bdat、.xpt、.csv）的原始行值不会进入 AI 上下文：listing 工具回执仅含元数据，通用工具（shell/文件读写）触碰数据集文件将被拒绝。
+            doc/ 目录（需求文本与辅助 Excel）不做任何拦截。关闭后零拦截。默认启用。
           </div>
         </div>
         <div class="toggle-container">
@@ -248,6 +248,7 @@ export const ENTERPRISE_SETTINGS_HTML = `
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            'X-DSH-Settings': '1',
           },
           body: JSON.stringify({ enabled: newValue }),
         })

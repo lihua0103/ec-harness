@@ -28,6 +28,5 @@
 /docs/enterprise/adr/               @architecture-review
 
 # 安全相关插件与手册
-/packages/enterprise/auth/          @security-review @platform-team
 /packages/enterprise/tool-audit/    @security-review @platform-team
 /docs/enterprise/runbooks/SECURITY_AUDIT.md  @security-review

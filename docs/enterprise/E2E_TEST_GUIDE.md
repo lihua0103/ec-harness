@@ -1,3 +1,9 @@
+<!--
+> **过时归档横幅(2026-08-28)**:本文为历史交付/状态文档,所述实现与口径
+> 已被后续演进取代——数据安全现行口径见 ADR-0007(单规则红线)与
+> ADR-0009(出域单点);工具契约见 listing 插件系统提示与仓库 README。
+> 仅作过程记录保留,请勿按本文操作。
+-->
 # 数据安全开关功能 - 端到端测试指南
 
 ## 实施状态
@@ -76,7 +82,7 @@
 1. 确保 DSH 完全启动：
    ```bash
    cd G:\home\dsh-guard
-   .\start.bat
+   .\scripts\start.bat
    ```
 
 2. 等待日志显示：
@@ -94,30 +100,20 @@
 
 ### 测试 2：测试 HTTP API
 
-运行测试脚本：
-```powershell
-.\test-data-security-api.ps1
-```
+API 端点见上文「2. HTTP API」，用 curl 依次验证（原 PowerShell 测试脚本已移除）：
+```bash
+# 1. 获取数据安全状态
+curl http://127.0.0.1:3080/api/settings/data-security
+# 预期: {"enabled":true}
 
-预期输出：
-```
-1. 获取数据安全状态...
-   状态: True
-   
-2. 设置数据安全状态为 false...
-   成功: True
-   状态: False
-   
-3. 验证状态已更新...
-   状态: False
-   验证通过!
-   
-4. 恢复数据安全状态为 true...
-   成功: True
-   状态: True
-   
-5. 访问企业设置页面...
-   页面加载成功!
+# 2. 设置为 false 并复核
+curl -X POST -H 'Content-Type: application/json' -d '{"enabled":false}' http://127.0.0.1:3080/api/settings/data-security
+curl http://127.0.0.1:3080/api/settings/data-security
+# 预期: {"success":true,"enabled":false} 与 {"enabled":false}
+
+# 3. 恢复为 true
+curl -X POST -H 'Content-Type: application/json' -d '{"enabled":true}' http://127.0.0.1:3080/api/settings/data-security
+# 预期: {"success":true,"enabled":true}
 ```
 
 ### 测试 3：验证配置持久化
@@ -234,9 +230,9 @@ docs/enterprise/
 1. **启动 DSH 并验证**
    ```powershell
    cd G:\home\dsh-guard
-   .\start.bat
+   .\scripts\start.bat
    # 等待启动完成
-   .\test-data-security-api.ps1
+   # 再按「测试 2」用 curl 验证 API
    ```
 
 2. **访问企业设置页面**
