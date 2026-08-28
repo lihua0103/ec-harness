@@ -1,3 +1,10 @@
+<!--
+> **取代横幅(2026-08-28)**:本文描述的 protectedPatterns glob、data-security/check-file 事件、
+> minimatch 依赖与 @dsh-enterprise/auth bundle 均已不存在。现行口径见 ADR-0006(开关本体)、
+> ADR-0007(单规则红线 + 通用车道护栏)与 ADR-0009(出域单点)。
+> 本文仅作历史存档,勿按此实施。另注:编号 0004 与 0004-listing-session-log.md
+> 冲突(历史产物,整档归档方案见 DEFECT_FIX_PLAN_20260828.md D-9)。
+-->
 # ADR 0004: 数据安全开关功能
 
 ## 状态

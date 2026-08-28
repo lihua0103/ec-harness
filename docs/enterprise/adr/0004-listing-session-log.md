@@ -1,3 +1,10 @@
+<!--
+> **编号冲突横幅(2026-08-28)**:本文件与 0004-data-security-toggle.md 编号
+> 冲突(历史产物)。决策内容本身未失效,但编号已让位——后续整档移入
+> docs/enterprise/adr/archived/ 并改号(见 DEFECT_FIX_PLAN_20260828.md D-9,
+> Windows 批执行)。在移档前请以文件全名引用本文。
+-->
+
 # ADR-0004：Listing Session Log 策略
 
 - 状态：已接受
