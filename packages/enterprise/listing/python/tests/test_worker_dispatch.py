@@ -155,6 +155,18 @@ def test_publish_requires_successful_run(project):
     assert result["code"] == "NO_SUCCESSFUL_RUN"
 
 
+def test_publish_rejects_invalid_scenario_before_output_path(project):
+    worker.dispatch({"operation": "listing_inspect", "project": str(project)})
+    worker.dispatch({
+        "operation": "listing_run_code", "project": str(project),
+        "code": 'out = datasets["AE"].copy()\nout.attrs["labels"]={"USUBJID":"S"}\noutputs={"AE":out}'})
+    result = worker.dispatch({
+        "operation": "listing_publish", "project": str(project), "scenario": "invalid"})
+    assert result["ok"] is False
+    assert result["code"] == "INVALID_SCENARIO"
+    assert not (project / ".clinical-listing" / "output").exists()
+
+
 def test_publish_project_mismatch(project, tmp_path_factory):
     other = tmp_path_factory.mktemp("other-project")
     worker.dispatch({"operation": "listing_inspect", "project": str(project)})

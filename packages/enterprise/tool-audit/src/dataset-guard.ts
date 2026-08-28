@@ -19,6 +19,9 @@
 /** 与 DataSecurityService 默认 / listing python DATA_EXTENSIONS 对齐。 */
 export const DEFAULT_DATASET_EXTENSIONS = ['.sas7bdat', '.xpt', '.csv']
 
+/** JSON.stringify 失败时的哨兵值：无法证明参数安全，必须按数据集引用拒绝。 */
+export const UNSCANNABLE_ARGUMENTS = '[unscannable tool arguments]'
+
 /** 官方 tools/pre-execute 的结构子集（packages/core/tools types，按名镜像）。 */
 export interface ToolExecutionLike {
   readonly name: string
@@ -59,7 +62,7 @@ export function findDatasetReference(arguments_: unknown, pattern: RegExp): stri
   try {
     text = JSON.stringify(arguments_) ?? ''
   } catch {
-    return undefined                                    // 序列化失败不拦截（fail-open 于解析、fail-closed 于开关）
+    return UNSCANNABLE_ARGUMENTS
   }
   const matched = text.match(pattern)
   return matched?.[0]
@@ -67,7 +70,10 @@ export function findDatasetReference(arguments_: unknown, pattern: RegExp): stri
 
 /** 拒绝理由：明确指出替代车道，防住但不把模型变盲。 */
 export function datasetDenyReason(reference: string): string {
-  return `数据集原始数据不允许经通用工具读取（检测到 ${reference}）。`
+  const detected = reference === UNSCANNABLE_ARGUMENTS
+    ? '参数无法安全检查'
+    : `检测到 ${reference}`
+  return `数据集原始数据不允许经通用工具读取（${detected}）。`
     + '请改用企业 listing 车道：enterprise_listing_inspect（数据集元数据）、'
     + 'enterprise_listing_run_code（沙箱内对行数据计算，doc/ 材料全量可读）。'
     + '部署方如需放开，可在设置页 /settings/enterprise 关闭数据安全开关。'

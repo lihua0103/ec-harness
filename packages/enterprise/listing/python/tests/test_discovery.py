@@ -38,6 +38,15 @@ def test_read_spec_files_text_cap_protocol_guard(tmp_path):
     assert len(by_path["small.txt"]["content"]) == 1000
 
 
+def test_read_spec_files_preserves_decoding_failure_marker(tmp_path):
+    """UTF-8 非法字节显式替换，不静默丢字。"""
+    (tmp_path / "doc").mkdir()
+    (tmp_path / "doc" / "broken.txt").write_bytes(b"ok\xff\xfe\n")
+    documents, failures = read_spec_files(tmp_path / "doc")
+    assert failures == []
+    assert documents[0]["content"] == "ok\ufffd\ufffd\n"
+
+
 def _write_als(path):
     wb = Workbook()
     ws = wb.active
@@ -90,6 +99,14 @@ def test_load_datasets_tags_dataset_source(project):
     assert list(datasets["AE"].columns) == ["USUBJID", "AETERM"]
 
 
+def test_load_datasets_falls_back_to_gbk_csv(tmp_path):
+    """Windows 中文 CSV：UTF-8 解码失败时回退 GBK，不把数据源读失败。"""
+    (tmp_path / "DM.csv").write_bytes("ID,名称\n1,受试者\n".encode("gbk"))
+    datasets, failures, _ = load_datasets(tmp_path)
+    assert failures == []
+    assert datasets["DM"].loc[0, "名称"] == "受试者"
+
+
 def test_dataset_payloads_throttling(project):
     datasets, _, sources = load_datasets(project)
     throttled = discovery.dataset_payloads(datasets, sources, with_sample=False)[0]
@@ -133,6 +150,13 @@ def test_list_files_kinds_and_ignores(project):
     assert kinds["AE.csv"] == "dataset"
     assert kinds["doc/spec.txt"] == "text"
     assert not any("_work" in path for path in kinds)
+
+
+def test_list_files_direct_call_has_project_fence(project, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    (outside / "x.csv").write_text("A\n1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="ESCAPE_PROJECT_ROOT"):
+        list_files(project, str(outside))
 
 
 def test_directory_named_like_dataset_is_skipped(tmp_path):

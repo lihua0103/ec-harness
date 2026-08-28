@@ -31,7 +31,7 @@ import pandas as pd
 
 from data_guard import audit_record, sanitize_receipt
 from discovery import load_datasets, dataset_payloads, normalize_extensions, read_spec_files
-from excel import create_multi_sheet_excel
+from excel import SUPPORTED_SCENARIOS, create_multi_sheet_excel
 from sandbox import ENVIRONMENT_HINT, run_sandbox_code
 from source_registry import SOURCE_ATTR, DataSource
 
@@ -213,6 +213,9 @@ def operation_publish(request: dict) -> dict:
     if _session_project != project:
         return {"ok": False, "code": "PROJECT_SESSION_MISMATCH", "reason": "项目与当前会话不一致"}
     scenario = request.get("scenario", "manual")
+    if not isinstance(scenario, str) or scenario not in SUPPORTED_SCENARIOS:
+        return {"ok": False, "code": "INVALID_SCENARIO",
+                "reason": f"不支持的 scenario: {scenario!r}; 支持: {', '.join(sorted(SUPPORTED_SCENARIOS))}"}
     output = project / ".clinical-listing" / "output" / scenario / f"{scenario.upper()}_LISTINGS.xlsx"
     try:
         statistics = create_multi_sheet_excel(
@@ -248,10 +251,7 @@ def dispatch(request: dict) -> dict:
     response = sanitize_receipt(response, interception, audit=projections)
     record = audit_record(operation, interception, projections)
     if record is not None and isinstance(request.get("project"), str):
-        try:
-            _write_audit(Path(request["project"]).resolve(), record)
-        except Exception:
-            pass
+        _write_audit(Path(request["project"]).resolve(), record)
     return response
 
 

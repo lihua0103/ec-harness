@@ -111,7 +111,10 @@ def _file_kind(path: Path) -> str:
 
 def list_files(project: Path, subdir: str = "") -> list[dict[str, Any]]:
     """列出项目文件（AI 可调）：路径/大小/种类。文件清单不含数据值。"""
-    root = (project / subdir) if subdir else project
+    project = Path(project).resolve()
+    root = (project / subdir).resolve()
+    if root != project and project not in root.parents:
+        raise ValueError(f"ESCAPE_PROJECT_ROOT: {subdir!r}")
     entries: list[dict[str, Any]] = []
     for path in sorted(root.rglob("*"), key=str):
         if not path.is_file():
@@ -175,7 +178,10 @@ def _failure(path: Path, root: Path, stage: str, exc: Exception) -> dict[str, st
 
 def _read_frame(path: Path) -> pd.DataFrame:
     if path.suffix.lower() == ".csv":
-        return pd.read_csv(path)
+        try:
+            return pd.read_csv(path, encoding="utf-8")
+        except UnicodeDecodeError:
+            return pd.read_csv(path, encoding="gbk")
     return pd.read_sas(path, encoding="utf-8")
 
 
@@ -350,7 +356,7 @@ def read_spec_files(
         try:
             suffix = path.suffix.lower()
             if suffix in TEXT_EXTENSIONS:
-                raw = path.read_text(encoding="utf-8", errors="ignore")
+                raw = path.read_text(encoding="utf-8", errors="replace")
                 content = raw[:MAX_TEXT_CHARS]
                 documents.append(tag_payload({
                     "path": path.relative_to(doc_dir).as_posix(),

@@ -9,6 +9,7 @@ import {
   type GuardContext,
   type PreToolDecisionLike,
   type ToolExecutionLike,
+  UNSCANNABLE_ARGUMENTS,
 } from './dataset-guard.ts'
 
 const pattern = buildDatasetPattern(DEFAULT_DATASET_EXTENSIONS)
@@ -57,6 +58,12 @@ describe('buildDatasetPattern / findDatasetReference', () => {
     expect(findDatasetReference({ command: 'cat dm.csv' }, buildDatasetPattern([]))).toBeUndefined()
   })
 
+  it('参数不可 JSON 序列化 → 返回哨兵值（无法证明安全即命中护栏）', () => {
+    const cyclic: { command: string; self?: unknown } = { command: 'cat dm.csv' }
+    cyclic.self = cyclic
+    expect(findDatasetReference(cyclic, pattern)).toBe(UNSCANNABLE_ARGUMENTS)
+  })
+
   it('自定义扩展名表生效（宿主单源配置）', () => {
     const custom = buildDatasetPattern(['.parquet'])
     expect(findDatasetReference({ command: 'cat dm.parquet' }, custom)).toBe('dm.parquet')
@@ -99,6 +106,15 @@ describe('registerDatasetGuard（pre-execute waterfall）', () => {
   it('不含数据集引用 → allow（next 放行）', async () => {
     const { listeners } = waterfallHarness()
     await expect(listeners[0](toolExec('pwsh', { command: 'ls doc/' }), next)).resolves.toEqual({ kind: 'allow' })
+  })
+
+  it('参数不可序列化 → fail-closed deny', async () => {
+    const { listeners } = waterfallHarness()
+    const cyclic: { command: string; self?: unknown } = { command: 'cat dm.csv' }
+    cyclic.self = cyclic
+    const decision = await listeners[0](toolExec('pwsh', cyclic), next)
+    expect(decision).toMatchObject({ kind: 'deny' })
+    expect((decision as { reason?: string }).reason).toContain('参数无法安全检查')
   })
 
   it('enterprise_* 自有车道豁免（listing 回执有自己的投影出口）', async () => {
