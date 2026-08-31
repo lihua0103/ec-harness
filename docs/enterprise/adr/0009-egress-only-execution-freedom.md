@@ -50,7 +50,7 @@ import 白名单、子模块封死)与该工作流存在结构性张力——任
 | # | 风险 | 处置依据 |
 |---|---|---|
 | R-1 | 无限制执行的宿主破坏面(幻觉性 rm -rf/越项目写文件/任意命令) | 非对抗威胁模型;系统提示纪律;TS 侧 900s 粗粒度兜底;ADR-0008 形态已入库(commit 61dc8a9 基线),可随时 revert |
-| R-2 | stdout 打印行值通道 | 既定接受(ADR-0007 决策 5):堵死即变蠢,属内容判定;纪律提示兜底 |
+| R-2 | stdout 打印行值通道 | **被 2026-08-29 用户裁决取代**——"stdout 原样接受"不再有效,回执出口精确值遮蔽(value_mask:命中数据集单元格值替换 [DATA],doc/ 载荷豁免,同一开关) |
 | R-3 | 网络出域(urllib 等)不再封 | 同 R-1 威胁模型;worker 环境白名单已收走凭据,外发无据可用 |
 
 ## 不采用的方案
@@ -80,3 +80,7 @@ Windows 收口补充(2026-08-28):check:all 八步全绿(oxlint 仅存量警告),
 scripts/start.bat 以 DSH_PORT=3090 实点启动,HTTP 200 且企业品牌标题生效。
 doc/ Excel 直通、通用车道 deny/关闭放行、run_code 中文错误与执行自由由
 对应 Python/TS 集成测试覆盖。
+
+FR-8 值遮蔽补充(2026-08-29):value_mask 单元测试 + worker 接线用例
+(stdout 遮蔽/开关关原样/WORKER_ERROR 旁路/audit maskedCount)全绿,
+pytest 165 通过;R3 TS 用例改为断言 [DATA] 遮蔽。

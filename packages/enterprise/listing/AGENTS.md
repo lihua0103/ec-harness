@@ -20,7 +20,7 @@
 
 - **dataset**：数据集（sas7bdat/xpt/csv，含加密归档解出）的原始行值不出域 → inspect 回执只含元数据（列名/行数/dtype/nullCount/uniqueCount），行样本默认根本不构建。
 
-其余一律不碰：**doc/ 整目录零拦截**——文本与 Excel（ALS/DVP 等）单元格值全量直通（截断上限只作协议护栏并显式标记 truncated）、run_code 的 stdout/stderr 原样、AI 产物与 publish 回执原样、错误消息原样。
+其余一律不碰：**doc/ 整目录零拦截**——文本与 Excel（ALS/DVP 等）单元格值全量直通（截断上限只作协议护栏并显式标记 truncated）、run_code 的 stdout/stderr 命中数据集单元格值以 [DATA] 遮蔽（FR-8 精确交集值遮蔽，2026-08-29 终裁；doc 载荷豁免）、AI 产物与 publish 回执原样、错误消息原样。
 
 通用工具（shell/文件读写）触碰数据集文件会被 tool-audit 护栏拒绝（同一开关；enterprise_* 车道豁免）。
 

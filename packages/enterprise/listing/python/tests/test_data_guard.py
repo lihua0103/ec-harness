@@ -129,10 +129,29 @@ def test_audit_collects_projected_dataset_only():
 
 
 def test_projection_table_is_exactly_one_rule():
+    """【2026-08-30 重构改写】投影表仍只此一条规则；profile（列级语义
+    画像：形态类/格式骨架/派生计数，零真实值）随白名单元数据放行。"""
     assert PROJECTION == {
-        "dataset": ("name", "path", "columns", "rowCount", "dtypes", "nullCount", "uniqueCount"),
+        "dataset": ("name", "path", "columns", "rowCount", "dtypes",
+                    "nullCount", "uniqueCount", "profile"),
     }
     assert data_guard.AUX_EXCEL_KEYS == ()               # 场景②退役：兼容别名恒空
+
+
+def test_projection_keeps_profile_with_metadata():
+    """profile 与列名/dtype 同级放行（零瞎供给）；sample（行值）仍被剥。"""
+    payload = {
+        "_source": "dataset", "name": "AE",
+        "columns": ["USUBJID"],
+        "profile": {"USUBJID": {"shape": "identifier-like", "pattern": "AA####-####",
+                                "sampled": 10, "sampleUniqueCount": 10}},
+        "sample": {"USUBJID": ["SUBJ-777"]},
+    }
+    out = sanitize_receipt({"inspection": {"datasets": [payload]}}, True)
+    projected = out["inspection"]["datasets"][0]
+    assert projected["profile"]["USUBJID"]["shape"] == "identifier-like"
+    assert projected["profile"]["USUBJID"]["pattern"] == "AA####-####"
+    assert "sample" not in projected
 
 
 def test_no_preview_no_pattern_scan():

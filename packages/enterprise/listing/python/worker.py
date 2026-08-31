@@ -4,14 +4,17 @@
 
     discovery（全量读 + 源头标注；doc/ 零拦截、恒全量）
       ↓
-    sandbox(标准 Python 执行环境,ADR-0009 执行面全开;stdout 原样)
+    sandbox(标准 Python 执行环境,ADR-0009 执行面全开;stdout 捕获)
       ↓
     三操作各自产回执
       ↓
-    data_guard.sanitize_receipt（唯一拦截出口：只投影 dataset 载荷；
-    宿主开关 dataInterception=false 时零处理）
+    data_guard.sanitize_receipt（投影 dataset 载荷）
       ↓
-    审计 JSONL（无数据值：时间/操作/开关态/被投影载荷的 source+path）
+    value_mask.mask_receipt_strings（FR-8 值遮蔽：回执字符串命中会话
+    数据集单元格值替换 [DATA]；doc/ 载荷子树豁免；开关关闭时跳过）
+      ↓
+    审计 JSONL（无数据值：时间/操作/开关态/被投影载荷的 source+path
+    /maskedCount 纯计数）
       ↓
     excel（固定模板 + layout 自定义排版）
 
@@ -33,7 +36,8 @@ from data_guard import audit_record, sanitize_receipt
 from discovery import load_datasets, dataset_payloads, normalize_extensions, read_spec_files
 from excel import create_multi_sheet_excel
 from sandbox import ENVIRONMENT_HINT, run_sandbox_code
-from source_registry import SOURCE_ATTR, DataSource
+from source_registry import SOURCE_ATTR, DataStr, DataSource
+from value_mask import ValueMatcher, build_value_set, compile_matcher, mask_receipt_strings
 
 #: stdout/stderr 回执截断（防协议超限，不是数据红线）。
 MAX_CAPTURE_CHARS = 16_384
@@ -42,15 +46,35 @@ MAX_CAPTURE_CHARS = 16_384
 MAX_RECEIPT_NAME_CHARS = 120
 
 
-def _display_name(value: Any) -> str:
+def _display_name(value: Any) -> DataStr:
+    """回执内名称显示（构造点车道标记：outputs 表名/列名是 AI 可控的
+    数据派生字符串——可走私单元格值，一律包 DataStr 进遮蔽通道）。"""
     text = str(value)
     if len(text) <= MAX_RECEIPT_NAME_CHARS:
-        return text
-    return text[:MAX_RECEIPT_NAME_CHARS - 1] + "…"
+        return DataStr(text)
+    return DataStr(text[:MAX_RECEIPT_NAME_CHARS - 1] + "…")
 
 _session_project: Optional[Path] = None
 _session_datasets: dict[str, pd.DataFrame] = {}
 _last_outputs: Optional[dict[str, pd.DataFrame]] = None
+#: 值遮蔽缓存：(构建时的数据集字典对象, matcher)。按对象身份失效——
+#: inspect/_ensure_session 重载会话后新字典自动触发重建，无需手动清。
+#: matcher（值集 + 前缀桶索引）与值集同槽：同一数据集身份只编译一次
+#: （100 万级值集编译秒级，每请求重编会把 run_code 拖回秒级——性能
+#: 修复 2026-08-30）。
+_value_mask_cache: Optional[tuple[dict, ValueMatcher]] = None
+
+
+def _value_mask_matcher() -> ValueMatcher:
+    """从会话数据集构建（并缓存）值遮蔽预编译匹配器。"""
+    global _value_mask_cache
+    cached = _value_mask_cache
+    if cached is not None and cached[0] is _session_datasets:
+        return cached[1]
+    values, _stats = build_value_set(_session_datasets)
+    matcher = compile_matcher(values)
+    _value_mask_cache = (_session_datasets, matcher)
+    return matcher
 
 
 def _reset_session() -> None:
@@ -86,7 +110,8 @@ def _write_audit(project: Path, record: dict) -> None:
 def operation_inspect(request: dict) -> dict:
     project = Path(request["project"]).resolve()
     if not project.is_dir():
-        return {"ok": False, "code": "PROJECT_NOT_FOUND", "reason": f"项目目录不存在: {project}"}
+        return {"ok": False, "code": "PROJECT_NOT_FOUND",
+                "reason": DataStr(f"项目目录不存在: {project}")}   # content 类：恒 DataStr
     interception = _interception_flag(request)
     extensions = _request_extensions(request)
     try:
@@ -94,7 +119,7 @@ def operation_inspect(request: dict) -> dict:
         documents, spec_failures = read_spec_files(project / "doc")
         datasets, failures, sources = load_datasets(project, request.get("credentialRef"), extensions)
     except ValueError as exc:
-        return {"ok": False, "code": "DATASET_NAME_CONFLICT", "reason": str(exc)}
+        return {"ok": False, "code": "DATASET_NAME_CONFLICT", "reason": DataStr(str(exc))}
 
     # 全量数据集留在会话，run_code 免二次读取（读失败已在回执披露）
     global _session_project, _session_datasets, _last_outputs
@@ -144,10 +169,10 @@ def _ensure_session(project: Path, credential: Optional[str], extensions: Option
     try:
         datasets, failures, _ = load_datasets(project, credential, extensions)
     except ValueError as exc:
-        return {"ok": False, "code": "DATASET_NAME_CONFLICT", "reason": str(exc)}
+        return {"ok": False, "code": "DATASET_NAME_CONFLICT", "reason": DataStr(str(exc))}
     if failures:
         return {"ok": False, "code": "DATASET_LOAD_FAILED",
-                "reason": "一个或多个数据源加载失败", "failures": failures}
+                "reason": DataStr("一个或多个数据源加载失败"), "failures": failures}
     _session_project, _session_datasets, _last_outputs = project, datasets, None
     return None
 
@@ -159,28 +184,31 @@ def operation_run_code(request: dict) -> dict:
         return error
 
     result = run_sandbox_code(request["code"], project, _session_datasets)
-    stdout, stderr = result["stdout"][:MAX_CAPTURE_CHARS], result["stderr"][:MAX_CAPTURE_CHARS]
+    # content 类构造点（车道规则）：stdout/stderr/reason/traceback/
+    # environmentHint 是 AI 可控回显面，恒包 DataStr 进遮蔽通道。
+    stdout = DataStr(result["stdout"][:MAX_CAPTURE_CHARS])
+    stderr = DataStr(result["stderr"][:MAX_CAPTURE_CHARS])
     truncated_flags = {
         "stdoutTruncated": bool(result.get("stdoutTruncated")),
         "stderrTruncated": bool(result.get("stderrTruncated")),
     }
     if not result["ok"]:
-        return {"ok": False, "code": "CODE_EXECUTION_ERROR", "reason": result["error"],
+        return {"ok": False, "code": "CODE_EXECUTION_ERROR", "reason": DataStr(result["error"]),
                 "retryable": True, "stdout": stdout, "stderr": stderr,
-                "environmentHint": ENVIRONMENT_HINT, **truncated_flags}
+                "environmentHint": DataStr(ENVIRONMENT_HINT), **truncated_flags}
 
     environment = result["environment"]
     if "outputs" not in environment:
         return {"ok": False, "code": "OUTPUTS_REQUIRED",
-                "reason": "代码必须定义 outputs: dict[str, pandas.DataFrame]",
+                "reason": DataStr("代码必须定义 outputs: dict[str, pandas.DataFrame]"),
                 "stdout": stdout, "stderr": stderr,
-                "environmentHint": ENVIRONMENT_HINT, **truncated_flags}
+                "environmentHint": DataStr(ENVIRONMENT_HINT), **truncated_flags}
     try:
         outputs = normalize_outputs(environment["outputs"])
     except ValueError as exc:
-        return {"ok": False, "code": "INVALID_OUTPUTS", "reason": str(exc),
+        return {"ok": False, "code": "INVALID_OUTPUTS", "reason": DataStr(str(exc)),
                 "retryable": True, "stdout": stdout, "stderr": stderr,
-                "environmentHint": ENVIRONMENT_HINT, **truncated_flags}
+                "environmentHint": DataStr(ENVIRONMENT_HINT), **truncated_flags}
 
     global _last_outputs
     _last_outputs = outputs
@@ -208,10 +236,12 @@ def operation_run_code(request: dict) -> dict:
 
 def operation_publish(request: dict) -> dict:
     if _last_outputs is None:
-        return {"ok": False, "code": "NO_SUCCESSFUL_RUN", "reason": "publish 前必须成功执行 run_code"}
+        return {"ok": False, "code": "NO_SUCCESSFUL_RUN",
+                "reason": DataStr("publish 前必须成功执行 run_code")}
     project = Path(request["project"]).resolve()
     if _session_project != project:
-        return {"ok": False, "code": "PROJECT_SESSION_MISMATCH", "reason": "项目与当前会话不一致"}
+        return {"ok": False, "code": "PROJECT_SESSION_MISMATCH",
+                "reason": DataStr("项目与当前会话不一致")}
     scenario = request.get("scenario", "manual")
     output = project / ".clinical-listing" / "output" / scenario / f"{scenario.upper()}_LISTINGS.xlsx"
     try:
@@ -224,8 +254,8 @@ def operation_publish(request: dict) -> dict:
             "scenario": scenario, "dataClass": "REAL",
             "format": "single-workbook-multi-sheet-xlsx", "statistics": statistics}}
     except Exception as exc:
-        return {"ok": False, "code": "PUBLISH_ERROR", "reason": f"发布失败: {exc}",
-                "traceback": traceback.format_exc()}
+        return {"ok": False, "code": "PUBLISH_ERROR", "reason": DataStr(f"发布失败: {exc}"),
+                "traceback": DataStr(traceback.format_exc())}
 
 
 # ---------------------------------------------------------------------------
@@ -241,12 +271,17 @@ def dispatch(request: dict) -> dict:
     elif operation == "listing_publish":
         response = operation_publish(request)
     else:
-        response = {"ok": False, "code": "UNKNOWN_OPERATION", "reason": f"未知操作: {operation}"}
+        response = {"ok": False, "code": "UNKNOWN_OPERATION",
+                    "reason": DataStr(f"未知操作: {operation}")}
 
     interception = _interception_flag(request)
     projections: list = []
     response = sanitize_receipt(response, interception, audit=projections)
-    record = audit_record(operation, interception, projections)
+    mask_audit: dict = {}
+    if interception:
+        response = mask_receipt_strings(response, _value_mask_matcher(), audit=mask_audit)
+    record = audit_record(operation, interception, projections,
+                          masked_count=mask_audit.get("maskedCount", 0))
     if record is not None and isinstance(request.get("project"), str):
         try:
             _write_audit(Path(request["project"]).resolve(), record)
@@ -269,11 +304,20 @@ def main() -> None:
     for line in sys.stdin:
         if not line.strip():
             continue
+        request: Optional[dict] = None
         try:
-            response = dispatch(json.loads(line))
+            request = json.loads(line)
+            if not isinstance(request, dict):
+                raise ValueError(f"请求必须是 JSON 对象: {type(request).__name__}")
+            response = dispatch(request)
         except Exception as exc:
-            response = {"ok": False, "code": "WORKER_ERROR", "reason": str(exc),
-                        "traceback": traceback.format_exc()}
+            response = {"ok": False, "code": "WORKER_ERROR", "reason": DataStr(str(exc)),
+                        "traceback": DataStr(traceback.format_exc())}
+            # FR-8 关键旁路：兜底回执（reason/traceback 可能带数据集值，
+            # 如 dataset_payloads 抛错的 traceback）同样必须遮蔽后才能出域。
+            # 请求不可解析或非对象（无旗标可读）→ fail-closed 按开处理。
+            if not isinstance(request, dict) or _interception_flag(request):
+                response = mask_receipt_strings(response, _value_mask_matcher())
         sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
         sys.stdout.flush()
 

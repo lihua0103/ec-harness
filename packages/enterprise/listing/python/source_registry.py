@@ -8,6 +8,11 @@
 
 ``tag_dataframe`` **不在 sandbox 命名空间暴露**（审计 P1-1：源头标记不
 可由模型重贴）。
+
+``DataStr``（2026-08-30 系统级重构）：回执字符串的**构造期车道标记**——
+只有回执构造点知道一个字符串的来源，值遮蔽（value_mask）的唯一判定
+依据。中央白名单体系（PROTOCOL_KEYS/SOFT_KEYS/豁免来源清单）已全部
+删除，规则收敛为：DataStr 叶子/键 → 遮蔽；plain str → 永不遮蔽。
 """
 from dataclasses import dataclass
 from enum import Enum
@@ -16,6 +21,29 @@ from typing import Any, Optional, Union
 import pandas as pd
 
 SOURCE_ATTR = "_source"
+
+
+class DataStr(str):
+    """数据集派生 / AI 回显面字符串（回执遮蔽车道标记）。
+
+    车道规则（详见 AGENTS.md「数据拦截」）：凡数据集派生或模型可控回显
+    的回执字符串，**构造点**一律包 ``DataStr``——
+
+    - discovery：columns 列表、dtypes/nullCount/uniqueCount/profile/sample
+      的列名键、失败 reason、profile 格式模式串；
+    - worker：stdout/stderr/reason/traceback/environmentHint 五个自由文本
+      字段（恒 content 类）、outputs 表名与列名；
+    - excel：publish statistics 的 sheetNames（= outputs 表名）。
+
+    其余（协议词、name/path/rowCount 等白名单元数据、doc/ 文档内容）保持
+    plain str 永不遮蔽——doc 子树豁免因此由默认规则自动成立，无需豁免
+    清单。json 序列化时就是普通 str，协议零变化。
+
+    新增回执字段的默认方向是 plain（不遮）——不安全方向，故新增任何可能
+    携带数据集值/回显文本的字段时**必须**在构造点包 DataStr。
+    """
+
+    __slots__ = ()
 
 
 class DataSource(str, Enum):

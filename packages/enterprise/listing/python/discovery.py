@@ -16,6 +16,8 @@ doc/ 的截断上限（文本字符数 / Excel 单元格数）是**协议护栏*
 import datetime
 import decimal
 import math
+import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -23,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 from archive_passwords import extract_with_password
-from source_registry import DataSource, tag_dataframe, tag_payload
+from source_registry import DataStr, DataSource, tag_dataframe, tag_payload
 
 DATA_EXTENSIONS = {".sas7bdat", ".xpt", ".csv"}
 EXCEL_EXTENSIONS = {".xlsx", ".xls", ".xlsm"}
@@ -39,6 +41,29 @@ MAX_SPEC_CELLS = 20_000
 MAX_SAMPLE_ROWS = 3
 #: excel 结构扫描读取的表头带行数（表头是结构，不是值）。
 STRUCTURE_HEADER_ROWS = 2
+
+#: 语义画像每列采样的前 N 行（确定性地取列头；推断形态/格式用，够判型）。
+PROFILE_PROBE_ROWS = 1000
+#: 模式骨架在采样中的占比阈值：达到才认定格式稳定（pattern 可判定）。
+PROFILE_PATTERN_SHARE = 0.8
+#: categorical 判定的采样唯一值上限（k 上界；类别水平名绝不出域）。
+PROFILE_MAX_CATEGORICAL = 50
+#: 模式骨架长度上限（超长骨架视为自由文本，不可判定格式）。
+PROFILE_PATTERN_MAX_LEN = 40
+#: identifier-like 的平均长度上限：标识符是短编码串；长而骨架稳定的
+#: 文本（如含递增编号的备注）是自由文本，不是标识符列。
+PROFILE_IDENTIFIER_MAX_AVG_LEN = 20
+
+#: 布尔词表（布尔判定；词表是判型词汇，不是值）。
+_BOOLEAN_TEXTS = frozenset({"0", "1", "Y", "N", "T", "F", "TRUE", "FALSE",
+                            "YES", "NO", "true", "false", "True", "False"})
+
+_SKELETON_DIGITS = re.compile(r"\d+")
+_SKELETON_ALPHA = re.compile(r"[A-Za-z]+")
+#: 日期族骨架：YYYY-MM-DD / DD/MM/YYYY / DD-MMM-YYYY（SAS 风格），可带时间后缀。
+_DATE_SKELETON_RE = re.compile(
+    r"^(?:#{4}[-/]#{2}[-/]#{2}|#{2}[-/]#{2}[-/]#{4}|#{2}A{3}#{4})"
+    r"(?:[ T]#{2}:#{2}(?::#{2})?)?$")
 
 
 def normalize_extensions(values: Optional[Iterable[str]]) -> Optional[set[str]]:
@@ -170,7 +195,9 @@ def _failure(path: Path, root: Path, stage: str, exc: Exception) -> dict[str, st
         display = path.relative_to(root).as_posix()
     except ValueError:
         display = str(path)
-    return {"path": display, "stage": stage, "reason": str(exc)}
+    # reason 是自由文本（异常消息可内嵌数据集值）→ 构造点标 DataStr；
+    # path/stage 是白名单元数据 → plain str。
+    return {"path": display, "stage": stage, "reason": DataStr(str(exc))}
 
 
 def _read_frame(path: Path) -> pd.DataFrame:
@@ -251,29 +278,108 @@ def load_datasets(
     return datasets, failures, sources
 
 
+# ---------------------------------------------------------------------------
+# 列级语义画像（profile）——"零瞎"供给：不看行值也能干活
+# ---------------------------------------------------------------------------
+
+def _skeleton(text: str) -> str:
+    """值 → 抽象模式骨架：数字串→等长 #、字母串→等长 A，其余原样。
+
+    ``"2024-01-15"→"####-##-##"``、``"A0491-1029"→"A####-####"``、
+    ``"15JAN2024"→"##AAA####"``。骨架只含位置形状，不含任何真实值；
+    超长骨架（自由文本）返回空串表示不可判定。
+    """
+    skeleton = _SKELETON_ALPHA.sub(
+        lambda match: "A" * len(match.group()),
+        _SKELETON_DIGITS.sub(lambda match: "#" * len(match.group()), text),
+    )
+    return skeleton if 0 < len(skeleton) <= PROFILE_PATTERN_MAX_LEN else ""
+
+
+def _column_profile(series) -> dict[str, Any]:
+    """单列语义画像（采样统计推断；绝不含真实值/类别水平名/min-max）。
+
+    输出字段（全部是判型词汇与派生计数，走白名单元数据通道）：
+    ``shape`` 值形态类（date-like/categorical/numeric/identifier-like/
+    free-text/boolean/empty）、``pattern`` 格式模式骨架（稳定时才有，
+    构造点包 DataStr 防自指边界）、``sampled`` 采样行数、
+    ``sampleUniqueCount`` 采样唯一值计数（k 的口径）。
+    """
+    probe = series.head(PROFILE_PROBE_ROWS).dropna()
+    sampled = int(len(probe))
+    if sampled == 0:
+        return {"shape": "empty", "sampled": 0}
+    dtype = series.dtype
+    if pd.api.types.is_bool_dtype(dtype):
+        return {"shape": "boolean", "sampled": sampled}
+    if pd.api.types.is_datetime64_any_dtype(dtype):
+        # 全零点 → 日期-only 骨架；否则带时间（判定只用采样形状）。
+        pattern = "####-##-##" if bool((probe == probe.dt.normalize()).all()) \
+            else "####-##-## ##:##:##"
+        return {"shape": "date-like", "pattern": pattern, "sampled": sampled}
+    if pd.api.types.is_numeric_dtype(dtype):
+        return {"shape": "numeric", "sampled": sampled}
+    texts = [str(value) for value in probe.tolist()]
+    unique = len(set(texts))
+    if unique <= 2 and set(texts) <= _BOOLEAN_TEXTS:
+        return {"shape": "boolean", "sampled": sampled}
+    skeletons = Counter(
+        skeleton for skeleton in (_skeleton(text) for text in texts) if skeleton
+    )
+    pattern, freq = skeletons.most_common(1)[0] if skeletons else ("", 0)
+    stable = bool(pattern) and freq / sampled >= PROFILE_PATTERN_SHARE
+    if stable and _DATE_SKELETON_RE.match(pattern):
+        return {"shape": "date-like", "pattern": pattern,
+                "sampled": sampled, "sampleUniqueCount": unique}
+    if unique <= PROFILE_MAX_CATEGORICAL and unique <= max(2, sampled // 2):
+        info: dict[str, Any] = {"shape": "categorical",
+                                "sampled": sampled, "sampleUniqueCount": unique}
+        if stable:                     # 稳定编码列（如 SEX='F'/'M'）附骨架
+            info["pattern"] = pattern
+        return info
+    if stable:
+        return {"shape": "identifier-like", "pattern": pattern,
+                "sampled": sampled, "sampleUniqueCount": unique}
+    return {"shape": "free-text", "sampled": sampled, "sampleUniqueCount": unique}
+
+
 def dataset_payloads(
     datasets: dict[str, pd.DataFrame], sources: dict[str, str], with_sample: bool = True,
 ) -> list[dict[str, Any]]:
-    """把会话数据集转成回执载荷。
+    """把会话数据集转成回执载荷（元数据 + 语义画像）。
 
     构建期节流（开关开 → ``with_sample=False``）：行样本根本不构建，
-    省内存省协议行——投影层仍是双保险。
+    省内存省协议行——投影层仍是双保险。``profile`` 是"零瞎"供给：
+    每列值形态类 + 格式模式骨架 + 派生计数，不含任何真实值。
+
+    构造点车道标记（AGENTS.md）：列名（columns 列表与各 dict 键）与
+    profile 模式骨架是数据派生字符串 → DataStr；name/path/dtype 串/
+    计数是白名单元数据 → plain str。
     """
     payloads: list[dict[str, Any]] = []
     for name, frame in datasets.items():
+        profile: dict[str, Any] = {}
+        for column in frame.columns:
+            info = _column_profile(frame[column])
+            if "pattern" in info:
+                # 模式骨架本身过遮蔽通道（DataStr）：骨架恰与某单元格值
+                # 相同的自指边界由值遮蔽兜住，不另设中央清单。
+                info["pattern"] = DataStr(info["pattern"])
+            profile[DataStr(str(column))] = info
         payload: dict[str, Any] = {
             "name": name,
             "path": sources.get(name),
-            "columns": [str(column) for column in frame.columns],
+            "columns": [DataStr(str(column)) for column in frame.columns],
             "rowCount": int(len(frame)),
-            "dtypes": {str(column): str(frame[column].dtype) for column in frame.columns},
-            "nullCount": {str(column): int(frame[column].isna().sum()) for column in frame.columns},
-            "uniqueCount": {str(column): int(frame[column].nunique()) for column in frame.columns},
+            "dtypes": {DataStr(str(column)): str(frame[column].dtype) for column in frame.columns},
+            "nullCount": {DataStr(str(column)): int(frame[column].isna().sum()) for column in frame.columns},
+            "uniqueCount": {DataStr(str(column)): int(frame[column].nunique()) for column in frame.columns},
+            "profile": profile,
         }
         if with_sample:
             sample_frame = frame.head(MAX_SAMPLE_ROWS)
             payload["sample"] = {
-                str(column): [jsonable(value) for value in sample_frame[column].tolist()]
+                DataStr(str(column)): [jsonable(value) for value in sample_frame[column].tolist()]
                 for column in frame.columns
             }
         payloads.append(tag_payload(payload, DataSource.DATASET))

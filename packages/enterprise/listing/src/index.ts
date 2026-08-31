@@ -11,7 +11,9 @@
  * 拦截只剩一种场景（ADR-0007，2026-08-28 第三版）：
  * **doc/ 零拦截**——需求文本与辅助 Excel 全量可读；数据集
  * （sas7bdat/xpt/csv）原始行值不出域（→ 元数据白名单）。
- * stdout/AI 产物/错误消息一律不碰。通用工具（shell/文件读写）触碰数据集
+ * stdout 命中数据集单元格值的内容在回执出口以 [DATA] 遮蔽（FR-8，
+ * 2026-08-29 终裁，value_mask）；AI 产物/错误消息除值命中外不碰。
+ * 通用工具（shell/文件读写）触碰数据集
  * 文件由 tool-audit 的 dataset 护栏拒绝（同一开关，防 pwsh 绕过）。
  */
 import type { Context } from '@deepseek-ai/cordis'
@@ -152,7 +154,7 @@ df.attrs["_layout"] = {
 ## 数据可见性（部署方策略，非模型可控）
 - **doc/ 需求材料**：文本与 Excel 辅助表（ALS/DVP 等）**全量可读**——单元格值直接在 inspect 回执里，无需另想办法读取
 - **数据集（sas7bdat/xpt/csv）**：回执只含元数据（列名/行数/dtype/nullCount/uniqueCount），行值不出域；行数据在 sandbox 的 datasets 变量中供你计算
-- **你自己的产物与 stdout**：原样回显
+- **你自己的产物与 stdout**：原样回显；stdout 中命中数据集单元格值的内容将以 [DATA] 遮蔽
 - **通用工具（shell/文件读写）触碰数据集文件会被部署方拒绝**：这是数据车道管控，请改用 enterprise_listing_inspect / enterprise_listing_run_code
 数据拦截开关由部署方在设置页控制，与模型无关。
 
@@ -161,7 +163,7 @@ df.attrs["_layout"] = {
 - 预置命名空间：datasets（会话数据集）、pd、np、math、rng（采样 Generator）、datetime、json、list_files(subdir)、scan_excel_structures(relpath)
 - list_files / scan_excel_structures 是限项目根的便利助手（../ 越界即错）；其他路径请用 open/os 自行处理
 - 唯一红线是数据红线而非执行红线：数据集行值不出域（回执出口投影），代码执行本身不设卡
-- stdout 原样回显：请勿 print 数据集行值（纪律）；执行失败回执附 environmentHint（环境自描述）
+- stdout 中命中数据集单元格值的内容将以 [DATA] 遮蔽（精确值遮蔽，出域单点）；执行失败回执附 environmentHint（环境自描述）
 
 ## 一次需求输出单个 Excel
 一次需求的所有 Listing 表必须放入同一个 outputs 字典，publish 只调用一次。确认 run_code 回执列出全部工作表后再 publish。`,
@@ -189,7 +191,7 @@ df.attrs["_layout"] = {
 
   registerTool(listing, {
     name: 'enterprise_listing_run_code',
-    description: '在当前 Python 会话执行 pandas 代码（标准 Python 全量可用，ADR-0009）。代码必须定义 outputs: dict[str, DataFrame]；交付经 publish。stdout 原样回显（勿打印行值）。',
+    description: '在当前 Python 会话执行 pandas 代码（标准 Python 全量可用，ADR-0009）。代码必须定义 outputs: dict[str, DataFrame]；交付经 publish。stdout 中命中数据集单元格值的内容将以 [DATA] 遮蔽。',
     parameters: { type: 'object', properties: {
       project: { type: 'string', description: 'harness 项目绝对路径' },
       code: { type: 'string', description: '多行 Python/pandas 代码，必须定义 outputs' },

@@ -103,7 +103,7 @@ describe('数据拦截（ADR-0007：单规则 + 宿主开关 + doc/ 零拦截）
     } finally { worker.dispose() }
   }, 30_000)
 
-  it('R3：run_code 的 stdout 原样回执（其他一律不碰）', async () => {
+  it('R3：run_code stdout 命中数据集单元格值以 [DATA] 遮蔽（FR-8，2026-08-29 终裁）', async () => {
     const root = await guardProject()
     const worker = new PythonWorker()
     try {
@@ -111,7 +111,10 @@ describe('数据拦截（ADR-0007：单规则 + 宿主开关 + doc/ 零拦截）
         operation: 'listing_run_code', project: root,
         code: 'print(datasets["AE"].iloc[0]["AETERM"])\nout = datasets["AE"].copy()\nout.attrs["labels"]={"USUBJID":"Subject"}\noutputs={"AE":out}',
       }, 30_000)
-      expect(result).toMatchObject({ ok: true, receipt: { stdout: 'Headache\n' } })
+      expect(result).toMatchObject({ ok: true })
+      const receipt = (result as { receipt: { stdout: string } }).receipt
+      expect(receipt.stdout).toContain('[DATA]')
+      expect(JSON.stringify(result)).not.toContain('Headache')
     } finally { worker.dispose() }
   }, 30_000)
 

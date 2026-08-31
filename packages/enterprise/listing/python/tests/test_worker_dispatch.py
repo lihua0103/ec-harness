@@ -73,8 +73,33 @@ def test_audit_writes_non_ascii_path_raw(tmp_path):
 
 
 def test_inspect_no_audit_when_switch_off(project):
-    worker.dispatch({"operation": "listing_inspect", "project": str(project), "dataInterception": False})
+    worker.dispatch({"operation": "listing_inspect", "project": str(project),
+                     "dataInterception": False})
     assert not (project / ".clinical-listing" / "audit.jsonl").exists()
+
+
+def test_worker_caches_value_mask_matcher_per_session(project):
+    """性能修复 2026-08-30：matcher 与值集同槽缓存——同一数据集身份只编译
+    一次（inspect 种会话后 run_code 复用同一 matcher 对象）；会话重载
+    （另一次 inspect 新数据集字典）后按身份失效重建。"""
+    worker.dispatch({"operation": "listing_inspect", "project": str(project)})
+    first = worker._value_mask_matcher()
+    cached = worker._value_mask_cache
+    assert cached is not None and cached[0] is worker._session_datasets
+    second = worker._value_mask_matcher()
+    assert second is first                                 # 同会话复用，零重编
+    # 回执遮蔽走缓存 matcher：run_code 正常遮蔽（端到端不变）
+    result = worker.dispatch({
+        "operation": "listing_run_code", "project": str(project),
+        "code": 'print(datasets["AE"].iloc[0]["USUBJID"])\n'
+                'outputs = {"T": pd.DataFrame({"K": [1]})}\n'})
+    assert result["ok"] is True, result
+    assert result["receipt"]["stdout"] == "[DATA]\n"
+    assert worker._value_mask_matcher() is first           # run_code 未触发重编
+    # 会话重载 → 新数据集字典 → matcher 按身份失效重建
+    worker.dispatch({"operation": "listing_inspect", "project": str(project)})
+    assert worker._value_mask_matcher() is not first
+    assert worker._value_mask_cache[0] is worker._session_datasets
 
 
 def test_inspect_seeds_session_so_run_code_skips_reload(project):
@@ -101,12 +126,88 @@ def test_run_code_collects_when_session_cold(project):
     assert result["receipt"]["publishReady"] is True
 
 
-def test_run_code_stdout_passthrough(project):
+def test_run_code_stdout_masks_dataset_values(project):
+    """FR-8（2026-08-29 终裁）：stdout 命中数据集单元格值 → [DATA]；
+    未命中内容原样回显（零误伤）。
+    """
+    result = worker.dispatch({
+        "operation": "listing_run_code", "project": str(project),
+        "code": 'print(datasets["AE"].iloc[0]["AETERM"])\n'
+                'print("PLAIN-TEXT")\n'
+                'out = datasets["AE"].copy()\nout.attrs["labels"]={"USUBJID":"S"}\noutputs={"AE":out}'})
+    assert result["receipt"]["stdout"] == "[DATA]\nPLAIN-TEXT\n"
+    payload = json.dumps(result, ensure_ascii=False)
+    assert "Headache" not in payload and "SUBJ-777" not in payload
+    assert "PLAIN-TEXT" in payload
+
+
+def test_run_code_stdout_switch_off_passthrough(project):
+    """开关关（dataInterception=false）→ 遮蔽同步关闭，stdout 原样。"""
+    result = worker.dispatch({
+        "operation": "listing_run_code", "project": str(project), "dataInterception": False,
+        "code": 'print(datasets["AE"].iloc[0]["AETERM"])\n'
+                'out = datasets["AE"].copy()\nout.attrs["labels"]={"USUBJID":"S"}\noutputs={"AE":out}'})
+    assert result["receipt"]["stdout"] == "Headache\n"
+
+
+def test_run_code_error_reason_masks_dataset_values(project):
+    """sandbox 异常消息带数据集值 → CODE_EXECUTION_ERROR 的 reason 同样遮蔽。"""
+    result = worker.dispatch({
+        "operation": "listing_run_code", "project": str(project),
+        "code": 'raise ValueError(datasets["AE"].iloc[0]["AETERM"])'})
+    assert result["ok"] is False
+    assert result["code"] == "CODE_EXECUTION_ERROR"
+    assert "[DATA]" in result["reason"]
+    assert "Headache" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_run_code_audit_records_masked_count(project):
+    worker.dispatch({"operation": "listing_inspect", "project": str(project)})
     result = worker.dispatch({
         "operation": "listing_run_code", "project": str(project),
         "code": 'print(datasets["AE"].iloc[0]["AETERM"])\n'
                 'out = datasets["AE"].copy()\nout.attrs["labels"]={"USUBJID":"S"}\noutputs={"AE":out}'})
-    assert result["receipt"]["stdout"] == "Headache\n"
+    assert result["receipt"]["stdout"] == "[DATA]\n"
+    raw = (project / ".clinical-listing" / "audit.jsonl").read_text(encoding="utf-8")
+    record = json.loads(raw.splitlines()[-1])
+    assert record["operation"] == "listing_run_code"
+    assert record["maskedCount"] >= 1                    # 纯计数，无值内容
+    assert "SUBJ" not in raw and "Headache" not in raw
+
+
+def test_worker_error_receipt_masked_before_stdout(project, monkeypatch, capsys):
+    """关键旁路：main() 兜底 WORKER_ERROR（reason/traceback）出域前同样遮蔽。"""
+    import io
+    worker.dispatch({"operation": "listing_inspect", "project": str(project)})  # 种会话值集
+
+    def boom(code, project_root, datasets):
+        raise RuntimeError("crash on Headache")
+    monkeypatch.setattr(worker, "run_sandbox_code", boom)
+    request = json.dumps({
+        "operation": "listing_run_code", "project": str(project), "code": "outputs = {}"})
+    monkeypatch.setattr("sys.stdin", io.StringIO(request + "\n"))
+    worker.main()
+    out = capsys.readouterr().out
+    assert "WORKER_ERROR" in out and "[DATA]" in out
+    assert "Headache" not in out and "SUBJ-777" not in out
+    assert out.count("\n") == 1                           # NDJSON 单行协议不破
+
+
+def test_worker_error_switch_off_passthrough(project, monkeypatch, capsys):
+    """开关关时兜底 WORKER_ERROR 同样不遮蔽（与主路径同一开关）。"""
+    import io
+    worker.dispatch({"operation": "listing_inspect", "project": str(project)})
+
+    def boom(code, project_root, datasets):
+        raise RuntimeError("crash on Headache")
+    monkeypatch.setattr(worker, "run_sandbox_code", boom)
+    request = json.dumps({
+        "operation": "listing_run_code", "project": str(project),
+        "dataInterception": False, "code": "outputs = {}"})
+    monkeypatch.setattr("sys.stdin", io.StringIO(request + "\n"))
+    worker.main()
+    out = capsys.readouterr().out
+    assert "crash on Headache" in out
 
 
 def test_run_code_requires_outputs(project):

@@ -19,8 +19,12 @@ from typing import Any, Optional
 from source_registry import SOURCE_ATTR
 
 #: 源头 → 投影白名单。改这里就是改整条数据红线（只剩一条，按需求）。
+#: ``profile``（2026-08-30 系统级重构）：列级语义画像——值形态类/格式
+#: 模式骨架/派生计数，不含真实值；是"零瞎"供给（AI 不看行值也能判格式
+#: 生成解析代码），故与列名/dtype 同级放行。
 PROJECTION: dict[str, tuple[str, ...]] = {
-    "dataset": ("name", "path", "columns", "rowCount", "dtypes", "nullCount", "uniqueCount"),
+    "dataset": ("name", "path", "columns", "rowCount", "dtypes",
+                "nullCount", "uniqueCount", "profile"),
 }
 
 #: 场景①白名单（数据集 → 元数据）。
@@ -89,13 +93,19 @@ def sanitize_receipt(
     return _walk(receipt, audit)
 
 
-def audit_record(operation: str, enabled: bool, projections: list) -> Optional[dict]:
-    """构造一行审计记录（无任何数据值）；无投影发生时返回 None。"""
-    if not projections:
+def audit_record(
+    operation: str, enabled: bool, projections: list, masked_count: int = 0,
+) -> Optional[dict]:
+    """构造一行审计记录（无任何数据值）；无投影且无遮蔽时返回 None。
+
+    ``masked_count`` 是 FR-8 值遮蔽的纯计数（[DATA] 替换次数），不含值内容。
+    """
+    if not projections and not masked_count:
         return None
     return {
         "time": datetime.now().isoformat(),
         "operation": operation,
         "dataInterception": enabled,
         "projections": projections,
+        "maskedCount": masked_count,
     }

@@ -35,6 +35,7 @@ from .templates import (
     frame_labels,
     report_metadata,
 )
+from source_registry import DataStr
 
 
 def normalize_sheet_outputs(
@@ -399,7 +400,10 @@ def create_multi_sheet_excel(
     return {
         "outputFile": str(output_file),
         "format": "single-workbook-multi-sheet-xlsx",
-        "sheetNames": [index_sheet, *prepared.keys()],
+        # 构造点车道标记：业务 sheet 名 = outputs 表名（AI 可控，可走私
+        # 数据集单元格值）→ DataStr 进遮蔽通道；index_sheet 是场景模板
+        # 词 → plain str。
+        "sheetNames": [index_sheet, *(DataStr(sheet_name) for sheet_name in prepared)],
         "listingSheetCount": len(prepared),
         "totalSheets": len(prepared) + 1,
         "totalRows": sum(len(frame) for frame in prepared.values()),
