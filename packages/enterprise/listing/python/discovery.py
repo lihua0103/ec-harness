@@ -337,7 +337,7 @@ def _column_profile(series) -> dict[str, Any]:
         if stable:                     # 稳定编码列（如 SEX='F'/'M'）附骨架
             info["pattern"] = pattern
         return info
-    if stable:
+    if stable and sum(map(len, texts)) / sampled <= PROFILE_IDENTIFIER_MAX_AVG_LEN:
         return {"shape": "identifier-like", "pattern": pattern,
                 "sampled": sampled, "sampleUniqueCount": unique}
     return {"shape": "free-text", "sampled": sampled, "sampleUniqueCount": unique}
