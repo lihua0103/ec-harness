@@ -224,11 +224,27 @@ def _archives(project: Path) -> list[Path]:
     )
 
 
-def _register_source(sources: dict[str, str], name: str, display: str) -> None:
+def _register_source(
+    sources: dict[str, str], kinds: dict[str, str],
+    name: str, display: str, kind: str,
+) -> bool:
+    """登记来源；返回是否需要继续加载该候选（False = 良性重复，静默跳过）。
+
+    真实冲突：同名 plain 源之间（两个独立目录各放一份同名数据集）——硬报错。
+    良性重复：归档解出的成员与已登记的 plain 源同名（如项目根目录的备份 zip
+    与 extracted_datasets/ 下已解压的同一批数据）——plain 源胜出，归档副本
+    静默跳过，不进 failures（不能让良性重复把成功加载误判为 DATASET_LOAD_FAILED）。
+    ``candidates`` 中 plain 恒先于 archive 入列，故跨类型重复只会是
+    「先 plain 后 archive」这一种顺序。
+    """
     previous = sources.get(name)
-    if previous is not None:
-        raise ValueError(f"DATASET_NAME_CONFLICT: {name}: {previous}; {display}")
-    sources[name] = display
+    if previous is None:
+        sources[name] = display
+        kinds[name] = kind
+        return True
+    if kinds.get(name) == "plain" and kind == "archive":
+        return False
+    raise ValueError(f"DATASET_NAME_CONFLICT: {name}: {previous}; {display}")
 
 
 def _extracted_sources(
@@ -264,12 +280,20 @@ def load_datasets(
     datasets: dict[str, pd.DataFrame] = {}
     failures: list[dict[str, str]] = []
     sources: dict[str, str] = {}
-    candidates = [(path, path.relative_to(project).as_posix()) for path in _plain_sources(project, extensions)]
-    candidates.extend(_extracted_sources(project, credential, failures, extensions))
-    for path, display in candidates:
+    kinds: dict[str, str] = {}
+    candidates = [
+        (path, path.relative_to(project).as_posix(), "plain")
+        for path in _plain_sources(project, extensions)
+    ]
+    candidates.extend(
+        (path, display, "archive")
+        for path, display in _extracted_sources(project, credential, failures, extensions)
+    )
+    for path, display, kind in candidates:
         name = path.stem.upper()
         try:
-            _register_source(sources, name, display)
+            if not _register_source(sources, kinds, name, display, kind):
+                continue
             datasets[name] = tag_dataframe(_read_frame(path), DataSource.DATASET)
         except ValueError:
             raise

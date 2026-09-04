@@ -157,6 +157,25 @@ def test_archive_non_data_members_ignored(tmp_path):
     assert failures == []
 
 
+def test_archive_duplicate_of_extracted_dataset_is_benign(tmp_path):
+    """真实项目常见布局：extracted_datasets/ 下已解压的数据集 + 根目录归档
+    备份同一批数据（如 CRA 导出的 test_20260622_151305.zip）——归档解出的
+    成员与已存在的 plain 数据源同名时是良性重复（同一批数据的两份拷贝），
+    不是冲突：plain 源胜出，归档重复静默跳过，不计入 failures。
+    """
+    import zipfile as _zip
+
+    (tmp_path / "extracted_datasets").mkdir()
+    (tmp_path / "extracted_datasets" / "ae.csv").write_text("USUBJID\nSUBJ-1\n", encoding="utf-8")
+    archive = tmp_path / "backup.zip"
+    with _zip.ZipFile(archive, "w") as zf:
+        zf.writestr("ae.csv", "USUBJID\nSUBJ-1\n")
+    datasets, failures, sources = load_datasets(tmp_path)
+    assert failures == []
+    assert sources == {"AE": "extracted_datasets/ae.csv"}
+    assert "AE" in datasets
+
+
 # ---------------------------------------------------------------------------
 # 密码推导必须保留——工程现实，密码不在 doc/ AI 无法推断
 # ---------------------------------------------------------------------------
