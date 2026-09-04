@@ -12,6 +12,7 @@ from .build_workbook import (
     calculate_changes,
     create_multi_sheet_excel,
     load_previous_version,
+    ListingPublishError,
     normalize_sheet_outputs,
 )
 from .layout import LAYOUT_ATTR, Layout, read_layout
@@ -47,6 +48,7 @@ __all__ = [
     "calculate_changes",
     "create_multi_sheet_excel",
     "load_previous_version",
+    "ListingPublishError",
     "normalize_sheet_outputs",
     "read_layout",
 ]

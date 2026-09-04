@@ -24,6 +24,7 @@
     "profile:install": "node scripts/profile.mjs install",
     "profile:run": "node scripts/profile.mjs run",
     "clean": "node scripts/clean.mjs",
+    "clean:data": "node scripts/clean-data.mjs",
     "start": "node scripts/start.mjs",
     "profile:verify": "node scripts/profile.mjs verify",
     "check:python": "python packages/enterprise/listing/python/check_deps.py"

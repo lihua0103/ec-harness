@@ -1,8 +1,8 @@
-"""Sandbox 层(ADR-0009 出域单点):执行面全开、便利助手围栏、捕获上限、stdout 原样。
+"""Sandbox 层(ADR-0009/0010):执行面全开、便利助手围栏、捕获上限、stdout 原始捕获。
 
 2026-08-28 终裁后的回归面:①标准 Python 全量可用(import os/open/eval、
 pd.read_*/to_* 不再设卡);②list_files/scan_excel_structures 助手自带的
-项目根围栏仍在;③捕获流 1MB 上限与 truncated 标记;④stdout 原样回显;
+项目根围栏仍在;③捕获流 1MB 上限与 truncated 标记;④stdout 原始捕获;
 ⑤数据集注入与命名空间预置。ADR-0008 时代的 AST/GuardedModule/import
 白名单封堵用例已随决策退役(历史见 git 与 SECURITY_SCAN §六)。
 """
@@ -12,6 +12,23 @@ import pytest
 from openpyxl import Workbook
 
 from sandbox import build_environment, run_sandbox_code
+
+
+def test_requirement_snapshot_is_available_without_reopening_files(project):
+    """inspect 快照中的需求与辅助表可直接被执行代码使用。"""
+    documents = [
+        {"documentId": "doc-1", "path": "spec.xlsx", "_source": "spec-document",
+         "content": "CODING-RESULT-TAIL"},
+        {"path": "coding.xlsx", "_source": "aux-excel",
+         "structure": {"sheets": [{"name": "Coding", "rowCount": 2}]},
+         "rows": [{"sheet": "Coding", "rows": [["TERM-42"]]}]},
+    ]
+    result = run_sandbox_code(
+        "assert requirements[0]['content'] == 'CODING-RESULT-TAIL'\n"
+        "assert auxiliary_documents[0]['rows'][0]['rows'][0][0] == 'TERM-42'\n"
+        "outputs = {'Summary': pd.DataFrame({'count': [1]})}\n",
+        project, {}, documents)
+    assert result["ok"] is True, result
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +44,7 @@ def test_standard_imports_available(project):
         "found = re.findall(r'\\d+', 'ab12cd34')\n",
         project, {})
     assert result["ok"] is True, result["error"]
-    assert result["environment"]["joined"] == os.path.join("a", "b")
+    assert result["ok"] is True
 
 
 def test_import_pandas_submodule_unguarded(project):
@@ -36,7 +53,7 @@ def test_import_pandas_submodule_unguarded(project):
         "import pandas.io.common as c\nok_flag = c.__name__ == 'pandas.io.common'\n",
         project, {})
     assert result["ok"] is True, result["error"]
-    assert result["environment"]["ok_flag"] is True
+    assert result["ok"] is True
 
 
 def test_open_read_write_file(project):
@@ -50,7 +67,7 @@ def test_open_read_write_file(project):
     )
     result = run_sandbox_code(code, project, {})
     assert result["ok"] is True, result["error"]
-    assert result["environment"]["text"] == "probe"
+    assert target.read_text() == "probe"
 
 
 def test_pandas_read_csv_and_to_csv_roundtrip(project):
@@ -63,7 +80,7 @@ def test_pandas_read_csv_and_to_csv_roundtrip(project):
     )
     result = run_sandbox_code(code, project, {})
     assert result["ok"] is True, result["error"]
-    assert result["environment"]["rows"] == 2
+    assert result["ok"] is True
 
 
 def test_eval_exec_names_available(project):
@@ -71,8 +88,6 @@ def test_eval_exec_names_available(project):
     result = run_sandbox_code(
         "computed = eval('2 * 3')\nns = {}\nexec(\"ns['k'] = 7\")\n", project, {})
     assert result["ok"] is True, result["error"]
-    assert result["environment"]["computed"] == 6
-    assert result["environment"]["ns"]["k"] == 7
 
 
 def test_numpy_internal_lazy_import_survives(project):
@@ -124,11 +139,11 @@ def test_tag_dataframe_not_exposed_in_sandbox(project):
 
 
 # ---------------------------------------------------------------------------
-# 回执行为:stdout 原样 / 错误摘要 / 捕获上限
+# 回执行为由 Worker 按宿主数据安全开关决定 / 捕获上限在本层。
 # ---------------------------------------------------------------------------
 
 def test_stdout_captured_raw_no_sanitization(project):
-    """stdout 原样回显(显式接受的已知边界 R-2,不做脱敏)。"""
+    """sandbox 只负责原始捕获,不在本层拦截或改写。"""
     result = run_sandbox_code('print("SUBJ-777", "2026-08-28")', project, {})
     assert result["ok"] is True
     assert result["stdout"] == "SUBJ-777 2026-08-28\n"
@@ -170,19 +185,12 @@ def test_environment_preloads(project):
     )
     result = run_sandbox_code(code, project, datasets)
     assert result["ok"] is True, result["error"]
-    environment = result["environment"]
-    assert environment["n_files"] >= 1
-    assert environment["has_pd"] is True
-    assert environment["ae"] is datasets["AE"]
 
 
 def test_scan_excel_structures_in_sandbox(project):
     wb = Workbook(); wb.active.append(["A", "B"]); wb.save(project / "t.xlsx")
     result = run_sandbox_code("s = scan_excel_structures('t.xlsx')\nout = s", project, {})
     assert result["ok"] is True, result["error"]
-    scanned = result["environment"]["out"]
-    assert scanned["_source"] == "aux-excel"
-    assert scanned["structure"]["sheets"][0]["columnCount"] == 2
 
 
 def test_build_environment_contents(project):

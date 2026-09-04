@@ -1,3 +1,8 @@
+<!--
+> **过时归档横幅(2026-08-28)**:本文为历史审计报告,数据安全配置、开关、
+> 扩展名与通用车道口径已被 ADR-0010(固定硬数据边界与 doc 全量分片)取代。
+> 仅作过程记录保留,请勿按本文操作。
+-->
 # 插件系统合规审计报告(2026-08-28)
 
 审计对象:`feat/clinical/harness` 分支 `@dsh-enterprise/platform` 骨架 + 4 个企业插件(ui-settings / tool-audit / branding / listing)。

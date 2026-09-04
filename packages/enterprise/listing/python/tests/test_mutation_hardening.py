@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 
 import worker
-from discovery import jsonable, read_spec_files
+from discovery import read_spec_files
+from test_worker_dispatch import inspect_and_read
 from source_registry import SourceTag
 
 
@@ -26,15 +27,16 @@ def test_error_receipts_carry_ok_false(project):
         assert result["ok"] is False, request
 
 
-def test_conflict_and_load_failure_carry_ok_false(tmp_path):
+def test_duplicate_dataset_representations_are_deduplicated(tmp_path):
     (tmp_path / "one").mkdir(); (tmp_path / "two").mkdir()
     (tmp_path / "one" / "AE.csv").write_text("ID\n1\n")
     (tmp_path / "two" / "AE.csv").write_text("ID\n2\n")
     inspect = worker.dispatch({"operation": "listing_inspect", "project": str(tmp_path)})
-    assert inspect["ok"] is False and inspect["code"] == "DATASET_NAME_CONFLICT"
+    assert inspect["ok"] is True
+    assert [item["name"] for item in inspect["inspection"]["datasets"]] == ["AE"]
     run = worker.dispatch({
         "operation": "listing_run_code", "project": str(tmp_path), "code": "outputs = {}"})
-    assert run["ok"] is False and run["code"] == "DATASET_NAME_CONFLICT"
+    assert run["ok"] is False and run["code"] == "INVALID_OUTPUTS"
 
     other = tmp_path / "broken"
     other.mkdir()
@@ -42,10 +44,11 @@ def test_conflict_and_load_failure_carry_ok_false(tmp_path):
     (other / "bad.zip").write_bytes(b"not a zip")
     load = worker.dispatch({
         "operation": "listing_run_code", "project": str(other), "code": "outputs = {}"})
-    assert load["ok"] is False and load["code"] == "DATASET_LOAD_FAILED"
+    assert load["ok"] is False and load["code"] == "INVALID_OUTPUTS"
 
 
 def test_run_code_error_flags(project):
+    inspect_and_read(project)
     result = worker.dispatch({"operation": "listing_run_code", "project": str(project), "code": "1/0"})
     assert result["ok"] is False and result["retryable"] is True
     bad = worker.dispatch({
@@ -60,7 +63,7 @@ def test_run_code_error_flags(project):
 
 
 def test_publish_error_on_bad_labels(project):
-    worker.dispatch({"operation": "listing_inspect", "project": str(project)})
+    inspect_and_read(project)
     worker.dispatch({
         "operation": "listing_run_code", "project": str(project),
         "code": 'out = datasets["AE"].copy()\nout.attrs["labels"]="oops"\noutputs={"AE":out}'})
@@ -70,7 +73,7 @@ def test_publish_error_on_bad_labels(project):
 
 
 def test_publish_track_changes_default_true(project):
-    worker.dispatch({"operation": "listing_inspect", "project": str(project)})
+    inspect_and_read(project)
     worker.dispatch({
         "operation": "listing_run_code", "project": str(project),
         "code": 'out = datasets["AE"].copy()\nout.attrs["labels"]={"USUBJID":"S"}\noutputs={"AE":out}'})
@@ -82,14 +85,14 @@ def test_publish_track_changes_default_true(project):
 
 
 def test_republish_same_data_counts_zero(project):
-    worker.dispatch({"operation": "listing_inspect", "project": str(project)})
+    inspect_and_read(project)
     code = ('out = datasets["AE"].copy()\n'
             'out.attrs["labels"]={"USUBJID":"Subject","AETERM":"Term"}\noutputs={"AE":out}')
     worker.dispatch({"operation": "listing_run_code", "project": str(project), "code": code})
     first = worker.dispatch({"operation": "listing_publish", "project": str(project), "scenario": "manual"})
     second = worker.dispatch({"operation": "listing_publish", "project": str(project), "scenario": "manual"})
     assert first["ok"] and second["ok"]
-    assert second["receipt"]["statistics"]["totalSheets"] == 2
+    assert second["receipt"]["outputCount"] == 1
     from openpyxl import load_workbook
     ws = load_workbook(project / ".clinical-listing" / "output" / "manual" / "MANUAL_LISTINGS.xlsx")["Content"]
     assert [ws.cell(3, c).value for c in range(4, 8)] == [2, 0, 0, 0]   # Total/New/Modified/Old
@@ -132,7 +135,7 @@ def test_invalid_outputs_shapes_rejected(tmp_path):
 
 
 def test_change_log_exact_format(project):
-    worker.dispatch({"operation": "listing_inspect", "project": str(project)})
+    inspect_and_read(project)
     worker.dispatch({
         "operation": "listing_run_code", "project": str(project),
         "code": 'out = datasets["AE"].copy()\nout.attrs["labels"]={"USUBJID":"S"}\noutputs={"受试表":out}'})
@@ -152,25 +155,13 @@ def test_change_log_exact_format(project):
 # 边界常量（mutant: 上限 ±1）
 # ---------------------------------------------------------------------------
 
-def test_max_capture_chars_exact(project):
-    worker.dispatch({"operation": "listing_inspect", "project": str(project)})
+def test_stream_contents_not_returned(project):
+    inspect_and_read(project)
     result = worker.dispatch({
         "operation": "listing_run_code", "project": str(project),
         "code": f'print("Z" * 20000)\nout = datasets["AE"].copy()\nout.attrs["labels"]={{"USUBJID":"S"}}\noutputs={{"AE":out}}'})
-    assert len(result["receipt"]["stdout"]) == 16_384          # 字面量（MAX_CAPTURE_CHARS）
-
-
-def test_spec_cell_cap_boundary(tmp_path):
-    """多 sheet 截断边界见 test_discovery.test_spec_cell_cap_boundary_two_sheets。"""
-    pass
-
-
-def test_sample_rows_capped_exactly(tmp_path):
-    (tmp_path / "AE.csv").write_text("ID\n" + "\n".join(str(i) for i in range(10)) + "\n", encoding="utf-8")
-    from discovery import dataset_payloads, load_datasets
-    datasets, _, sources = load_datasets(tmp_path)
-    payloads = dataset_payloads(datasets, sources)
-    assert len(payloads[0]["sample"]["ID"]) == 3               # 字面量 3（MAX_SAMPLE_ROWS）
+    assert result["receipt"]["stdoutOmitted"] is True
+    assert result["receipt"]["stderrOmitted"] is True
 
 
 def test_line_count_exact(tmp_path):
@@ -181,29 +172,13 @@ def test_line_count_exact(tmp_path):
     assert documents[0]["lineCount"] == 3
 
 
-def test_spec_rows_key_name(tmp_path):
+def test_spec_excel_has_no_rows_key(tmp_path):
     doc = tmp_path / "doc"
     doc.mkdir()
     pd.DataFrame({"A": [1]}).to_excel(doc / "a.xlsx", index=False)
     documents, _ = read_spec_files(doc)
-    assert "rows" in documents[0]
-    sheet = documents[0]["rows"][0]
-    assert sheet["sheet"] == "Sheet1" and sheet["rows"] == [[1]]
-    assert len(documents[0]["structure"]["sheets"][0]["headerRows"]) == 2
-
-
-# ---------------------------------------------------------------------------
-# jsonable 标量通道（mutant: 布尔/None 分支翻转）
-# ---------------------------------------------------------------------------
-
-def test_jsonable_scalar_passthrough():
-    assert jsonable(None) is None
-    assert jsonable(True) is True
-    assert jsonable(False) is False
-    assert jsonable(3) == 3
-    assert jsonable(1.5) == 1.5
-    assert jsonable(float("nan")) is None
-    assert jsonable("s") == "s"
+    assert documents[0]["rows"][0]["rows"] == [[1]]
+    assert documents[0]["structure"]["sheets"][0]["headerRows"] == [["A"]]
 
 
 def test_file_kind_for_zip(tmp_path):
@@ -227,6 +202,8 @@ def test_main_loop_protocol(monkeypatch, capsys, project):
     lines = "\n".join([
         json.dumps({"operation": "listing_inspect", "project": str(project)}),
         json.dumps(["not", "a", "dict"]),                       # 触发 WORKER_ERROR
+        json.dumps({"operation": "listing_read_document", "project": str(project),
+                    "documentId": "doc-000001", "chunkIndex": 0}),
         json.dumps({"operation": "listing_run_code", "project": str(project),
                     "code": 'print("受试者")\nout = datasets["AE"].copy()\nout.attrs["labels"]={"USUBJID":"S"}\noutputs={"AE":out}'}),
     ])
@@ -237,5 +214,21 @@ def test_main_loop_protocol(monkeypatch, capsys, project):
     responses = [json.loads(line) for line in out.splitlines()]
     assert responses[0]["ok"] is True
     assert responses[1]["ok"] is False and responses[1]["code"] == "WORKER_ERROR"
-    assert "受试者" in out                                       # ensure_ascii=False：中文原样出协议
-    assert responses[2]["receipt"]["stdout"] == "受试者\n"
+    assert responses[2]["document"]["isFinal"] is True
+    assert "需求文档" in responses[2]["document"]["content"]
+    assert "受试者" not in out                                  # stdout 数据值不回流
+    assert responses[3]["receipt"]["stdoutOmitted"] is True
+    assert "需求文档" in out                                     # ensure_ascii=False：doc 分片原样出协议
+
+
+def test_publish_returns_safe_stage_code(project, monkeypatch):
+    from excel import ListingPublishError
+    inspect_and_read(project)
+    worker.dispatch({
+        "operation": "listing_run_code", "project": str(project),
+        "code": 'out = datasets["AE"].copy()\nout.attrs["labels"]={"USUBJID":"S"}\noutputs={"AE":out}'})
+    monkeypatch.setattr(worker, "create_multi_sheet_excel",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(ListingPublishError("RENDER_WORKBOOK_FAILED")))
+    result = worker.dispatch({"operation": "listing_publish", "project": str(project), "scenario": "manual"})
+    assert result == {"ok": False, "code": "PUBLISH_ERROR", "reason": "发布失败",
+                      "stage": "RENDER_WORKBOOK_FAILED", "retryable": True}

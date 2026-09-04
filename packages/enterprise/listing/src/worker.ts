@@ -5,8 +5,10 @@ import { fileURLToPath } from 'node:url'
 
 export interface WorkerRequest { operation: string; project: string; [key: string]: unknown }
 export interface WorkerResponse {
-  ok: boolean; action?: string; inspection?: unknown; receipt?: unknown
-  code?: string; reason?: string; retryable?: boolean
+  ok: boolean; action?: string; inspection?: unknown; receipt?: unknown; document?: unknown; metadata?: unknown
+  code?: string; reason?: string; stage?: string; retryable?: boolean
+  diagnostics?: { errorType?: unknown; outputsDefined?: unknown; syntax?: string }
+  containsProtectedValue?: boolean
 }
 
 const DEFAULT_WORKER_SCRIPT = fileURLToPath(new URL('../python/worker.py', import.meta.url))

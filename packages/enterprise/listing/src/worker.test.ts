@@ -47,21 +47,18 @@ describe('PythonWorker Multi-Sheet runtime', () => {
         ok: true,
         receipt: {
           format: 'single-workbook-multi-sheet-xlsx',
-          statistics: {
-            sheetNames: ['Content', 'Serious AE', 'All AE'],
-            listingSheetCount: 2,
-            totalSheets: 3,
-            totalRows: 3,
-          },
+          outputCount: 2,
         },
       })
+      expect(JSON.stringify(publish)).not.toContain('Serious AE')
+      expect(JSON.stringify(publish)).not.toContain('All AE')
 
       const rbqmPublish = await worker.request({
         operation: 'listing_publish', project, scenario: 'rbqm', trackChanges: false,
       })
       expect(rbqmPublish).toMatchObject({
         ok: true,
-        receipt: { statistics: { standardStructureApplied: false, rbqmStructureFlexible: true } },
+        receipt: { outputCount: 2 },
       })
 
       const workbook = join(project, '.clinical-listing', 'output', 'medical', 'MEDICAL_LISTINGS.xlsx')
@@ -136,7 +133,10 @@ print(json.dumps({
     const worker = new PythonWorker()
 
     try {
-      expect(await worker.request({ operation: 'listing_inspect', project })).toMatchObject({ ok: true })
+      const reportInspection = await worker.request({ operation: 'listing_inspect', project })
+      expect(reportInspection).toMatchObject({ ok: true })
+      const reportDetails = reportInspection.inspection as { requirementDocuments?: Array<{ documentId: string; totalChunks: number }> }
+      for (const document of reportDetails.requirementDocuments ?? []) for (let chunkIndex = 0; chunkIndex < document.totalChunks; chunkIndex += 1) expect((await worker.request({ operation: 'listing_read_document', project, documentId: document.documentId, chunkIndex })).ok).toBe(true)
       expect(await worker.request({
         operation: 'listing_run_code',
         project,
@@ -152,18 +152,16 @@ print(json.dumps({
         ].join('\n'),
       })).toMatchObject({ ok: true, receipt: { outputCount: 1, publishReady: true } })
 
-      expect(await worker.request({
+      const reportPublish = await worker.request({
         operation: 'listing_publish', project, scenario: 'report', trackChanges: false,
-      })).toMatchObject({
+      })
+      expect(reportPublish).toMatchObject({
         ok: true,
         receipt: {
-          statistics: {
-            sheetNames: ['Cover Page', 'Missing Page'],
-            reportStructureApplied: true,
-            standardStructureApplied: false,
-          },
+          outputCount: 1,
         },
       })
+      expect(JSON.stringify(reportPublish)).not.toContain('Missing Page')
 
       const workbook = join(project, '.clinical-listing', 'output', 'report', 'REPORT_LISTINGS.xlsx')
       const script = `
@@ -223,6 +221,4 @@ print(json.dumps({
   }, 30_000)
 
   })
-
-
 

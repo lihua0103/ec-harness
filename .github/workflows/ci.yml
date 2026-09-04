@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  gate:
+    # 临床平台八道门禁必须机器执行（README §8：此前靠人工跑 check:all）。
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Full gates (lint/typecheck/test/architecture/secrets/python/upstream/profile)
+        run: pnpm run check:all

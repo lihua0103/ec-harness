@@ -3,6 +3,8 @@
 变异测试发现的缺口：精确样式/几何断言此前只存在于 vitest（worker.test.ts），
 pytest 侧未覆盖——渲染层 mutant 因此幸存。本文件补齐。
 """
+import json
+
 from openpyxl import load_workbook
 
 from excel import calculate_changes, create_multi_sheet_excel
@@ -180,6 +182,22 @@ def test_direct_excel_default_track_changes_writes_log(tmp_path):
     assert (tmp_path / "RBQM_LISTINGS_changes.json").exists()
 
 
+def test_track_changes_preserves_each_publish_run(tmp_path):
+    output = tmp_path / "RBQM_LISTINGS.xlsx"
+    frame = pd.DataFrame({"USUBJID": ["01"]})
+
+    create_multi_sheet_excel({"AE": frame}, output, "rbqm")
+    create_multi_sheet_excel({"AE": frame}, output, "rbqm")
+
+    history = output.with_name("RBQM_LISTINGS_run_history.jsonl")
+    records = [json.loads(line) for line in history.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 2
+    assert records[0]["runId"] != records[1]["runId"]
+    assert records[0]["baselineAvailable"] is False
+    assert records[1]["baselineAvailable"] is True
+    assert records[1]["changes"]["AE"] == {"new": 0, "modified": 0, "old": 0}
+
+
 def test_report_row_height_from_template(tmp_path):
     output = tmp_path / "REPORT_LISTINGS.xlsx"
     create_multi_sheet_excel(
@@ -188,3 +206,17 @@ def test_report_row_height_from_template(tmp_path):
     wb = load_workbook(output)
     assert wb["Matrix by Site"].row_dimensions[1].height == 63.0
     assert wb["Dynamic Sheet"].row_dimensions[1].height == 31.5
+
+
+def test_publish_appends_history_for_every_successful_run(tmp_path):
+    from excel import create_multi_sheet_excel
+    frame = pd.DataFrame({"A": [1]})
+    frame.attrs["labels"] = {"A": "A"}
+    output = tmp_path / "MANUAL_LISTINGS.xlsx"
+    create_multi_sheet_excel({"AE": frame}, output, "manual")
+    create_multi_sheet_excel({"AE": frame}, output, "manual")
+    history = output.parent / "MANUAL_LISTINGS_run_history.jsonl"
+    entries = [json.loads(line) for line in history.read_text(encoding="utf-8").splitlines()]
+    assert len(entries) == 2
+    assert all(entry["scenario"] == "manual" for entry in entries)
+    assert all("runId" in entry and "timestamp" in entry for entry in entries)

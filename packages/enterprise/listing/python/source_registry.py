@@ -1,10 +1,9 @@
-"""数据源头标注——数据拦截的判定锚点（2026-08-28 第三版口径，ADR-0007）。
+"""数据源头标注——数据拦截的判定锚点。
 
 拦截只依据"数据从哪里来"（见 data_guard.PROJECTION），绝不依据字段名：
-字段黑名单易被改名绕过，源头无法绕过。**唯一被投影的载荷**是
-``dataset``（数据集原始行值）；``aux-excel``（doc/ 辅助 Excel）自
-2026-08-28 起退役出投影表——doc/ 零拦截，标记仅作审计溯源；
-``spec-document`` / ``model-output`` 同样直通。
+字段黑名单易被改名绕过，源头无法绕过。被投影的载荷是 ``dataset``
+（数据集原始行值）与 ``aux-excel``（doc 外辅助 Excel 单元格值）；
+``spec-document``（doc/ 需求材料）/ ``model-output`` 不在投影表里。
 
 ``tag_dataframe`` **不在 sandbox 命名空间暴露**（审计 P1-1：源头标记不
 可由模型重贴）。
@@ -19,11 +18,11 @@ SOURCE_ATTR = "_source"
 
 
 class DataSource(str, Enum):
-    """数据源头。只有 dataset 在 data_guard.PROJECTION 投影表里。"""
+    """数据源头。dataset 与 aux-excel 在 data_guard.PROJECTION 投影表里。"""
 
     DATASET = "dataset"              # 唯一投影场景：sas7bdat/xpt/csv（含归档解出）的原始数据
-    AUX_EXCEL = "aux-excel"          # doc/ 下的 xlsx/xls/xlsm（审计标记；不在投影表 = 直通）
-    SPEC_DOCUMENT = "spec-document"  # doc/ 文本（审计标记；不在投影表 = 全量放行）
+    AUX_EXCEL = "aux-excel"          # doc 外 xlsx/xls/xlsm（结构与语义投影）
+    SPEC_DOCUMENT = "spec-document"  # doc/ 需求材料（不在投影表 = 全量放行）
     MODEL_OUTPUT = "model-output"    # AI 产物（含 sandbox 内衍生）→ passthrough
 
 

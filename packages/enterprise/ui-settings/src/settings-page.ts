@@ -164,12 +164,11 @@ export const ENTERPRISE_SETTINGS_HTML = `
             <span id="status" class="status loading">加载中...</span>
           </div>
           <div class="setting-description">
-            启用后，数据集文件（.sas7bdat、.xpt、.csv）的原始行值不会进入 AI 上下文：listing 工具回执仅含元数据，通用工具（shell/文件读写）触碰数据集文件将被拒绝。
-            doc/ 目录（需求文本与辅助 Excel）不做任何拦截。关闭后零拦截。默认启用。
+            默认启用。启用时 SAS/XPT/CSV 数据集行值与 doc/ 外 spec 需求辅助 Excel 单元格值不会进入 AI 上下文；doc/ 全目录需求文件完整分片可读。关闭后不做任何拦截。
           </div>
         </div>
         <div class="toggle-container">
-          <div id="toggle" class="toggle disabled">
+          <div id="toggle" class="toggle disabled" aria-disabled="true">
             <div class="toggle-knob"></div>
           </div>
         </div>
@@ -184,29 +183,39 @@ export const ENTERPRISE_SETTINGS_HTML = `
   <script>
     const toggle = document.getElementById('toggle')
     const status = document.getElementById('status')
-    
     let currentEnabled = true
     let loading = false
-    
-    // 加载初始状态
+
+    function updateUI() {
+      toggle.classList.toggle('checked', currentEnabled)
+    }
+
+    function setBusy(busy) {
+      loading = busy
+      toggle.classList.toggle('disabled', busy)
+      toggle.setAttribute('aria-disabled', busy ? 'true' : 'false')
+    }
+
     async function loadStatus() {
       try {
         status.textContent = '加载中...'
         status.className = 'status loading'
-        loading = true
-        
+        setBusy(true)
+
         const response = await fetch('/api/settings/data-security')
         if (!response.ok) {
           throw new Error('HTTP ' + response.status)
         }
-        
+
         const data = await response.json()
-        currentEnabled = data.enabled ?? true
+        if (data.policy !== 'two-value-interception' || typeof data.enabled !== 'boolean') {
+          throw new Error('unexpected data security policy')
+        }
+        currentEnabled = data.enabled
         updateUI()
-        
         status.textContent = '已加载'
         status.className = 'status success'
-        
+
         setTimeout(() => {
           status.style.display = 'none'
         }, 2000)
@@ -214,75 +223,47 @@ export const ENTERPRISE_SETTINGS_HTML = `
         console.error('Failed to load status:', err)
         status.textContent = '加载失败'
         status.className = 'status error'
-        currentEnabled = true // 默认启用
+        currentEnabled = true
         updateUI()
       } finally {
-        loading = false
-        toggle.classList.remove('disabled')
+        setBusy(false)
       }
     }
-    
-    // 更新 UI
-    function updateUI() {
-      if (currentEnabled) {
-        toggle.classList.add('checked')
-      } else {
-        toggle.classList.remove('checked')
-      }
-    }
-    
-    // 切换状态
-    async function handleToggle() {
+
+    async function toggleEnabled() {
       if (loading) return
-      
-      const newValue = !currentEnabled
-      
+      const target = !currentEnabled
       try {
-        loading = true
-        toggle.classList.add('disabled')
-        status.style.display = 'inline-block'
-        status.textContent = '保存中...'
+        setBusy(true)
+        status.style.display = ''
+        status.textContent = '更新中...'
         status.className = 'status loading'
-        
         const response = await fetch('/api/settings/data-security', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-DSH-Settings': '1',
-          },
-          body: JSON.stringify({ enabled: newValue }),
+          headers: { 'Content-Type': 'application/json', 'X-DSH-Settings': '1' },
+          body: JSON.stringify({ enabled: target }),
         })
-        
-        if (!response.ok) {
-          throw new Error('HTTP ' + response.status)
-        }
-        
+        if (!response.ok) throw new Error('HTTP ' + response.status)
         const data = await response.json()
-        currentEnabled = data.enabled ?? newValue
+        if (typeof data.enabled !== 'boolean') throw new Error('unexpected response')
+        currentEnabled = data.enabled
         updateUI()
-        
-        status.textContent = '已保存'
+        status.textContent = '已更新'
         status.className = 'status success'
-        
-        setTimeout(() => {
-          status.style.display = 'none'
-        }, 2000)
+        setTimeout(() => { status.style.display = 'none' }, 2000)
       } catch (err) {
-        console.error('Failed to update:', err)
-        status.textContent = '保存失败'
+        console.error('Failed to update status:', err)
+        status.style.display = ''
+        status.textContent = '更新失败'
         status.className = 'status error'
-        
-        // 恢复原状态
-        await loadStatus()
+        updateUI()
       } finally {
-        loading = false
-        toggle.classList.remove('disabled')
+        setBusy(false)
       }
     }
-    
-    // 绑定事件
-    toggle.addEventListener('click', handleToggle)
-    
+
+    toggle.addEventListener('click', toggleEnabled)
+
     // 初始加载
     loadStatus()
   </script>

@@ -1,24 +1,20 @@
 import { describe, expect, it, vi } from 'vitest'
 import { apply, name } from './index.ts'
-
-interface Listener {
-  (exec: { name: string; arguments: unknown }, next: () => Promise<unknown>): Promise<unknown>
-}
+import type { ToolGuard } from './dataset-guard.ts'
 
 describe('enterprise-tool-audit plugin entry', () => {
-  it('导出插件名并经 ctx.effect 注册 pre-execute 护栏（可卸载）', () => {
-    const listeners: Listener[] = []
-    const dispose = vi.fn()
+  it('导出插件名并经 ctx.effect 注册 monotonic guard', () => {
+    const guards: ToolGuard[] = []
     const effect = vi.fn((register: () => () => void) => register())
     const ctx = {
       effect,
-      on: (_event: 'tools/pre-execute', listener: Listener) => { listeners.push(listener); return dispose },
+      tools: { guard(guard: ToolGuard) { guards.push(guard); return () => undefined } },
       logger: { info: vi.fn() },
     }
     apply(ctx as never)
     expect(name).toBe('enterprise-tool-audit')
     expect(effect).toHaveBeenCalledOnce()
-    expect(listeners).toHaveLength(1)
-    expect(dispose).not.toHaveBeenCalled()
+    expect(guards).toHaveLength(1)
+    expect(guards[0]({ name: 'read', arguments: { path: 'doc/spec.txt' } })).toBeUndefined()
   })
 })

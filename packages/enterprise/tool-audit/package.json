@@ -26,10 +26,7 @@
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run --exclude \"**/lib/**\""
   },
-  "dependencies": {
-    "@dsh-enterprise/ui-settings": "workspace:*",
-    "minimatch": "^10.2.6"
-  },
+  "dependencies": {},
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
   },

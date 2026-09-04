@@ -10,114 +10,114 @@ declare module '@deepseek-ai/cordis' {
   interface Events { 'data-security/changed': (enabled: boolean) => void }
 }
 
+/** 宿主可切换的拦截开关；拦截对象固定，不随配置增减。 */
 export interface DataSecurityConfig {
   enabled: boolean
-  /** 数据集文件扩展名（唯一拦截场景：原始行值不出域；listing 车道与 tool-audit 护栏共用单源）。 */
-  datasetExtensions: string[]
+  policy: 'two-value-interception'
 }
 
-/** 纯函数：校验并规范化磁盘配置（未知/非法键一律丢弃，回落默认）。 */
+export const DEFAULT_DATA_SECURITY_CONFIG: DataSecurityConfig = Object.freeze({
+  enabled: true,
+  policy: 'two-value-interception',
+})
+
+/** 配置只接受 enabled；历史扩展名键忽略，非法或损坏配置回落默认开启。 */
 export function sanitizeConfig(loaded: unknown): DataSecurityConfig {
-  const source = (loaded ?? {}) as Partial<Record<string, unknown>>
-  if (typeof source.enabled !== 'boolean') throw new Error('enabled 配置必须是 boolean')
-  let datasetExtensions: string[] | undefined
-  if (source.datasetExtensions !== undefined) {
-    if (!Array.isArray(source.datasetExtensions) || !source.datasetExtensions.every(item => typeof item === 'string')) {
-      throw new Error('datasetExtensions 配置必须是 string[]')
-    }
-    datasetExtensions = source.datasetExtensions.map(item => item.trim().toLowerCase()).filter(Boolean)
-  }
-  return {
-    enabled: source.enabled,
-    datasetExtensions: datasetExtensions?.length ? datasetExtensions : DEFAULT_DATASET_EXTENSIONS,
-  }
+  const enabled = (loaded as { enabled?: unknown } | null | undefined)?.enabled
+  if (typeof enabled !== 'boolean') throw new Error('enabled 配置必须是 boolean')
+  return { enabled, policy: 'two-value-interception' }
 }
-
-export const DEFAULT_DATASET_EXTENSIONS = ['.sas7bdat', '.xpt', '.csv']
-const MAX_BODY_BYTES = 4096
 
 function json(res: ServerResponse, status: number, value: unknown, headers: Record<string, string> = {}): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...headers })
   res.end(JSON.stringify(value))
 }
 
-function sameOrigin(req: IncomingMessage): boolean {
-  const origin = req.headers.origin
-  if (!origin) return true
-  const host = req.headers.host
-  if (!host) return false
-  try { return new URL(origin).host === host }
-  catch { return false }
-}
+/** 写操作必须携带的防 CSRF 头（V-6 口径恢复：纯浏览器表单/跨站请求带不了它）。 */
+const SETTINGS_MUTATION_HEADER = 'x-dsh-settings'
 
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = []
-  let size = 0
-  for await (const chunk of req) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-    size += buffer.length
-    if (size > MAX_BODY_BYTES) throw Object.assign(new Error('请求体过大'), { status: 413 })
-    chunks.push(buffer)
-  }
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) }
-  catch { throw Object.assign(new Error('请求体必须是合法 JSON'), { status: 400 }) }
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let body = ''
+    req.on('data', (chunk: Buffer) => {
+      body += chunk.toString('utf8')
+      if (body.length > 4096) reject(new Error('body too large'))
+    })
+    req.on('end', () => resolve(body))
+    req.on('error', reject)
+  })
 }
-
-/**
- * 宿主侧数据安全开关（ADR-0007 口径的唯一开关本体）。
- *
- * - 消费方：@dsh-enterprise/listing（三工具回执投影 + worker 扩展名单
- *   下发）与 @dsh-enterprise/tool-audit（通用车道 pre-execute 护栏）。
- * - 默认开 + fail-closed：配置读不到 / 出错一律按"开"处理。
- * - 拦截只剩一个场景：数据集（datasetExtensions）原始行值不出域；
- *   doc/ 零拦截（ADR-0007，2026-08-28 起 auxExcelExtensions 已废除）。
- * - toggle 事件写 JSONL 审计（无数据值，只有时间与开关态）；
- *   写失败记日志（不静默吞）。
- * - webServer 路由 disposer 被收集，stop() 时拆除（可卸载，修审计 B-4）。
- */
+/** 宿主侧数据安全开关：默认开启；关闭后消费方零拦截。 */
 export class DataSecurityService extends Service {
   static inject = ['webServer']
-  private config: DataSecurityConfig = {
-    enabled: true,
-    datasetExtensions: [...DEFAULT_DATASET_EXTENSIONS],
-  }
+  private config: DataSecurityConfig = { ...DEFAULT_DATA_SECURITY_CONFIG }
   private configPath: string
   private auditPath: string
   private disposers: Array<() => void> = []
 
   constructor(ctx: Context) {
     super(ctx, 'dataSecurityService')
-    this.configPath = join(process.env.DSH_HOME || process.cwd(), 'profiles', 'enterprise', '.data-security.json')
-    this.auditPath = join(process.env.DSH_HOME || process.cwd(), 'profiles', 'enterprise', '.data-audit.jsonl')
+    const root = join(process.env.DSH_HOME || process.cwd(), 'profiles', 'enterprise')
+    this.configPath = join(root, '.data-security.json')
+    this.auditPath = join(root, '.data-audit.jsonl')
   }
 
   async start(): Promise<void> {
     await this.loadConfig()
+    // 开关加载即审计（2026-09-03：模型代码可篡改明文配置文件，持久化关闭
+    // 必须在下一次启动时留下可追溯记录；手工改动同样入审计）。
+    this.writeAuditEvent('load', this.config.enabled).catch((error: unknown) => {
+      this.ctx.logger?.warn('[data-security] 加载审计写入失败', error)
+    })
     const webServer = this.ctx.get('webServer')
-    if (!webServer) { this.ctx.logger?.warn('webServer not available, data security API will not be registered'); return }
-    // disposer 一律收集（修审计 B-4：注册必须可卸载）
-    this.disposers.push(webServer.register({ kind: 'exact', path: '/api/settings/data-security', handler: async (req: IncomingMessage, res: ServerResponse) => {
-      if (req.method === 'GET') return json(res, 200, this.snapshot())
-      if (req.method !== 'POST') return json(res, 405, { error: 'Method Not Allowed' }, { Allow: 'GET, POST' })
-      if (!sameOrigin(req)) return json(res, 403, { error: '跨源请求被拒绝' })
-      // V-6：自定义头 CSRF 防线——设置页 fetch 恒携带；浏览器表单/跨源页无法伪造。
-      // 本地进程读取配置文件本就等价可达，此处只收口浏览器侧 CSRF 面。
-      if (req.headers['x-dsh-settings'] !== '1') return json(res, 403, { error: '缺少 X-DSH-Settings 请求头' })
-      try {
-        const body = await readJsonBody(req) as { enabled?: unknown }
-        if (typeof body?.enabled !== 'boolean') return json(res, 400, { error: 'enabled 必须是 boolean' })
-        await this.setEnabled(body.enabled)
-        return json(res, 200, { success: true, enabled: this.config.enabled })
-      } catch (error) {
-        const status = typeof (error as { status?: unknown }).status === 'number' ? (error as { status: number }).status : 500
-        this.ctx.logger?.warn('Data security settings update failed', error)
-        return json(res, status, { error: status === 500 ? '设置保存失败' : (error as Error).message })
-      }
-    } }))
-    this.disposers.push(webServer.register({ kind: 'exact', path: '/settings/enterprise', handler: async (_req: IncomingMessage, res: ServerResponse) => {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(ENTERPRISE_SETTINGS_HTML)
-    } }))
-    this.ctx.logger?.info('Data security service started (enabled by default)')
+    if (!webServer) {
+      this.ctx.logger?.warn('webServer not available, data security API will not be registered')
+      return
+    }
+    this.disposers.push(webServer.register({
+      kind: 'exact',
+      path: '/api/settings/data-security',
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (req.method === 'GET') return json(res, 200, this.snapshot())
+        if (req.method === 'POST') {
+          if (req.headers[SETTINGS_MUTATION_HEADER] !== '1') {
+            return json(res, 403, { error: 'Forbidden' })
+          }
+          // 纵深防御：带 Origin 的请求必须同源（V-6 口径恢复；无 Origin
+          // 的同机非浏览器调用不受影响）。
+          const origin = req.headers.origin
+          if (origin) {
+            try {
+              if (new URL(origin).host !== req.headers.host) {
+                return json(res, 403, { error: 'Forbidden' })
+              }
+            } catch {
+              return json(res, 403, { error: 'Forbidden' })
+            }
+          }
+          try {
+            const body = JSON.parse(await readBody(req) || '{}') as { enabled?: unknown }
+            if (typeof body.enabled !== 'boolean') {
+              return json(res, 400, { error: 'enabled 必须是 boolean' })
+            }
+            await this.setEnabled(body.enabled)
+            return json(res, 200, this.snapshot())
+          } catch (error) {
+            return json(res, 400, { error: `请求无效: ${(error as Error).message}` })
+          }
+        }
+        return json(res, 405, { error: 'Method Not Allowed' }, { Allow: 'GET, POST' })
+      },
+    }))
+    this.disposers.push(webServer.register({
+      kind: 'exact',
+      path: '/settings/enterprise',
+      handler: async (_req: IncomingMessage, res: ServerResponse) => {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        res.end(ENTERPRISE_SETTINGS_HTML)
+      },
+    }))
+    this.ctx.logger?.info(`Data security service started (${this.config.enabled ? 'enabled' : 'disabled'})`)
   }
 
   async stop(): Promise<void> {
@@ -127,43 +127,46 @@ export class DataSecurityService extends Service {
   }
 
   isEnabled(): boolean { return this.config.enabled }
-  getDatasetExtensions(): string[] { return [...this.config.datasetExtensions] }
-  snapshot(): DataSecurityConfig { return { enabled: this.config.enabled, datasetExtensions: this.getDatasetExtensions() } }
+  snapshot(): DataSecurityConfig { return { ...this.config } }
 
   async setEnabled(enabled: boolean): Promise<void> {
     if (typeof enabled !== 'boolean') throw new TypeError('enabled 必须是 boolean')
-    const previous = this.config.enabled
-    if (previous === enabled) return
-    this.config.enabled = enabled
+    const previous = this.config
+    if (previous.enabled === enabled) return
+    this.config = { enabled, policy: previous.policy }
     try { await this.saveConfig() }
-    catch (error) { this.config.enabled = previous; throw error }
-    // 审计写失败必须留痕（修审计 B-5：不静默吞），但不阻断开关本身。
-    this.writeAudit(enabled).catch((error: unknown) => {
+    catch (error) {
+      this.config = previous
+      throw error
+    }
+    this.writeAuditEvent('toggle', enabled).catch((error: unknown) => {
       this.ctx.logger?.warn('[data-security] 审计写入失败', error)
     })
     this.ctx.emit('data-security/changed', enabled)
     this.ctx.logger?.info(`Data security ${enabled ? 'enabled' : 'disabled'}`)
   }
 
-  private async writeAudit(enabled: boolean): Promise<void> {
+  private async writeAuditEvent(event: 'toggle' | 'load', enabled: boolean): Promise<void> {
     await mkdir(dirname(this.auditPath), { recursive: true })
-    await appendFile(this.auditPath, JSON.stringify({
-      time: new Date().toISOString(), event: 'toggle', enabled,
-    }) + '\n', 'utf8')
+    await appendFile(this.auditPath, `${JSON.stringify({
+      time: new Date().toISOString(), event, enabled,
+    })}\n`, 'utf8')
   }
 
   private async loadConfig(): Promise<void> {
     try {
-      const raw = JSON.parse(await readFile(this.configPath, 'utf-8'))
-      this.config = sanitizeConfig(raw)                    // 旧 auxExcelExtensions 等未知键自动丢弃
+      this.config = sanitizeConfig(JSON.parse(await readFile(this.configPath, 'utf8')))
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.ctx.logger?.warn('Failed to load data security config', error)
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.ctx.logger?.warn('Failed to load data security config', error)
+      }
+      this.config = { ...DEFAULT_DATA_SECURITY_CONFIG }
       await this.saveConfig()
     }
   }
 
   private async saveConfig(): Promise<void> {
     await mkdir(dirname(this.configPath), { recursive: true })
-    await writeFile(this.configPath, JSON.stringify(this.config, null, 2), 'utf8')
+    await writeFile(this.configPath, JSON.stringify({ enabled: this.config.enabled }, null, 2), 'utf8')
   }
 }

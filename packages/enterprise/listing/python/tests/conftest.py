@@ -13,10 +13,18 @@ if str(PYTHON_DIR) not in sys.path:
 def isolated_worker_session():
     """每个测试独占会话状态，避免跨测试串扰。"""
     import worker
-    saved = (worker._session_project, worker._session_datasets, worker._last_outputs)
-    worker._session_project, worker._session_datasets, worker._last_outputs = None, {}, None
+    saved = (worker._session_project, worker._session_datasets, worker._session_sources,
+             worker._session_documents, worker._session_auxiliary_documents,
+             worker._session_document_chunks_read, worker._last_outputs,
+             worker._session_failures, worker._session_protected_hashes,
+             worker._session_doc_baseline, worker._session_doc_baseline_project)
+    worker._reset_session()
     yield
-    worker._session_project, worker._session_datasets, worker._last_outputs = saved
+    (worker._session_project, worker._session_datasets, worker._session_sources,
+     worker._session_documents, worker._session_auxiliary_documents,
+     worker._session_document_chunks_read, worker._last_outputs,
+     worker._session_failures, worker._session_protected_hashes,
+     worker._session_doc_baseline, worker._session_doc_baseline_project) = saved
 
 
 @pytest.fixture()

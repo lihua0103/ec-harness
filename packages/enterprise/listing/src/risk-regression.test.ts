@@ -14,13 +14,14 @@ function runPython(code: string, ...args: string[]) {
 }
 
 describe('Listing 风险回归', () => {
-  it('捕获模型 stdout，NDJSON 协议仍保持单行 JSON', async () => {
+  it('捕获模型 stdout 但协议回执省略内容', async () => {
     const root = await project(); await writeFile(join(root, 'AE.csv'), 'ID\n1\n')
     const worker = new PythonWorker()
     try {
       const result = await worker.request({ operation: 'listing_run_code', project: root,
         code: 'print("MODEL_STDOUT")\noutputs = {"AE": datasets["AE"]}' }, 30_000)
-      expect(result).toMatchObject({ ok: true, receipt: { stdout: 'MODEL_STDOUT\n' } }, 30_000)
+      expect(JSON.stringify(result)).not.toContain('MODEL_STDOUT')
+      expect(result).toMatchObject({ ok: true, receipt: { stdoutOmitted: true, stderrOmitted: true } }, 30_000)
     } finally { worker.dispose() }
   }, 30_000)
 
@@ -55,13 +56,13 @@ describe('Listing 风险回归', () => {
     } finally { worker.dispose() }
   }, 30_000)
 
-  it('同名数据集 fail-closed，不静默覆盖', async () => {
+  it('同名数据集按稳定来源选择，每次 inspect 重新加载', async () => {
     const root = await project(); await mkdir(join(root, 'one')); await mkdir(join(root, 'two'))
     await writeFile(join(root, 'one', 'AE.csv'), 'ID\n1\n'); await writeFile(join(root, 'two', 'AE.csv'), 'ID\n2\n')
     const worker = new PythonWorker()
     try {
       expect(await worker.request({ operation: 'listing_inspect', project: root }, 30_000)).toMatchObject({
-        ok: false, code: 'DATASET_NAME_CONFLICT',
+        ok: true, inspection: { datasets: [{ name: 'AE', path: 'one/AE.csv' }] },
       }, 30_000)
     } finally { worker.dispose() }
   }, 30_000)

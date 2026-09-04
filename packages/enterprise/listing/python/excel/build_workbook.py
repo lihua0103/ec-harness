@@ -10,6 +10,7 @@
 import json
 import os
 import tempfile
+import uuid
 from collections import Counter
 from copy import copy
 from datetime import datetime
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
+import numpy as np
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment
 from openpyxl.utils import get_column_letter
@@ -35,6 +37,18 @@ from .templates import (
     frame_labels,
     report_metadata,
 )
+
+#: Excel 工作表硬边界；超界数据在写入单元格时本就会抛错，这里把
+#: auto_filter.ref 一并钳制，避免产出 Excel 需要修复的越界引用。
+EXCEL_MAX_ROW = 1_048_576
+EXCEL_MAX_COLUMN = 16_384
+
+
+def _autofilter_ref(first_column: int, first_row: int, last_column: int, last_row: int) -> str:
+    return (
+        f"{get_column_letter(first_column)}{min(first_row, EXCEL_MAX_ROW)}:"
+        f"{get_column_letter(min(last_column, EXCEL_MAX_COLUMN))}{min(last_row, EXCEL_MAX_ROW)}"
+    )
 
 
 def normalize_sheet_outputs(
@@ -58,8 +72,7 @@ def normalize_sheet_outputs(
         if key in used:
             raise ValueError(f"工作表名称冲突或使用保留名称: {raw_name!r} -> {safe_name!r}")
         used.add(key)
-        normalized[safe_name] = frame.copy()
-        normalized[safe_name].attrs = dict(frame.attrs)
+        normalized[safe_name] = _normalized_frame(frame)
     return normalized
 
 
@@ -67,10 +80,43 @@ def normalize_sheet_outputs(
 # 版本间变化计数（机械职责）
 # ---------------------------------------------------------------------------
 
+def _excel_scalar(value: Any) -> Any:
+    """将 pandas/numpy/复杂 Python 值归一化为 openpyxl 可写入的标量。"""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple, dict, set)):
+        return json.dumps(value, ensure_ascii=False, default=str, sort_keys=True)
+    try:
+        missing = pd.isna(value)
+        if isinstance(missing, (bool, np.bool_)) and bool(missing):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.to_pydatetime() if isinstance(value, pd.Timestamp) else value
+    if isinstance(value, pd.Timedelta):
+        return value.to_pytimedelta()
+    if isinstance(value, (str, bool, int, float)):
+        return value
+    return str(value)
+
+
+def _normalized_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """发布前统一单元格类型，避免真实数据类型让渲染器随机失败。"""
+    normalized = frame.copy()
+    for column in normalized.columns:
+        normalized[column] = [_excel_scalar(value) for value in normalized[column].tolist()]
+    normalized.attrs = dict(frame.attrs)
+    return normalized
+
+
 def _row_counter(frame: pd.DataFrame) -> Counter:
     values = frame.astype(object).where(pd.notna(frame), None)
     values = values.replace("", None)
-    return Counter(tuple(row) for row in values.itertuples(index=False, name=None))
+    return Counter(tuple(_excel_scalar(value) for value in row)
+                   for row in values.itertuples(index=False, name=None))
 
 
 def _align_previous_columns(
@@ -217,9 +263,9 @@ def build_listing_sheet(wb: Workbook, sheet_name: str, frame: pd.DataFrame) -> N
 
     for row_index, values in enumerate(frame.itertuples(index=False, name=None), 3):
         for column, value in enumerate(values, 1):
-            cell = literal_cell(ws, row_index, column, None if pd.isna(value) else value)
+            cell = literal_cell(ws, row_index, column, _excel_scalar(value))
             _style_cell(cell, font=atoms.DATA_FONT, fill=atoms.WHITE, alignment=Alignment(vertical="center"))
-    ws.auto_filter.ref = f"A2:{get_column_letter(last_column)}{max(2, 2 + len(frame))}"
+    ws.auto_filter.ref = _autofilter_ref(1, 2, last_column, 2 + len(frame))
 
 
 def _report_column_width(sheet_name: str, column: int, header: str) -> float:
@@ -246,10 +292,10 @@ def build_report_sheet(wb: Workbook, sheet_name: str, frame: pd.DataFrame) -> No
 
     for row_index, values in enumerate(frame.itertuples(index=False, name=None), 2):
         for column, value in enumerate(values, 1):
-            cell = literal_cell(ws, row_index, column, None if pd.isna(value) else value)
+            cell = literal_cell(ws, row_index, column, _excel_scalar(value))
             cell.font = copy(atoms.REPORT_DATA_FONT)
             cell.alignment = Alignment(vertical="center")
-    ws.auto_filter.ref = f"A1:{get_column_letter(last_column)}{max(1, 1 + len(frame))}"
+    ws.auto_filter.ref = _autofilter_ref(1, 1, last_column, 1 + len(frame))
 
 
 def _merge_equal_runs(ws, row: int, start_col: int, labels: List[str]) -> None:
@@ -302,7 +348,7 @@ def build_custom_sheet(wb: Workbook, sheet_name: str, frame: pd.DataFrame, layou
 
     for row_index, values in enumerate(frame.itertuples(index=False, name=None), anchor_row):
         for column, value in enumerate(values, anchor_col):
-            cell = literal_cell(ws, row_index, column, None if pd.isna(value) else value)
+            cell = literal_cell(ws, row_index, column, _excel_scalar(value))
             _style_cell(cell, font=atoms.DATA_FONT, fill=atoms.WHITE, alignment=Alignment(vertical="center"))
 
     width_source = layout.column_widths or [
@@ -314,10 +360,7 @@ def build_custom_sheet(wb: Workbook, sheet_name: str, frame: pd.DataFrame, layou
 
     ws.freeze_panes = layout.freeze_panes or f"{get_column_letter(anchor_col)}{anchor_row}"
     bottom = anchor_row - 1 + max(1, len(frame))
-    ws.auto_filter.ref = (
-        f"{get_column_letter(anchor_col)}{header_top}:"
-        f"{get_column_letter(last_column)}{bottom}"
-    )
+    ws.auto_filter.ref = _autofilter_ref(anchor_col, header_top, last_column, bottom)
 
 
 def _business_sheet(wb: Workbook, sheet_name: str, frame: pd.DataFrame, scenario: str) -> None:
@@ -334,18 +377,72 @@ def _business_sheet(wb: Workbook, sheet_name: str, frame: pd.DataFrame, scenario
 # 单一入口
 # ---------------------------------------------------------------------------
 
-def _atomic_save(wb: Workbook, output_file: Path) -> None:
+class ListingPublishError(ValueError):
+    """只携带稳定阶段码，调用方绝不把底层异常文本回传给 AI。"""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _stage_workbook(wb: Workbook, output_file: Path) -> Path:
     output_file.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(prefix=f".{output_file.stem}-", suffix=".xlsx", dir=output_file.parent)
     os.close(fd)
     temporary_file = Path(temporary_name)
     try:
-        wb.save(temporary_file)
-        wb.close()
-        os.replace(temporary_file, output_file)
-    finally:
+        try:
+            wb.save(temporary_file)
+        finally:
+            wb.close()
+        return temporary_file
+    except Exception as exc:
         temporary_file.unlink(missing_ok=True)
+        raise ListingPublishError("WRITE_WORKBOOK_FAILED") from exc
 
+
+def _stage_text(path: Path, content: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent)
+    os.close(fd)
+    temporary_file = Path(temporary_name)
+    try:
+        temporary_file.write_text(content, encoding="utf-8")
+        return temporary_file
+    except Exception as exc:
+        temporary_file.unlink(missing_ok=True)
+        raise ListingPublishError("WRITE_CHANGE_HISTORY_FAILED") from exc
+
+
+def _commit_publication(staged: list[tuple[Path, Path]]) -> None:
+    """提交工作簿和 sidecar；任一步失败都恢复提交前文件。"""
+    backups: list[tuple[Path, Path | None]] = []
+    committed: list[Path] = []
+    try:
+        for target, _ in staged:
+            backup = None
+            if target.exists():
+                fd, name = tempfile.mkstemp(prefix=f".{target.stem}-backup-", suffix=".bak", dir=target.parent)
+                os.close(fd)
+                backup = Path(name)
+                os.replace(target, backup)
+            backups.append((target, backup))
+        for target, temporary in staged:
+            os.replace(temporary, target)
+            committed.append(target)
+    except Exception as exc:
+        for target in committed:
+            target.unlink(missing_ok=True)
+        for target, backup in reversed(backups):
+            if backup is not None and backup.exists():
+                os.replace(backup, target)
+        raise ListingPublishError("COMMIT_PUBLICATION_FAILED") from exc
+    finally:
+        for _, backup in backups:
+            if backup is not None:
+                backup.unlink(missing_ok=True)
+        for _, temporary in staged:
+            temporary.unlink(missing_ok=True)
 
 def create_multi_sheet_excel(
     outputs: Dict[str, pd.DataFrame],
@@ -368,33 +465,59 @@ def create_multi_sheet_excel(
     if scenario not in SUPPORTED_SCENARIOS:
         raise ValueError(f"不支持的 Listing 场景: {scenario}")
 
-    reserved = [REPORT_COVER_SHEET] if scenario == "report" else [CONTENT_SHEET]
-    prepared = normalize_sheet_outputs(outputs, reserved)
-    prepared = apply_default_template(prepared, scenario)
-    custom_layout_sheets = {
-        sheet_name for sheet_name, frame in prepared.items() if read_layout(frame) is not None
+    try:
+        reserved = [REPORT_COVER_SHEET] if scenario == "report" else [CONTENT_SHEET]
+        prepared = normalize_sheet_outputs(outputs, reserved)
+        prepared = apply_default_template(prepared, scenario)
+        custom_layout_sheets = {
+            sheet_name for sheet_name, frame in prepared.items() if read_layout(frame) is not None
+        }
+
+        index_sheet = REPORT_COVER_SHEET if scenario == "report" else CONTENT_SHEET
+        previous = load_previous_version(output_file, index_sheet, scenario) if track_changes else None
+        if previous is not None:
+            previous = _align_previous_columns(previous, prepared)
+        changes = calculate_changes(previous, prepared, treat_as_new=custom_layout_sheets)
+
+        wb = Workbook()
+        if scenario == "report":
+            build_report_cover(wb, report_metadata(prepared), cover_labels)
+        else:
+            build_content_sheet(wb, prepared, changes)
+        for sheet_name, frame in prepared.items():
+            _business_sheet(wb, sheet_name, frame, scenario)
+    except ListingPublishError:
+        raise
+    except Exception as exc:
+        raise ListingPublishError("RENDER_WORKBOOK_FAILED") from exc
+
+    timestamp = datetime.now().isoformat()
+    run_id = uuid.uuid4().hex
+    change_body = {
+        "timestamp": timestamp,
+        "runId": run_id,
+        "scenario": scenario,
+        "baselineAvailable": previous is not None,
+        "changes": changes,
     }
-
-    index_sheet = REPORT_COVER_SHEET if scenario == "report" else CONTENT_SHEET
-    previous = load_previous_version(output_file, index_sheet, scenario) if track_changes else None
-    if previous is not None:
-        previous = _align_previous_columns(previous, prepared)
-    changes = calculate_changes(previous, prepared, treat_as_new=custom_layout_sheets)
-
-    wb = Workbook()
-    if scenario == "report":
-        build_report_cover(wb, report_metadata(prepared), cover_labels)
-    else:
-        build_content_sheet(wb, prepared, changes)
-    for sheet_name, frame in prepared.items():
-        _business_sheet(wb, sheet_name, frame, scenario)
-    _atomic_save(wb, output_file)
-
-    if track_changes:
-        change_log = output_file.parent / f"{output_file.stem}_changes.json"
-        change_log.write_text(json.dumps({
-            "timestamp": datetime.now().isoformat(), "changes": changes,
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    staged: list[tuple[Path, Path]] = []
+    try:
+        staged.append((output_file, _stage_workbook(wb, output_file)))
+        if track_changes:
+            change_log = output_file.parent / f"{output_file.stem}_changes.json"
+            history_log = output_file.parent / f"{output_file.stem}_run_history.jsonl"
+            previous_history = history_log.read_text(encoding="utf-8") if history_log.exists() else ""
+            staged.append((change_log, _stage_text(change_log, json.dumps(change_body, ensure_ascii=False, indent=2))))
+            staged.append((history_log, _stage_text(history_log, previous_history + json.dumps(change_body, ensure_ascii=False) + "\n")))
+        _commit_publication(staged)
+    except ListingPublishError:
+        for _, temporary in staged:
+            temporary.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        for _, temporary in staged:
+            temporary.unlink(missing_ok=True)
+        raise ListingPublishError("WRITE_CHANGE_HISTORY_FAILED") from exc
 
     return {
         "outputFile": str(output_file),

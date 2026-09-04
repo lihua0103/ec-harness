@@ -113,39 +113,40 @@ publish 时不与上一版做行级比较（无稳定回读结构），变化统
 模型必须按以下顺序调用：
 
 1. `enterprise_listing_inspect`
-2. `enterprise_listing_run_code`
-3. `enterprise_listing_publish`
+2. `enterprise_listing_read_document`
+3. `enterprise_listing_run_code`
+4. `enterprise_listing_publish`
 
 `run_code` 必须定义非空 `outputs: dict[str, pandas.DataFrame]`。`publish`
 是唯一交付路径，并以原子替换方式发布最终工作簿；`to_excel`、
 `ExcelWriter` 不用于交付物，中间/临时文件可自行生成。
 
-`inspect` 全量读取（txt ≤50K 全文、xlsx 整表、SAS/XPT/CSV 全量行）并把
-数据集留在当前会话，`run_code` 免二次读取；`run_code` 直接调用时自行
-收集，此时任一数据源读失败即 fail-closed。
+`inspect` 返回 `doc/**` 的 requirement manifest，不直接携带需求内容。每个
+文件必须从 chunk 0 读到 `isFinal`；分片按顺序拼接后 JSON parse 得到完整
+需求对象。分片是协议传输单位，不是截断；全部需求分片未读完时不得
+`run_code`。
 
-## 7. 数据拦截（2026-08-28 现行口径，ADR-0007/0009）
+## 7. 数据边界（2026-08-28 现行口径，ADR-0010）
 
-读取层永远全量；拦截只发生在回执出口，唯一硬红线是数据集原始行值
-（判据是"数据从哪里来"，不是字段名，无模式扫描）：
+读取层永远全量；拦截只发生在回执出口。数据安全开关由宿主设置页控制，
+默认开启，关闭后零拦截。开启时判据是项目路径与数据源头，不是字段名，
+也没有内容模式扫描：
 
-| 场景 | 源头（`_source`） | 默认回执形态 | 开关关闭 |
-|---|---|---|---|
-| 数据集原始行值 | `dataset` | 元数据：名称/路径/列名/行数/dtype/nullCount/uniqueCount；行样本默认不构建（节流） | head 3 行样本回执 |
-| —— doc/ 文本 | `spec-document` | **全文直通**（协议上限只显式标记 truncated） | 同左 |
-| —— doc/ Excel | `aux-excel` | 单元格值全量直通 | 同左 |
-| —— AI 产物 | `model-output` | 原样放行（对象恒等） | 同左 |
+| 场景 | 源头（`_source`） | 回执形态 |
+|---|---|---|
+| 数据集原始行值 | `dataset` | 元数据：名称/路径/列名/行数/dtype/nullCount/uniqueCount；行样本默认不构建 |
+| doc 外辅助 Excel 单元格值 | `aux-excel` | 结构、统计与 ALS 三元组；rows 默认不构建 |
+| doc 所有文件 | `spec-document` | manifest 后经 read_document 全量分片，无损还原 |
+| AI 产物 | `model-output` | 只含输出数量、行数、列数、dtype 与空值统计 |
 
-- 其余一律不碰：run_code 的 stdout/stderr、错误消息、失败清单、路径、
-  AI 产物元数据、publish 统计全部原样。
-- 开关是**宿主侧**的（ui-settings DataSecurityService 设置页），由 TS 入口
-  逐请求以 `dataInterception` 旗标下发 worker；模型接触不到开关。默认开 +
-  fail-closed（服务未装配/读不到 → 按开处理）；关闭 = 零拦截（回执原样）。
-- sandbox 执行面按 ADR-0009 全量放开：标准 builtins、任意 import、
-  文件 IO 与 `read_*/to_*` 均不受开关限制；`list_files`/
-  `scan_excel_structures` 仅作为便利助手保留项目根围栏。
-- 已知边界（显式接受）：表头带 headerRows 含每 sheet 首批 ≤2 行数据
-  （多层表头识别需要）；run_code 的 print 可经 stdout 出域（威胁模型为
-  非对抗 AI）。
-- 投影发生时写 `.clinical-listing/audit.jsonl`（无数据值：时间/操作/开关
-  态/被投影载荷的 source 与 path）。
+- 开关开启时，run_code 的 stdout/stderr、动态异常文本、输出名与列名不进入
+  回执；publish 回执不携带 sheet 名。开关关闭时这些原始载荷照常返回，且
+  tool-audit 零拦截。
+- 模型请求没有开关旗标；TS 入口只把宿主 `isEnabled()` 结果作为内部
+  `hostDataInterception` 下发 Worker，伪造 `dataInterception=false` 无效。
+- sandbox 执行面按 ADR-0009/0010 全量放开：标准 builtins、任意 import、
+  文件 IO 与 `read_*/to_*` 均不受数据边界限制；`list_files`/
+  `scan_excel_structures` 仅作为便利助手保留项目根围栏。通用工具的动态
+  绕过由 tool-audit 在开关开启且受保护的项目内封堵。
+- 投影发生时写 `.clinical-listing/audit.jsonl`（无数据值：时间/操作/被投影
+  载荷的 source 与 path）。
