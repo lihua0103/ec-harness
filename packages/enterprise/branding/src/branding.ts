@@ -104,7 +104,8 @@ const CLIENT_SCRIPT = `
     if (!document.getElementById('brand-logo-css')) {
       var style = document.createElement('style')
       style.id = 'brand-logo-css'
-      style.textContent = 'div[class*="logoRow"] button[class*="brand"] .jIPhXG_brandIdentity, svg[class*="railFish"] { display: none !important; }'
+      // 上游 CSS-module 哈希随构建变化，只能按语义片段匹配，不能写死哈希类名
+      style.textContent = 'div[class*="logoRow"] button[class*="brand"] [class*="brandIdentity"], svg[class*="railFish"] { display: none !important; }'
       document.head.append(style)
     }
     var brandBtn = document.querySelector('div[class*="logoRow"] > button[class*="brand"]')

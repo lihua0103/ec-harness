@@ -2,7 +2,16 @@
 import re
 import sys
 
-required = {"pandas": "2.0.0", "numpy": "1.24.0", "openpyxl": "3.1.0", "pyzipper": "0.2.7"}
+# xlrd：pandas 读真实 OLE2 .xls 的引擎；lxml：pandas.read_html 读 HTML 冒名
+# .xls 的引擎。两者缺失时对应格式在读取层直接失败，必须作为硬依赖校验。
+required = {
+    "pandas": "2.0.0",
+    "numpy": "1.24.0",
+    "openpyxl": "3.1.0",
+    "pyzipper": "0.2.7",
+    "xlrd": "2.0.1",
+    "lxml": "4.0.0",
+}
 
 
 def _version_tuple(value: str) -> tuple:

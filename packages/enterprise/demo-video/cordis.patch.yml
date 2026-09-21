@@ -1,0 +1,22 @@
+# 企业演示视频插件配置（系统模块操作演示视频四阶段流水线）
+- insert:
+    - id: enterprise-demo-video
+      name: '@dsh-enterprise/demo-video'
+      # tools 服务确保事件挂点存在；credentials 供录屏账号密码经宿主凭据解析
+      inject: ['tools']
+      # 部署参数（CODING_STANDARDS：不写死在插件代码）。录屏四件套路径按部署机填写；
+      # 运行时解析顺序：本配置 > DV_* 环境变量 > PATH 中的同名可执行文件。
+      config:
+        # ffmpeg（需含 libass 以烧字幕；@ffmpeg-installer 产物满足）
+        ffmpegPath: "D:/project/company/RBQM/tmp/record-tools/tmp/record-tools/node_modules/@ffmpeg-installer/win32-x64/ffmpeg.exe"
+        # playwright-core 包目录（walk 脚本经 DV_PW 注入 require）
+        playwrightCorePath: "D:/package/Nvm/nvm/node_global/node_modules/@playwright/cli/node_modules/playwright-core"
+        # 录制用 Chromium 可执行文件
+        chromePath: "C:/Users/ding_jinghua/AppData/Local/ms-playwright/chromium-1223/chrome-win64/chrome.exe"
+        # 旁白合成用 Python（需已安装 edge-tts；不配则用 PATH 中的 python）
+        pythonExe: "D:/project/company/RBQM/.venv/Scripts/python.exe"
+        # 神经语音默认音色与语速
+        ttsVoice: "en-US-AriaNeural"
+        ttsRate: "+12%"
+        # 单次录制超时（毫秒）
+        recordTimeoutMs: 1800000

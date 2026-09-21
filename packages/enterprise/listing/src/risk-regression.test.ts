@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { PythonWorker } from './worker.js'
 
@@ -76,13 +76,13 @@ describe('Listing 风险回归', () => {
       await worker.request({ operation: 'listing_publish', project: root, scenario: 'manual', trackChanges: true }, 30_000)
       await worker.request({ operation: 'listing_publish', project: root, scenario: 'manual', trackChanges: true }, 30_000)
       const manual = runPython('import json,sys\nfrom openpyxl import load_workbook\nw=load_workbook(sys.argv[1],data_only=True)\nprint(json.dumps([w["Content"].cell(3,c).value for c in range(5,8)]))',
-        join(root, '.clinical-listing', 'output', 'manual', 'MANUAL_LISTINGS.xlsx'))
+        join(root, '.clinical-listing', 'output', 'manual', `${basename(root)}_MANUAL_LISTINGS.xlsx`))
       expect(JSON.parse(manual.stdout)).toEqual([0, 0, 0])
 
       await worker.request({ operation: 'listing_publish', project: root, scenario: 'report', trackChanges: true }, 30_000)
       await worker.request({ operation: 'listing_publish', project: root, scenario: 'report', trackChanges: true }, 30_000)
       const changes = JSON.parse((await import('node:fs/promises')).readFile
-        ? await (await import('node:fs/promises')).readFile(join(root, '.clinical-listing', 'output', 'report', 'REPORT_LISTINGS_changes.json'), 'utf8') : '{}')
+        ? await (await import('node:fs/promises')).readFile(join(root, '.clinical-listing', 'output', 'report', `${basename(root)}_REPORT_LISTINGS_changes.json`), 'utf8') : '{}')
       expect(changes.changes.AE).toEqual({ new: 0, modified: 0, old: 0 }, 30_000)
     } finally { worker.dispose() }
   }, 30_000)

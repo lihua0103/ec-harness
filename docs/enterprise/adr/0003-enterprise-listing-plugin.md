@@ -68,8 +68,11 @@ Listing，并通过 `DataFrame.attrs["labels"]` 提供变量 Label；程序不�
 具体表单或业务 Sheet。为避免模型输出多个文件或任意样式，机械交付结构
 由统一 Writer 固化：
 
-1. 每次 publish 只生成一个 `{SCENARIO}_LISTINGS.xlsx`，业务 Sheet 按
-   `outputs` 动态生成。
+1. 每次 publish 只生成一个 `<项目标识>_{SCENARIO}_LISTINGS.xlsx`，业务 Sheet 按
+   `outputs` 动态生成。（2026-09-04 命名修订：项目标识 = 项目目录名，跟随
+   申办方 `<方案号>_<文档类型>` 交付命名，跨项目收集可区分；旧名
+   `{SCENARIO}_LISTINGS.xlsx` 弃用，已发布旧文件不迁移，track_changes
+   首跑按全量新增重建基线。）
 2. `manual` / `medical` 使用固定 `Content`、三层业务页结构，并自动补齐
    五个比较审核列；`rbqm` 不强制比较列，但复用 RT01 视觉样式。
 3. `report` 使用 DM Status Report 固定 `Cover Page`；业务页为单层表头、
@@ -78,6 +81,35 @@ Listing，并通过 `DataFrame.attrs["labels"]` 提供变量 Label；程序不�
    RT01 Manual Listing 与 `file_show (6).xlsx` 的结构/样式提炼；不复制范例业务数据。
 5. 重跑变化记录在没有可靠业务唯一键时只按完整行多重集计算新增/删除，
    不伪造 `modified`；变化统计写入 `Content`。
+
+### 7. r_manual 车道：交付物是可独立运行的单文件 R 程序（2026-09-07 新增）
+
+对"DVP 已固化、目录按固定契约投递"的项目，交付物不是 AI 每次现场生成的
+pandas 代码，而是一份可直接在服务器 `Rscript` 运行的 TAISHAN 风格单文件
+R 程序（HXN6005-A1-201 真实 UAT 数据验证：83 条 DVP → 83 listing + Content）。
+设计见 `docs/enterprise/LISTING_R_INTEGRATION_DESIGN.md`。
+
+0. 需求口径：DVP Manual Review 的 Visits Applied To × Related Fields 定范围、Condition 定行
+   （Output if / flag=duplicated）、Column Heading 定列（Raw data + 上下文 / 派生 / 匹配拆行列）；
+   Report Description / Discrepancy Text 是 DM 人工核查内容，程序不实现、不产出核查 flag。
+1. 与 pandas 车道并列，不复用 Python Worker：宿主 `src/r-runner.ts` 只做
+   模板渲染 → 写入项目 `SAS_Program/SAS_program/Manual Listing/<studyKey>_Manual_Listing.R`
+   → 子进程 `Rscript` → 读取 R 程序自写的运行摘要 json 组装聚合回执。
+   读数、核查、样式化 xlsx（对齐 `LISTING_MULTI_SHEET_SPEC.md` manual 场景，
+   用户偏好：网格线默认显示、`go back` 返回链接、页名去 `Manual_` 前缀）全部在 R 内完成。
+2. 模板资产 `r-templates/manual_listing.R.tmpl`，文件头 7 个双花括号占位符
+   （项目根/studyKey/数据日期/旧版日期/zip 密码/输出前缀/摘要路径）；运行时参数
+   经 `DSH_R_*` 环境变量覆盖渲染值（模板 `cfg()`），因此 AI 按 DVP 修改过的程序换
+   数据日期可直接 `render=false` 重跑，zip 密码不落进 R 文件；脱离插件在服务器独立运行
+   时用文件头渲染值。
+3. 项目名/方案号/数据日期由用户在对话中直接提供、作为普通工具参数进入模型上下文
+   （不经 ui-settings 设置页）；提示引导禁止模型推断这些值。项目名只能是部署配置
+   项目根（缺省 `/mnt/project`，`rListing.projectRoot`）下的单层目录名或绝对路径。
+4. 回执只含聚合计数（listing/行/flag/sheet）、产物文件名、R 程序告警；失败时取
+   R `stop()` 写入摘要的精确信息，开关开启时 stderr 不回流（同 run_code 口径）。
+   缺 Rscript 回 `R_NOT_FOUND`（同 `PYTHON_NOT_FOUND` 模式）。
+5. 已知平台坑：Windows 上最小化子进程环境必须保留 `PROCESSOR_ARCHITECTURE`，
+   否则 R 加载包后以 0xC0000005 崩溃（实测二分定位）；不透传 `LC_*`。
 
 ## 后果
 

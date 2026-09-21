@@ -1,0 +1,1161 @@
+# =====================================================================
+# {{STUDY_KEY}} Manual Listing（DVP Manual Review sheet，需求行驱动）
+# 风格对齐 TAISHAN-304 模板：outlisting + <数据集>_<序号>（去 Manual_ 前缀）+ attr 标签
+#
+# ★ 本模板零业务逻辑（2026-09-17 用户定案）：业务逻辑一律由 harness AI 识别本项目
+#   DVP spec/ALS/EDC 结构后生成，写入下方 DSH-BUSINESS-ZONE 生成区；模板只含
+#   harness 契约层（读数缓存/密码推导/ALS 装载/解码/范围-行-列原语/PT+WHODrug 编码
+#   装载/输出样式/运行摘要），与已交付程序同源（manual-listing-r skill 骨架）。
+#   未生成业务区即运行 → fail-fast 出路：先按生成区契约逐区生成，再 render=false 运行。
+#
+# 生成区契约（AI 逐区对照 DVP+数据实证后填写；口径/门禁详见 enterprise_listing_kb(manual)）：
+#   B1 context —— 受试者上下文与项目参照表：A_* 活动表（IC/DS/DS1/DS3/DS4/EC/SV/
+#     AE/MH/CM/PR/IE/DS2/LB…按本项目 EDC 表集实证增删）、CTX 跨表上下文列表
+#     （列集=本项目 DVP Column Heading 的【表单】上下文列，聚合规则按列语义定并
+#     留痕；给药访视关键词按本项目方案实证，禁写死 OID）、add_ctx/CTX_DROP、
+#     AE_REF/MH_REF/PT_DUP（PT 判重类 listing 参照）。项目无上下文列时生成仅
+#     SID 的最小 CTX（add_ctx/CTX_DROP 依赖保持可用）。
+#   B2 listings —— outlisting 装配（漏行=失败）：DVP Manual Review 每一需求行一节，
+#     节注释=row号|listing名|Visits|Related Fields|Condition|Column Heading 映射，
+#     outlisting$Manual_<数据集>_<序号> <- … 按 DVP 行序装配（RDS 对象名保留
+#     Manual_ 前缀供新旧比对；sheet/Content/B1 显示层由输出段自动去前缀；
+#     换数据源必须同步改名）。四列口径：Visits×Fields 定范围（访视过滤/字段
+#     清单）、Condition 定行（Output if/flag=duplicated）、Column Heading 定列
+#     （Raw data 原样红线 + 上下文列 + 派生列 + 匹配拆行）；访视规则 V1-V4、
+#     实验室口径 L1-L3 见下。
+#   RDS 工件形态惯例（新旧比对 compare_data 依赖 RDS 列名形态，必须逐条遵守）：
+#     R1 outlisting 键名带 Manual_ 前缀（SUBJECT_01 型"参与者信息"类无前缀者除外）；
+#     R2 transmute 型字段清单 listing（fields 收窄类）的 RDS 列名=中文显示名
+#        （疾病名称/开始日期/是否持续…），与 xlsx 表头同词；RDS 内列名即
+#        交付面显示名，attr label 同值或缺失均可；
+#     R3 CTX 上下文列在 listing 内重命名为中文（试验阶段/给药日期PartA_D1/
+#        治疗结束日期/知情同意签署日期…），与 xlsx 表头同词；
+#     R4 .d 派生日期列（LBDATEd/VISDATd/DSENDATd…）与 CRFVER/CRFSTS 保留在
+#        RDS（写盘层才裁，xlsx 不受影响）；
+#     R5 缺失表示逐列按构造路径：join 产生的缺失=NA，显式 dts()/if_else 产生
+#        的=""；自检代码必须把 NA 与 "" 视为不同值（禁止规范化后再比）。
+#   B3 titles —— 显示词表：LISTING_TITLES（sheet 名 -> Content/B1 中文表名，词表=
+#     ALS 官方词汇/DVP Form Name，零自造；同名去重由输出段自动追加 sheet 名后缀）
+#     及其余显示层修正（须与 als_arrange/.als_applied 标记协同，防二次重排甩尾）。
+#
+# 需求口径（DVP Manual Review sheet 各列的职责）：
+#   Visits Applied To × Related Fields  -> 范围（ALL / All items 即全量，其余按访视/字段过滤）
+#   Condition ( For internal use)      -> 行（Output if 筛选；flag=duplicated 重复标记）
+#   Column Heading ( For internal use) -> 列（Raw data + 上下文列【表单】+ 派生列 + 匹配病史/AE/CM/PR 拆行）
+#   Report Description / Discrepancy Text Message 为 DM 人工核查内容，程序不实现、不产出核查 flag
+#
+# 访视处理规则（同 EDC 系统通用，实战固化）：
+#   V1  Visits Applied To 非 ALL 的每一行都必须落访视范围过滤（漏挂 = 全表数据混入）；
+#       ALL 则不调用。
+#   V2  Form Name / Visits Applied To 可能同时限定多个表单（"既往/伴随病史 + 不良事件"
+#       类）：每个表单各自走自己的访视范围，再合并或分 listing。
+#   V3  计划外访视：VISITOID=99 是系统级不变量；访视名带实例后缀，必须关键词匹配
+#       并挂 oid="99" 兜底（$VISITNAME 解码失效时回退 "访视99"，纯关键词会 0 行）。
+#   V4  按访视名派生（采样/给药日期聚合）一律用关键词包含匹配，覆盖多套同概念 OID；
+#       禁止写死 VISITOID 数值，必要时对照 SV 实证并标 [CONFIRM]。零命中必须
+#       note() 进运行摘要——收到零命中告警必须先核对访视关键词再交付。
+#
+# 实验室检查 listing 口径（L1-L3，同 EDC 系统通用；DM 书面口径优先并在行注释标日期）：
+#   L1  实验室检查类多项目模块：解码长表原样输出——每个检查项目一行、不加匹配列、
+#       不拆编号（spec Condition 的"CS 时匹配拆行"条款对该类表被 DM 口径取代时，
+#       以 DM 书面确认为准）。
+#   L2  打包编号单元格原文保留在格内；记录级字段随行重复（"前面数据要补齐"）。
+#   L3  边界：只覆盖实验室多项目模块表；妊娠等单项目检查表与其他表单仍按 spec
+#       CS 匹配 + 编号拆行（expand_ref/cs_flag）。
+#
+# 本文件由 @dsh-enterprise/listing 的 r_manual 车道按模板
+# r-templates/manual_listing.R.tmpl 渲染生成：双花括号占位符已由宿主填入用户输入
+# （项目根 / 数据日期 / 旧版日期 / zip 密码 / 交付前缀），可直接 Rscript 运行；
+# 也可脱离插件在服务器上独立执行（只依赖文件头配置段）。
+#
+# ## [REPLACE] 待确认/替换清单（运行前逐项过一遍）：
+#   R1  运行环境配置（项目根/数据日期/旧版日期/密码由宿主渲染，通常无需手改）
+#   R10 输出段：有旧版时接入公司 compare_data 新旧比对（输出段 [REPLACE R10] 注释处）
+#   R11 PT 术语/WHODrug：编码结果随数据包投递时自动装载；未投递时 PT术语/Product_Name
+#       列为空（不回退原值，避免混淆已编码/未编码）
+# =====================================================================
+rm(list = ls()); gc()
+## 运行环境容错：宿主 shell 若带 LC_CTYPE=C.UTF-8 之类 Windows 无效值，R 会落到
+## CP936 原生编码、解析中文标识符（如 ALS_ECRF$表）报 invalid token；显式拉回 UTF-8。
+## Linux 服务器上此 locale 名无效会报错，tryCatch 吞掉即可（服务器本就 UTF-8）。
+tryCatch(Sys.setlocale("LC_CTYPE", "Chinese (Simplified)_China.utf8"), error = function(e) NULL)
+options(warn = 1)
+## 宿主运行时经环境变量覆盖文件头渲染值（DSH_R_*）；独立在服务器运行时环境变量为空，使用渲染值
+cfg <- function(env, default) { v <- Sys.getenv(env, unset = ""); if (nzchar(v)) v else default }
+summary_path <- cfg("DSH_R_SUMMARY_PATH", "{{SUMMARY_PATH}}")  # 运行摘要 json（宿主聚合回执用；空=写到交付目录）
+## 失败也写运行摘要：宿主 enterprise_listing_run_r 据此回执精确的 stop 信息
+options(error = function() {
+  if (exists("summary_path") && nzchar(summary_path)) tryCatch({
+    esc <- function(x) { x <- gsub("\\", "\\\\", x, fixed = TRUE); x <- gsub("\"", "\\\"", x, fixed = TRUE)
+                         gsub("\n", "\\n", gsub("\r", "", x, fixed = TRUE), fixed = TRUE) }
+    writeLines(enc2utf8(sprintf('{"status":"error","message":"%s"}', esc(geterrmessage()))),
+               summary_path, useBytes = TRUE)
+  }, error = function(e) NULL)
+  if (!interactive()) quit(status = 1)
+})
+
+## 优先 tidyverse（TAISHAN 模板写法）；未装元包时回退单包，逻辑等价
+if (requireNamespace("tidyverse", quietly = TRUE)) {
+  library(tidyverse)
+} else {
+  library(dplyr); library(tidyr); library(purrr); library(stringr)
+}
+library(haven)
+library(tools)
+library(openxlsx)
+
+## ------------------------------------------------------------------ ##
+## [REPLACE R1] 运行环境配置（宿主渲染段：以下值来自用户输入 / 部署配置）
+## 目录契约（固定格式，只有项目根可变）：
+##   <root>/Project_Data/01_Raw_sas/Manual Listing/<foldername>/   数据 zip + RData 缓存
+##   <root>/SAS_Program/SAS_program/Manual Listing/                 本 R 程序
+##   <root>/Output/04_Out/Manual listing/                           唯一交付目录
+dir_ok  <- function(p) tryCatch(isTRUE(dir.exists(p)), error = function(e) FALSE)  # locale 容错
+dirs_of <- function(p) tryCatch(list.dirs(p, recursive = FALSE), error = function(e) character(0))
+root         <- cfg("DSH_R_PROJECT_ROOT",  "{{PROJECT_ROOT}}")   # 项目根目录（宿主已校验存在）
+study_key    <- cfg("DSH_R_STUDY_KEY",     "{{STUDY_KEY}}")      # 项目关键字（目录名含中文/编码异常时按此关键字兜底匹配）
+foldername   <- cfg("DSH_R_DATA_DATE",     "{{DATA_DATE}}")      # 数据投递日期（zip 所在文件夹名）
+old_folder   <- cfg("DSH_R_OLD_DATE",      "{{OLD_DATE}}")       # 旧版数据日期（新旧比对用，可空）
+password     <- cfg("DSH_R_ZIP_PASSWORD",  "{{ZIP_PASSWORD}}")   # 数据 zip 密码（宿主经环境变量传入不落盘；独立运行时在此填写）
+out_prefix   <- cfg("DSH_R_OUTPUT_PREFIX", "{{OUTPUT_PREFIX}}")  # 交付文件名前缀，如 "<studyKey>_Manual Listing"
+out_file <- function(ext, tag = "") paste0(out_prefix, "_", foldername, tag, ".", ext)  # 交付文件名
+zip_clear    <- TRUE                                             # 读完是否删除解压出的 sas7bdat
+if (!dir_ok(root) && nzchar(study_key)) {
+  cands <- dirs_of(dirname(root))
+  cands <- cands[grepl(study_key, cands, fixed = TRUE)]
+  if (length(cands)) root <- cands[1]
+}
+if (!dir_ok(root)) stop("项目根目录不存在：", root, "\n请检查配置段 [REPLACE R1]")
+folder_path <- file.path(root, "Project_Data/01_Raw_sas/Manual Listing")
+out_path    <- file.path(root, "Output/04_Out/Manual listing")
+## 输出/缓存统一在 Output（唯一输出位置；不可写直接报错，不乱落盘）
+dir.create(out_path, showWarnings = FALSE, recursive = TRUE)
+work_root <- out_path
+tf <- file.path(work_root, ".writetest")
+r <- tryCatch(file.create(tf, showWarnings = FALSE), error = function(e) FALSE)
+if (!isTRUE(r)) stop("输出目录不可写，请检查权限：", work_root)
+unlink(tf)
+if (!nzchar(summary_path)) summary_path <- file.path(work_root, paste0(".summary_", foldername, ".json"))
+outlisting  <- list()
+run_warnings <- character(0)              # 运行期告警（写入 summary.json 供宿主回执）
+note <- function(...) { m <- paste0(...); run_warnings <<- c(run_warnings, m); message("NOTE: ", m) }
+SAS_DIR     <- ""        # sas 数据集所在目录（read_sas_folder 运行时记录；编码结果同目录放置）
+
+## 编码口径已经 EDC 格式目录(sas7bcat)确证：LBCLSIG/LBCLSIG1/VSCLSIG/EGCLSIG
+## = 1正常 2异常无临床意义 3异常有临床意义（VS 系列另有 4=未查）
+
+## 编码解码依据：优先 EDC 系统导出的二进制格式目录 formats.sas7bcat（haven
+## catalog_file 挂载，比 FORMATS 数据集更完整）；FORMATS 数据集作兜底。
+## 已在 HXN6005 验证：LBCLSIG/LBCLSIG1 = 1正常 2异常无临床意义 3异常有临床意义
+## （VSCLSIG 系列多一个 4=未查）。
+
+## 说明：V1 遗留的阈值/关键词类 flag（方案生效日期、年龄、入排、ECG/VS 范围、
+## eGFR/量表分界、排除关键词、计划注射体积等）在 V2 口径下属 DM 人工核查逻辑
+##（对应 DVP 行 Condition=NA，不要求 flag），不进程序，相关配置已删除；
+## 如后续 DM 要求程序化再加回并标 [REPLACE]。
+
+## 编码口径已经 EDC 格式目录(sas7bcat)确证：LBCLSIG/LBCLSIG1/VSCLSIG/EGCLSIG
+## = 1正常 2异常无临床意义 3异常有临床意义（VS 系列另有 4=未查）
+
+## ------------------------------------------------------------------ ##
+## 1. 读数（公共，只写一次）                                          ##
+## ------------------------------------------------------------------ ##
+## 解压策略：
+##   服务器 Linux：优先系统 unzip（模板同款，能正确建子目录、支持 -P 密码）；
+##   系统 unzip 不可用 => R 内置 unzip 兜底，但必须先按 zip 条目预建子目录
+##   （内置引擎不会自动建目录，否则报 "cannot open file './xxx/yyy'"）。
+
+## ---- 归档密码自动推导（对齐 listing 插件 archive_passwords.py 的候选顺序）----
+## 顺序：显式密码 -> 项目目录名及其分词组合 -> zip同目录*.txt sidecar 内容
+##       -> zip 文件名及其分词组合 -> 项目目录 .txt/.xlsx/.xls 文件名 stem -> 无密码
+split_tokens <- function(v) {
+  t <- trimws(unlist(strsplit(v, "[_/.\\s-]+")))
+  t[nzchar(t)]
+}
+token_pw <- function(v) {
+  toks <- split_tokens(v)
+  out <- unique(c(v, tools::file_path_sans_ext(v), toks[tolower(toks) != "" & nchar(toks) >= 2]))
+  if (length(toks) >= 2) {
+    combo <- character(0)
+    for (s in seq_along(toks)) for (e in seq(s + 1, length(toks)))
+      combo <- c(combo, paste(toks[s:e], collapse = c("", "_", "-")))
+    out <- c(out, unique(combo[nchar(combo) >= 2]))
+  }
+  nums <- regmatches(v, gregexpr("[0-9]{2,}", v))[[1]]
+  c(out, nums)
+}
+password_candidates <- function(project_dir, data_dir) {
+  cand <- character(0)
+  add <- function(v) if (!is.na(v) && nzchar(v) && !v %in% cand) cand <<- c(cand, v)
+  add(password)                                   # 显式（可为空）
+  for (v in token_pw(basename(project_dir))) add(v)
+  for (f in list.files(data_dir, pattern = "\\.txt$", full.names = TRUE)) {
+    for (v in strsplit(trimws(paste(readLines(f, warn = FALSE), collapse = " ")), "\\r?\\n")[[1]])
+      add(trimws(v))
+  }
+  for (z in list.files(data_dir, pattern = "\\.zip$")) for (v in token_pw(z)) add(v)
+  for (f in list.files(project_dir, pattern = "\\.(txt|xlsx|xls)$", recursive = TRUE, full.names = TRUE))
+    add(tools::file_path_sans_ext(basename(f)))
+  add("")                                         # 无密码兜底
+  cand
+}
+zip_extract <- function(zipfile, exdir) {
+  dir.create(exdir, showWarnings = FALSE, recursive = TRUE)
+  st <- NULL
+  for (pw in password_candidates(dirname(exdir), exdir)) {
+    if (.Platform$OS.type == "unix") {
+      pwa <- if (nzchar(pw)) sprintf("-P %s", shQuote(pw)) else ""
+      st <- system(sprintf("unzip -o %s %s -d %s", shQuote(zipfile), pwa, shQuote(exdir)))
+      if (st == 0 && length(list.files(exdir, pattern = "\\.sas7bdat$", recursive = TRUE)) > 0)
+        return(invisible())
+      next
+    } else if (nzchar(pw)) {
+      next   # Windows 无系统 unzip：加密包请在服务器跑
+    }
+    break   # 无密码候选交给下方 R 内置 unzip 兜底
+  }
+  if (is.null(st)) warning("本平台无系统 unzip 可用，改用 R 内置 unzip 兜底：", zipfile)
+  else warning("系统 unzip 未成功（返回", st, "），改用 R 内置 unzip 兜底：", zipfile)
+  lst <- tryCatch(unzip(zipfile, list = TRUE), error = function(e) NULL)
+  if (!is.null(lst) && !is.null(lst$Name)) {
+    for (dd in unique(dirname(lst$Name))) {
+      dd2 <- file.path(exdir, dd)
+      if (dd2 != exdir) dir.create(dd2, showWarnings = FALSE, recursive = TRUE)
+    }
+  }
+  unzip(zipfile, exdir = exdir)
+}
+read_sas_folder <- function(folder_path, foldername, clear_sasdata = TRUE) {
+  ## 数据日期文件夹（zip 所在目录）即工作目录：解压与 RData 缓存都放这里
+  data_path <- file.path(folder_path, foldername)
+  if (!dir_ok(data_path))
+    stop("数据日期文件夹不存在：", data_path, "\n请检查配置段 folder_path / foldername [REPLACE R1]")
+  save_filename <- file.path(data_path, paste0("sas_data_", foldername, ".RData"))
+  all_files <- list.files(data_path, pattern = "\\.sas7bdat$", recursive = TRUE, full.names = TRUE)
+  ## RData 缓存命中即直接用（勿再解压 zip：Windows 无系统 unzip 且缓存已含全部数据集）
+  if (!length(all_files) && !file.exists(save_filename)) {
+    zips <- list.files(data_path, pattern = "\\.zip$", full.names = TRUE)
+    if (!length(zips))
+      zips <- list.files(folder_path, pattern = "SAS7BDAT.*\\.zip$",
+                         full.names = TRUE, recursive = TRUE)
+    for (z in zips) zip_extract(z, data_path)
+    all_files <- list.files(data_path, pattern = "\\.sas7bdat$", recursive = TRUE, full.names = TRUE)
+  }
+  ## sas 数据集所在目录（无论是否缓存命中都要记录；编码结果同目录放置）
+  if (length(all_files)) {
+    SAS_DIR <<- dirname(all_files[1])
+  } else if (file.exists(save_filename)) {
+    SAS_DIR <<- data_path        # 缓存命中且 sas7bdat 已清理（服务器 zip_clear）
+  } else {
+    stop("未找到sas7bdat（也未见可解压的zip）：", data_path, "\n请检查 [REPLACE R1]")
+  }
+  if (!file.exists(save_filename)) {
+    ## 挂载 EDC 二进制格式目录（比 FORMATS 数据集完整）：编码值自动带上 value labels
+    catf <- list.files(data_path, pattern = "\\.sas7bcat$", recursive = TRUE, full.names = TRUE)
+    datasets  <- lapply(all_files, function(x) {
+      if (length(catf)) haven::read_sas(x, catalog_file = catf) else haven::read_sas(x)
+    })
+    names(datasets) <- toupper(file_path_sans_ext(basename(all_files)))
+    save(datasets, file = save_filename)
+    if (clear_sasdata)
+      unlink(list.files(data_path, pattern = "\\.sas7bdat$", recursive = TRUE, full.names = TRUE))
+  }
+  save_filename
+}
+inputdata <- read_sas_folder(folder_path, foldername, clear_sasdata = zip_clear)
+load(inputdata)
+rawdata <- datasets; rm(datasets)
+
+## ---- ALS（数据库定义）字段名映射：输出显示名以 ALS eCRF 的"变量名"为准 ----
+## [2026-09-09 需求] 原始 SAS 带较多系统/冗余字段且部分列标签与数据库定义不一致：
+## 按 ALS eCRF sheet（表|变量|变量名）给 rawdata 各列贴 attr label（对齐参考程序
+## KXZY-GB08 的 alsmapping_saslabel）；系统列仍由输出段 SYS_DROP 裁剪，
+## 唯一值序号/键列（RECORDID/SUBTRID/CSN/SID/SITEID/SUBJID/VISITOID/VISITNAME/TNAME）
+## 不在 ALS 也保留，显示名回退 SAS 标签/变量名。ALS 文件放程序同目录/项目根均可。
+ALS_FILE <- ""   # [REPLACE] 数据库定义 xlsx 全路径（空=按 项目根/程序目录 自动发现）
+als_path <- local({
+  if (nzchar(ALS_FILE) && file.exists(ALS_FILE)) return(ALS_FILE)
+  dirs <- unique(c(root,
+                   file.path(root, "SAS_Program/SAS_program/Manual Listing"),
+                   file.path(root, "manual_listing/programs")))
+  dirs <- dirs[vapply(dirs, dir_ok, logical(1))]   # dir_ok 是单值谓词，逐个判断
+  f <- character(0)
+  for (d in dirs) f <- c(f, list.files(d, pattern = "\\.xlsx?$", full.names = TRUE))
+  f <- f[grepl("数据库定义|ALS", basename(f), ignore.case = TRUE)]
+  f <- f[!grepl("^~\\$", basename(f))]                 # Excel 打开时的 ~$ 锁文件排除
+  if (length(f)) f[1] else ""
+})
+## eCRF 读取与内嵌归并（ALS_LAB / ALS_ORD 共用；tb0=原始表OID，tb=归并到父表OID）
+## 内嵌表归并：eCRF 里可重复块字段挂在 内嵌表OID（AE_1/LB_1/LBBT1_1…）下，
+## SAS 导出平铺进父数据集——按"内嵌设计"sheet 归并到父表 OID（勿按前缀猜）
+ALS_ECRF <- if (nzchar(als_path)) tryCatch(openxlsx::read.xlsx(als_path, sheet = "eCRF"), error = function(err) NULL) else NULL
+if (!is.null(ALS_ECRF) && !all(c("表", "表名", "编号", "变量", "变量名") %in% names(ALS_ECRF)))
+  stop("ALS eCRF 缺少 表/表名/编号/变量/变量名 列：", als_path)
+tb0 <- if (is.null(ALS_ECRF)) character(0) else toupper(trimws(as.character(ALS_ECRF$表)))
+tb  <- tb0
+if (!is.null(ALS_ECRF)) {
+  ne <- tryCatch(openxlsx::read.xlsx(als_path, sheet = "内嵌设计"), error = function(err) NULL)
+  if (!is.null(ne) && all(c("表", "内嵌表") %in% names(ne))) {
+    mp <- setNames(toupper(trimws(as.character(ne$表))), toupper(trimws(as.character(ne$内嵌表))))
+    hit <- tb %in% names(mp)
+    tb[hit] <- unname(mp[tb[hit]])
+  }
+}
+ALS_LAB <- local({
+  if (is.null(ALS_ECRF)) { cat("ALS: 未找到数据库定义 xlsx，显示名沿用 SAS 标签\n"); return(list()) }
+  nb <- function(x) !is.na(x) & trimws(as.character(x)) != ""   # 此处 blank() 尚未定义
+  keep <- nb(ALS_ECRF$变量) & nb(ALS_ECRF$变量名)
+  k <- paste(tb, toupper(as.character(ALS_ECRF$变量)), sep = ".")[keep]
+  cat("ALS:", als_path, "->", length(unique(k)), "个字段映射（含内嵌表归并）\n")
+  as.list(setNames(as.character(ALS_ECRF$变量名)[keep], k))   # 同键重复时取最后一条
+})
+if (length(ALS_LAB)) {
+  rawdata <- setNames(lapply(names(rawdata), function(nm) {
+    d <- rawdata[[nm]]
+    for (cc in names(d)) {
+      l <- ALS_LAB[[paste(toupper(nm), toupper(cc), sep = ".")]]
+      if (!is.null(l) && nzchar(l)) attr(d[[cc]], "label") <- l
+    }
+    d
+  }), names(rawdata))
+}
+
+## ---- ALS 字段序（= 临床 DM 查看顺序）：列集合与列序都按数据库定义 ----
+## eCRF 编号即表单字段顺序（记录级字段后跟内嵌表字段；VS 按测量项分组）。
+## 输出面规则：lead 上下文键（中心/筛选号/状态/访视）最前，RECORDID 次之，
+## ALS 序字段按编号排（SUBTRID/CSN 插到首个内嵌字段前），派生/匹配/flag 列原序尾接；
+## SAS 源列不在 ALS 且非键的（勾选框组件子列 VSCSC_1/TNAME/AEACN_1 等）不进交付面。
+ALS_ORD <- local({
+  if (is.null(ALS_ECRF)) return(NULL)
+  e0 <- ALS_ECRF
+  ord <- list(); emb1 <- character(0)
+  for (ds in unique(tb)) {
+    idx <- which(tb == ds)
+    idx <- idx[order(suppressWarnings(as.numeric(as.character(e0$编号[idx]))))]
+    vars <- toupper(as.character(e0$变量[idx]))
+    ord[[ds]] <- vars
+    j <- which(tb0[idx] != ds)
+    emb1[ds] <- if (length(j)) vars[j[1]] else NA_character_
+  }
+  nm2 <- !duplicated(as.character(e0$表名))
+  n2o <- setNames(toupper(as.character(e0$表))[nm2], as.character(e0$表名)[nm2])
+  ## 内嵌设计的 表名|表 补充索引：父表无自有字段时 eCRF 没有该表名行（如 其他检查/LBO，
+  ## 全部字段挂在内嵌表 LBO_1 下）——不补则 als_arrange 按 TNAME 查不到而静默跳过该表，
+  ## 系统列与勾选框组件子列（LBCSC_1-3 裸 0/1）漏进交付面（2026-09-10 LBO_01 收口）
+  if (exists("ne") && !is.null(ne) && all(c("表名", "表") %in% names(ne))) {
+    ntn <- trimws(as.character(ne$表名))
+    nb <- !is.na(ntn) & ntn != "" & !ntn %in% trimws(names(n2o)) & !duplicated(ntn)
+    n2o <- c(n2o, setNames(toupper(trimws(as.character(ne$表)))[nb], ntn[nb]))
+    if (any(nb)) cat("ALS name2oid 补充（内嵌设计）:", paste(ntn[nb], collapse = ","), "\n")
+  }
+  list(ord = ord, emb1 = emb1, name2oid = n2o)
+})
+ALS_KEYS <- c("SITEID", "SUBJID", "STATUS", "VISIT", "RECORDID", "SUBTRID", "CSN")
+als_arrange <- function(df) tryCatch({
+  if (is.null(ALS_ORD)) return(df)
+  ## [2026-09-10 DM 口径] 表单名称列（TNAME）保留并紧跟访视列后：多表单合并 sheet
+  ## （重复核查类）靠它区分行属哪个表单，单表单 sheet 也保持一致口径，便于查找。
+  ## 无访视列的表（如 SUBJECT 参与者信息）不加——ALS 键原位不被打扰。
+  want_tn <- "VISIT" %in% names(df) && "TNAME" %in% names(df)
+  if (want_tn) attr(df[["TNAME"]], "label") <- "表单名称"
+  tn <- unique(chr_(df[["TNAME"]]))
+  oid <- ALS_ORD$name2oid[tn[!is.na(tn) & tn != ""]]
+  oid <- unique(unname(oid[!is.na(oid)]))
+  if (!length(oid)) return(df)
+  alsvars <- unique(unlist(lapply(oid, function(o) ALS_ORD$ord[[o]])))
+  sascols <- unique(unlist(lapply(oid, function(o) if (o %in% names(rawdata)) names(rawdata[[o]]) else character(0))))
+  keep <- names(df)[!(names(df) %in% sascols) |
+                      names(df) %in% c(alsvars, ALS_KEYS, if (want_tn) "TNAME")]
+  keep <- setdiff(keep, ".inv")
+  df <- df[, keep, drop = FALSE]
+  ## ALS 已定义的键（如 SUBJECT 的 SITEID/SUBJID/STATUS）按 ALS 原位走，不前置——
+  ## 避免"中心编号"被提到最前而与 ALS 里相邻的"中心名称"拆开；
+  ## 仅 ALS 未定义的导出键（普通表单的 SITEID/SUBJID/STATUS/VISIT）才前置
+  lead <- intersect(setdiff(c("SITEID", "SUBJID", "STATUS", "VISIT"), alsvars), names(df))
+  als_here <- alsvars[alsvars %in% names(df)]
+  subid <- intersect(c("SUBTRID", "CSN"), names(df))
+  e1 <- intersect(unname(ALS_ORD$emb1[oid]), names(df))
+  tnv <- if (want_tn) "TNAME" else character(0)
+  if (length(e1)) {
+    i <- match(e1[1], als_here)
+    ord <- c(lead, tnv, "RECORDID", als_here[seq_len(i - 1)], subid, als_here[i:length(als_here)])
+  } else {
+    ord <- c(lead, tnv, "RECORDID", als_here, subid)
+  }
+  ord <- unique(intersect(ord, names(df)))
+  rest <- setdiff(names(df), ord)
+  df[, c(ord, rest), drop = FALSE]
+}, error = function(err) { cat("als_arrange skip:", conditionMessage(err), "\n"); df })
+
+## 源数据中文 label 登记（dplyr/cbind 链路可能丢 attr，写盘前按变量名恢复）
+SRC_LABELS <- local({
+  labs <- character(0)
+  for (nm in names(rawdata)) {
+    d <- rawdata[[nm]]
+    for (cc in names(d)) {
+      l <- attr(d[[cc]], "label")
+      if (!is.null(l) && !is.na(l) && nzchar(l) && !cc %in% names(labs)) labs[cc] <- l
+    }
+  }
+  labs
+})
+
+## 编码解码：FORMATS(FMTNAME/START/LABEL) -> dec(格式名, 值)
+FMT <- rawdata$FORMATS %>%
+  transmute(FMTNAME, KEY = as.character(START), LABEL = as.character(LABEL)) %>%
+  filter(!is.na(KEY), KEY != "") %>% distinct(FMTNAME, KEY, .keep_all = TRUE)
+dec <- function(fmt, x) {
+  m <- FMT %>% filter(FMTNAME == fmt)
+  if (!nrow(m)) return(as.character(x))
+  idx <- match(as.character(x), m$KEY)
+  out <- as.character(x); hit <- !is.na(idx)
+  out[hit] <- m$LABEL[idx[hit]]; out
+}
+YN  <- function(x) dec("IEYN", x)          # 1=是 2=否 3=不适用（各 PERF/YN 共用编码）
+yn  <- YN                                  # 小写别名（历史习惯）
+CLS <- function(x) dec("VSCLSIG1A", x)     # 1=正常 2=异常无临床意义 3=异常有临床意义 4=未查
+
+## ---- 全局值解码（2026-09-09 按参考程序 KXZY-GB08 decode_by_sasfmt 经验补齐）----
+## 按每列自身 format.sas 绑定把编码值替换为中文标签：Raw data 原样指的是记录/列
+## 结构不动，编码值必须解码成中文才是 DM 可读的"原样"（此前只解码了显式 dec()
+## 涉及的列，Raw data 直出列残留 1/2 裸码，如 是否药物滥用史/是否筛选成功）。
+## 安全性已实测：勾选手项列（AEACN_1/2/3/99）、VISITOID、INV/TID/RECORDID/SID/
+## SUBJID 等逻辑键列均无 format.sas 绑定不受影响；下游逻辑取值全部经 dec()/YN()
+## （未命中原样返回、幂等），日期列 YYMMDD 不在 FORMATS 值域目录内自动跳过。
+decode_by_sasfmt <- function(d) {
+  for (cc in setdiff(names(d), "VISITNAME")) {   # VISITNAME 的解码由 vlab/vis_scope 负责，预解码会破坏 vlab 回退判断
+    f <- attr(d[[cc]], "format.sas")
+    if (is.null(f) || !nzchar(f) || f == "$") next
+    m <- FMT[FMT$FMTNAME == sub("^\\$", "", f), ]
+    if (!nrow(m)) next
+    v   <- as.character(d[[cc]])
+    idx <- match(v, m$KEY)
+    hit <- !is.na(idx)
+    if (any(hit)) {
+      lab <- attr(d[[cc]], "label")
+      v[hit] <- m$LABEL[idx[hit]]
+      d[[cc]] <- v
+      attr(d[[cc]], "label") <- lab        # 赋值丢 attr，还原 ALS 表头
+    }
+  }
+  d
+}
+rawdata <- lapply(rawdata, decode_by_sasfmt)
+
+## ---- 小工具（公共） ----
+blank <- function(x) is.na(x) | trimws(as.character(x)) == ""
+any_kw <- function(x, kws) {                     # 多关键词命中（fixed，locale 安全）
+  hit <- rep(FALSE, length(x))
+  for (k in kws) hit <- hit | grepl(k, x, fixed = TRUE)
+  hit
+}
+num_  <- function(x) suppressWarnings(as.numeric(as.character(x)))
+chr_  <- function(x) as.character(x)
+dt_   <- function(x) {
+  if (inherits(x, "Date")) return(x)
+  s <- trimws(as.character(x)); s[grepl("^(UK|UNK|NA|)$", s, ignore.case = TRUE)] <- NA
+  d <- suppressWarnings(as.Date(s, format = "%Y-%m-%d"))
+  p7 <- !is.na(s) & is.na(d) & nchar(s) == 7                       # "2026-07" -> "2026-07-01"
+  if (any(p7)) {
+    d[p7] <- suppressWarnings(as.Date(paste0(s[p7], "-01"), format = "%Y-%m-%d"))
+  }
+  d
+}
+dts <- function(x) { d <- dt_(x); ifelse(is.na(d), "", format(d, "%Y-%m-%d")) }
+## 匹配列日期：完整日期规范化输出；部分未知（如 2025-02-UK）原样保留；空值输出空。
+## dts 会把 UK 部分日期吞成空，匹配列丢失"开始日期部分未知"信息，
+## 与 Raw data 列/Condition 按 UK 字符串判定的项目口径不一致（2026-09-11 DM 复审修复）
+dts_raw <- function(x) {
+  s <- trimws(as.character(x)); s[is.na(s)] <- ""
+  out <- rep("", length(s))
+  ok <- grepl("^\\d{4}-\\d{2}-\\d{2}$", s)
+  out[ok] <- s[ok]
+  part <- !ok & nzchar(s) & !grepl("^(UK|UNK|NA)$", s, ignore.case = TRUE)
+  out[part] <- s[part]
+  out
+}
+vlab <- function(oid, vname) {
+  d <- dec("VISITNAME", vname)
+  d <- ifelse(blank(d) | d == chr_(vname), paste0("访视", chr_(oid)), d)
+  ifelse(blank(chr_(oid)), d, paste0(d, "(", chr_(oid), ")"))
+}
+norm_t <- function(x) gsub("[[:space:][:punct:]]+", "", toupper(as.character(x)))
+SPLIT_SEP <- "\r"                                # 内部占位分隔符（ASCII，locale 安全）
+sep_norm <- function(s) {                        # 各类分隔符统一为 SPLIT_SEP（fixed，免正则）
+  for (sep in c("；", "、", "，", ";", ",")) s <- gsub(sep, SPLIT_SEP, s, fixed = TRUE)
+  s
+}
+split_ids <- function(s) {
+  if (length(s) == 0) return(character(0))
+  out <- trimws(unlist(strsplit(sep_norm(as.character(s)), SPLIT_SEP, fixed = TRUE)))
+  out[!is.na(out) & out != ""]
+}
+first_id <- function(s) {                       # "2,呕吐,2026-07-02；1,恶心,..." -> "2"
+  v <- sapply(seq_along(s), function(i) {
+    t <- split_ids(s[i]); if (!length(t)) return(NA_character_)
+    ifelse(grepl("^[0-9]+", t[1]), sub("^([0-9]+).*", "\\1", t[1]), t[1]) })
+  as.character(v)
+}
+ae_ids <- function(s) {                         # 按"；"分段，每段取开头编号 -> c("2","1")
+  out <- character(0)
+  for (v in s) {
+    if (blank(v)) next
+    semi <- gsub(";", SPLIT_SEP, gsub("；", SPLIT_SEP, as.character(v), fixed = TRUE), fixed = TRUE)
+    seg <- trimws(unlist(strsplit(semi, SPLIT_SEP, fixed = TRUE)))
+    seg <- seg[!is.na(seg) & seg != ""]
+    for (g in seg) {
+      t <- split_ids(g)
+      if (!length(t)) next
+      out <- c(out, ifelse(grepl("^[0-9]+", t[1]), sub("^([0-9]+).*", "\\1", t[1]), t[1]))
+    }
+  }
+  out
+}
+dig5 <- function(x) { d <- gsub("\\D", "", as.character(x))
+  ifelse(nchar(d) >= 5, substr(d, nchar(d) - 4, nchar(d)), d) }
+rng_out <- function(x, lo, hi) { v <- num_(x); !is.na(v) & (v < lo | v > hi) }
+grp_flag <- function(df, key, flg = "flag") {  # 组内 >1 行 => Y（key 在数据掩码内求值）
+  key <- rlang::enquo(key)
+  df %>% mutate(.k = !!key) %>% group_by(.k) %>%
+    mutate(!!flg := if_else(dplyr::n() > 1, "Y", "")) %>%
+    ungroup() %>% select(-.k)
+}
+## 按 spec"相同的记录"判重：同键下来自不同 RECORDID（表记录）才计重复，
+## 避免同一条记录的多 logline 互相自重
+grp_flag_rec <- function(df, key, flg = "flag") {
+  key <- rlang::enquo(key)
+  df %>% mutate(.k = !!key) %>% group_by(.k) %>%
+    mutate(!!flg := if_else(dplyr::n_distinct(RECORDID) > 1, "Y", "")) %>%
+    ungroup() %>% select(-.k)
+}
+## SAS 时间（秒/hms）-> "HH:MM:SS" 文本，NA -> ""
+fmt_hms <- function(x) {
+  v <- suppressWarnings(as.numeric(x))
+  ifelse(is.na(v), "", sprintf("%02d:%02d:%02d",
+                               as.integer(v %/% 3600),
+                               as.integer((v %% 3600) %/% 60),
+                               as.integer(round(v %% 60))))
+}
+min_dt <- function(x) { x <- x[!is.na(x)]; if (length(x)) min(x) else as.Date(NA) }
+## DVP "Visits Applied To" 限定：只取该表单对应访视的数据，不取全表
+## 用法：vis_scope(ACT("MH","mh"), "既往/伴随病史")
+vis_scope <- function(df, visit_name) {
+  d <- dec("VISITNAME", df[["VISITNAME"]])
+  df[!blank(d) & d == visit_name, , drop = FALSE]
+}
+
+## ---- 失活数据（公共） ----
+INV <- rawdata$INVALID %>%
+  mutate(.k = paste(TID, RECORDID, ifelse(is.na(SUBTRID), "", trimws(as.character(SUBTRID))), sep = "|")) %>%
+  pull(.k) %>% unique()
+## ACT("AE","ae")：读取数据集并加 .inv（失活）标记
+ACT <- function(nm, tid) {
+  d <- rawdata[[nm]]
+  subv <- if (is.null(d[["SUBTRID"]])) rep("", nrow(d)) else trimws(as.character(d[["SUBTRID"]]))
+  d$.inv <- paste(tolower(tid), as.character(d$RECORDID), subv, sep = "|") %in% INV
+  d
+}
+
+## ---- 受试者状态（公共，对应模板 Taishan_Subject_Status） ----
+SUBJ_STATUS <- rawdata$SUBJECT %>%
+  transmute(SUBJKEY = dig5(SUBJID), STATUS = dec("STATUS", STATUS)) %>%
+  filter(!blank(SUBJKEY)) %>% distinct(SUBJKEY, .keep_all = TRUE)
+lead_cols <- function(df) {
+  df <- df %>% mutate(SUBJKEY = dig5(SUBJID)) %>% left_join(SUBJ_STATUS, by = "SUBJKEY") %>%
+    select(-SUBJKEY) %>% mutate(VISIT = vlab(VISITOID, VISITNAME))
+  lead <- intersect(c("SITEID", "SUBJID", "STATUS", "VISIT", "TNAME",
+                      "RECORDID", "SUBTRID", "CSN"), names(df))
+  df <- df %>% select(all_of(lead), everything())
+  if ("TNAME" %in% names(df)) attr(df[["TNAME"]], "label") <- "表单名称"   # 访视列后的表单名称列（无 ALS 时也统一表头）
+  df
+}
+
+## ---- 医学编码结果（PT 术语）装载与查询 ----
+## 编码结果 xlsx 与 sas 数据集同目录放置（服务器同步位置），文件名含"编码/coding"。
+## MedDRA sheet：第 1-2 行为版本横幅、第 3 行表头；列 Subject/RecordPosition/
+## DataPageName/TERM/pt_name（WHODrug sheet 为用药编码，如需可仿此扩展）。
+## [REPLACE] CODING_FILE：编码结果文件完整路径；留空则在 sas 同目录按文件名自动发现。
+CODING_FILE <- ""                                   # [REPLACE] 编码结果文件路径（空=sas 同目录自动发现）
+load_pt_map <- function() {
+  f <- CODING_FILE
+  ## 发现顺序：显式路径 -> sas 数据集同目录 -> 数据日期文件夹（递归，覆盖 zip 含子目录的摆法）
+  if (!nzchar(f) && nzchar(SAS_DIR)) {
+    cands <- list.files(SAS_DIR, pattern = "\\.(xlsx|csv)$", ignore.case = TRUE, full.names = TRUE)
+    cands <- cands[grepl("编码|coding", basename(cands), ignore.case = TRUE)]
+    if (length(cands)) f <- cands[1]
+  }
+  if (!nzchar(f)) {
+    cands <- list.files(folder_path, pattern = "\\.(xlsx|csv)$", ignore.case = TRUE,
+                        full.names = TRUE, recursive = TRUE)
+    cands <- cands[grepl("编码|coding", basename(cands), ignore.case = TRUE)]
+    if (length(cands)) f <- cands[1]
+  }
+  if (!nzchar(f) || !file.exists(f)) {
+    message("编码结果未提供（sas 同目录/数据日期文件夹未发现编码|coding 文件）：PT术语列取表单术语字段原值")
+    return(NULL)
+  }
+  ## openxlsx 无 getSheets 导出（报错被 tryCatch 吞掉会恒回退 "MedDRA"——编码文件
+  ## 目标页名不是 MedDRA 时读错页）；用 getSheetNames，并优先选名含 MedDRA 的页
+  sh <- tryCatch({
+    sns <- openxlsx::getSheetNames(f)
+    sns[grepl("MedDRA", sns, ignore.case = TRUE)][1]
+  }, error = function(e) NA_character_)
+  if (is.na(sh)) sh <- "MedDRA"
+  m0 <- as.data.frame(openxlsx::read.xlsx(f, sheet = sh, colNames = FALSE, skipEmptyRows = TRUE))
+  hidx <- which(apply(m0, 1, function(r) any(!is.na(r) & as.character(r) == "Subject")))[1]
+  if (is.na(hidx)) {
+    warning("编码结果文件未找到表头行（Subject），已回退：", f)
+    return(NULL)
+  }
+  body <- m0[(hidx + 1):nrow(m0), ]
+  names(body) <- as.character(unlist(m0[hidx, ]))
+  need <- c("Subject", "RecordPosition", "DataPageName", "TERM", "pt_name")
+  if (!all(need %in% names(body))) {
+    warning("编码结果 MedDRA sheet 缺少列：", paste(setdiff(need, names(body)), collapse = ","), "；已回退：", f)
+    return(NULL)
+  }
+  ## 编码导出可能把中文存成数字字符引用（如 &#26082;），openxlsx 不解析；统一解码
+  decode_ent1 <- function(s) {
+    if (is.na(s) || !grepl("&#[0-9]+;", s)) return(s)
+    m <- gregexpr("&#([0-9]+);", s, perl = TRUE)[[1]]
+    out <- ""; last <- 1
+    for (i in seq_along(m)) {
+      st <- m[i]; en <- st + attr(m, "match.length")[i] - 1
+      if (st > last) out <- paste0(out, substr(s, last, st - 1))
+      out <- paste0(out, intToUtf8(as.integer(sub("^&#([0-9]+);$", "\\1", substr(s, st, en)))))
+      last <- en + 1
+    }
+    if (last <= nchar(s)) out <- paste0(out, substr(s, last, nchar(s)))
+    out
+  }
+  decode_ent <- function(x) {
+    x <- as.character(x)
+    if (!any(grepl("&#[0-9]+;", x))) return(x)
+    vapply(x, decode_ent1, character(1), USE.NAMES = FALSE)
+  }
+  ## 解码必须在构建键之前（norm_t 会破坏实体串结构）
+  body$SUB <- tolower(decode_ent(trimws(as.character(body$Subject))))
+  body$PG  <- trimws(decode_ent(trimws(as.character(body$DataPageName))))
+  body$POS <- gsub("\\.0$", "", trimws(as.character(body$RecordPosition)))
+  body$PTV <- trimws(decode_ent(trimws(as.character(body$pt_name))))
+  body$TK  <- norm_t(decode_ent(trimws(as.character(body$TERM))))
+  body <- body[!blank(body$PTV), ]
+  ## 记录级键：受试者|页名|RecordPosition；词典级键：规范化 TERM -> PT（MedDRA 同词同 PT）
+  rec <- body[!blank(body$SUB) & !blank(body$POS), c("SUB", "PG", "POS", "PTV")]
+  rec$KEY <- paste(rec$SUB, rec$PG, rec$POS, sep = "|")
+  rec <- rec[!duplicated(rec$KEY), c("KEY", "PTV")]
+  trm <- body[!blank(body$TK), c("TK", "PTV")]
+  trm <- trm[!duplicated(trm$TK), ]
+  if (nrow(rec) + nrow(trm) == 0) {
+    warning("编码结果无有效 PT 映射，已回退：", f)
+    return(NULL)
+  }
+  cat("编码结果装载：记录级", nrow(rec), "条 / 词典级", nrow(trm), "条（", basename(f), "）\n")
+  list(REC_KEY = rec$KEY, REC_PT = rec$PTV, TRM_KEY = trm$TK, TRM_PT = trm$PTV)
+}
+PT_MAP <- load_pt_map()
+## PT 查询：记录级（受试者|页名|RecordPosition）命中 -> PT；
+##          词典级（规范化 TERM）命中 -> PT；未命中 -> 空
+##（PT术语只来自编码结果，不回退原值，避免混淆已编码/未编码）
+pt_of <- function(sid, page, pos, term) {
+  raw <- trimws(as.character(term)); raw[raw == "NA"] <- ""
+  out <- rep("", length(raw))
+  if (is.null(PT_MAP)) {
+    message("编码结果未提供：PT术语列为空（编码文件放入 sas 数据集同目录后自动匹配）")
+    attr(out, "hit") <- rep(FALSE, length(raw))
+    return(out)
+  }
+  hit <- rep(FALSE, length(raw))
+  pg <- trimws(as.character(page))
+  k1 <- paste(tolower(trimws(as.character(sid))), pg,
+              gsub("\\.0$", "", trimws(as.character(pos))), sep = "|")
+  h1 <- !blank(pg) & k1 %in% PT_MAP$REC_KEY
+  out[h1] <- PT_MAP$REC_PT[match(k1[h1], PT_MAP$REC_KEY)]; hit <- hit | h1
+  k2 <- norm_t(raw)
+  h2 <- !hit & !blank(k2) & k2 %in% PT_MAP$TRM_KEY
+  out[h2] <- PT_MAP$TRM_PT[match(k2[h2], PT_MAP$TRM_KEY)]; hit <- hit | h2
+  if (any(!hit & !blank(raw)))
+    cat("编码结果未命中 ", sum(!hit & !blank(raw)), " 条术语，PT术语置空\n")
+  attr(out, "hit") <- hit
+  out
+}
+
+## ---- 用药编码结果（WHODrug Product_Name）装载与查询 ----
+## [2026-09-11 DM 新增需求] 既往或合并用药 listing 药物名称后加一列匹配编码结果 Product_Name。
+## 与 MedDRA 同一编码文件的 WHODrug sheet；表头按"含 Subject 单元格"定位；
+## 页名键=既往及伴随用药（已对 DataPageName 实际去重值域核对：既往及伴随用药/润肤剂使用情况，
+## 本 listing 只匹配前者）；记录级（受试者|页名|RecordPosition）优先，词典级（规范化 Drug）回退，
+## 未命中置空并计数。
+load_drug_map <- function() {
+  f <- CODING_FILE
+  if (!nzchar(f) && nzchar(SAS_DIR)) {
+    cands <- list.files(SAS_DIR, pattern = "\\.(xlsx|csv)$", ignore.case = TRUE, full.names = TRUE)
+    cands <- cands[grepl("编码|coding", basename(cands), ignore.case = TRUE)]
+    if (length(cands)) f <- cands[1]
+  }
+  if (!nzchar(f)) {
+    cands <- list.files(folder_path, pattern = "\\.(xlsx|csv)$", ignore.case = TRUE,
+                        full.names = TRUE, recursive = TRUE)
+    cands <- cands[grepl("编码|coding", basename(cands), ignore.case = TRUE)]
+    if (length(cands)) f <- cands[1]
+  }
+  if (!nzchar(f) || !file.exists(f)) {
+    message("用药编码结果未提供（未发现 编码|coding 文件）：Product_Name 列取空")
+    return(NULL)
+  }
+  sheets <- tryCatch(openxlsx::getSheetNames(f), error = function(e) character(0))
+  sh <- sheets[grepl("WHODrug", sheets, ignore.case = TRUE)]
+  if (!length(sh)) { message("编码文件无 WHODrug sheet：Product_Name 列取空（", basename(f), "）"); return(NULL) }
+  m0 <- as.data.frame(openxlsx::read.xlsx(f, sheet = sh[1], colNames = FALSE, skipEmptyRows = TRUE))
+  hidx <- which(apply(m0, 1, function(r) any(!is.na(r) & as.character(r) == "Subject")))[1]
+  if (is.na(hidx)) { warning("WHODrug sheet 未找到表头行（Subject），已回退：", f); return(NULL) }
+  body <- m0[(hidx + 1):nrow(m0), ]
+  names(body) <- as.character(unlist(m0[hidx, ]))
+  need <- c("Subject", "RecordPosition", "DataPageName", "Drug", "Product_Name")
+  if (!all(need %in% names(body))) {
+    warning("编码结果 WHODrug sheet 缺少列：", paste(setdiff(need, names(body)), collapse = ","), "；已回退：", f)
+    return(NULL)
+  }
+  ## 中文数字字符引用解码（同 MedDRA 装载；构建键之前）
+  decode_ent1 <- function(s) {
+    if (is.na(s) || !grepl("&#[0-9]+;", s)) return(s)
+    m <- gregexpr("&#([0-9]+);", s, perl = TRUE)[[1]]
+    out <- ""; last <- 1
+    for (i in seq_along(m)) {
+      st <- m[i]; en <- st + attr(m, "match.length")[i] - 1
+      if (st > last) out <- paste0(out, substr(s, last, st - 1))
+      out <- paste0(out, intToUtf8(as.integer(sub("^&#([0-9]+);$", "\\1", substr(s, st, en)))))
+      last <- en + 1
+    }
+    if (last <= nchar(s)) out <- paste0(out, substr(s, last, nchar(s)))
+    out
+  }
+  decode_ent <- function(x) {
+    x <- as.character(x)
+    if (!any(grepl("&#[0-9]+;", x))) return(x)
+    vapply(x, decode_ent1, character(1), USE.NAMES = FALSE)
+  }
+  body$SUB <- tolower(decode_ent(trimws(as.character(body$Subject))))
+  body$POS <- gsub("\\.0$", "", trimws(as.character(body$RecordPosition)))
+  body$PG  <- trimws(decode_ent(trimws(as.character(body$DataPageName))))
+  body$PN  <- trimws(decode_ent(trimws(as.character(body$Product_Name))))
+  body$TK  <- norm_t(decode_ent(trimws(as.character(body$Drug))))
+  body <- body[!blank(body$PN), ]
+  rec <- body[!blank(body$SUB) & !blank(body$POS), c("SUB", "PG", "POS", "PN")]
+  rec$KEY <- paste(rec$SUB, rec$PG, rec$POS, sep = "|")
+  rec <- rec[!duplicated(rec$KEY), c("KEY", "PN")]
+  trm <- body[!blank(body$TK), c("TK", "PN")]
+  trm <- trm[!duplicated(trm$TK), ]
+  if (nrow(rec) + nrow(trm) == 0) { warning("WHODrug 编码无有效 Product_Name 映射，已回退：", f); return(NULL) }
+  cat("用药编码装载：记录级", nrow(rec), "条 / 词典级", nrow(trm), "条（", basename(f), "）\n")
+  list(REC_KEY = rec$KEY, REC_PN = rec$PN, TRM_KEY = trm$TK, TRM_PN = trm$PN)
+}
+DRUG_MAP <- load_drug_map()
+## Product_Name 查询：记录级（受试者|页名|RecordPosition）命中 -> 词典级（规范化 Drug）-> 空
+drug_of <- function(sid, pos, term) {
+  raw <- trimws(as.character(term)); raw[raw == "NA"] <- ""
+  out <- rep("", length(raw))
+  if (is.null(DRUG_MAP)) {
+    message("用药编码结果未提供：Product_Name 列为空（编码文件放入 sas 数据集同目录后自动匹配）")
+    return(out)
+  }
+  pg <- "既往及伴随用药"   # 页名键已对编码文件 DataPageName 实际值域核对
+  k1 <- paste(tolower(trimws(as.character(sid))), pg,
+              gsub("\\.0$", "", trimws(as.character(pos))), sep = "|")
+  h1 <- k1 %in% DRUG_MAP$REC_KEY
+  out[h1] <- DRUG_MAP$REC_PN[match(k1[h1], DRUG_MAP$REC_KEY)]
+  k2 <- norm_t(raw)
+  h2 <- !h1 & !blank(k2) & k2 %in% DRUG_MAP$TRM_KEY
+  out[h2] <- DRUG_MAP$TRM_PN[match(k2[h2], DRUG_MAP$TRM_KEY)]
+  if (any(!h1 & !h2 & !blank(raw)))
+    cat("用药编码未命中 ", sum(!h1 & !h2 & !blank(raw)), " 条，Product_Name 置空\n")
+  out
+}
+
+# >>> DSH-BUSINESS-ZONE:context <<< harness AI 业务生成区（B1：受试者上下文与项目参照表，模板零业务值）
+stop("业务生成区 [context] 未生成：本模板不含业务逻辑——由 harness AI 识别本项目 DVP/ALS/EDC 后",
+     "先过 U-Gate 需求理解自审（矩阵+红队三类必查+需求态考古，见 router/AGENTS），",
+     "再按文件头生成区契约（B1-B3 与场景库 manual 口径终案表）生成 context/listings/titles 三区，以 render=false 运行")
+# <<< DSH-BUSINESS-ZONE:context >>>
+## CS 判定（"检查结果为CS" = 临床意义判定 = 异常有临床意义；编码已确证 1正常 2异常无 3异常有）
+cs_flag <- function(x) dec("VSCLSIG1A", x) == "异常有临床意义"
+## 生命体征一行多个检查项（VSCLSIG1..4），任一项 CS 即视为 CS 行
+vs_any_cs <- function(d) {
+  m <- sapply(paste0("VSCLSIG", 1:4), function(cc) {
+    if (is.null(d[[cc]])) logical(nrow(d)) else cs_flag(d[[cc]])
+  })
+  if (is.null(dim(m))) m else as.vector(rowSums(m) > 0)
+}
+
+## CS/编号 匹配展开（DVP Condition：当检查结果为CS时匹配；多选拆分，一行仅显示一条）
+## cs：逻辑向量，TRUE 的行才抓取病史/AE 信息；非 CS 行匹配列留空、不拆分
+expand_ref <- function(df, cs = rep(TRUE, nrow(df))) {
+  rows <- list(); k <- 0
+  for (i in seq_len(nrow(df))) {
+    r <- as.data.frame(df[i, ])
+    do_m <- isTRUE(cs[i])
+    mi <- if (do_m) ae_ids(r$MHNO) else character(0)
+    ai <- if (do_m) ae_ids(r$AENO) else character(0)
+    ids <- c(if (length(mi)) paste0("M|", mi), if (length(ai)) paste0("A|", ai))
+    if (!length(ids)) {
+      k <- k + 1
+      rows[[k]] <- cbind(r, `匹配病史/AE编号` = "", `匹配病史/AE名称` = "",
+                         `匹配病史/AE开始日期` = "", `匹配病史/AE结束日期` = "")
+      next
+    }
+    for (kk in ids) {
+      tt <- substr(kk, 1, 1); idd <- substr(kk, 3, nchar(kk))
+      if (tt == "M") {
+        j <- match(paste(r$SID, idd), paste(MH_A$SID, MH_A$CSNc))
+        v <- data.frame(`匹配病史/AE编号` = idd,
+                        `匹配病史/AE名称` = ifelse(is.na(j), "", chr_(MH_A$MHTERM[j])),
+                        `匹配病史/AE开始日期` = ifelse(is.na(j), "", dts_raw(MH_A$MHSTDAT[j])),
+                        `匹配病史/AE结束日期` = ifelse(is.na(j), "", dts_raw(MH_A$MHENDAT[j])),
+                        check.names = FALSE)
+      } else {
+        j <- match(paste(r$SID, idd), paste(AE_A$SID, AE_A$CSNc))
+        v <- data.frame(`匹配病史/AE编号` = idd,
+                        `匹配病史/AE名称` = ifelse(is.na(j), "", chr_(AE_A$AETERM[j])),
+                        `匹配病史/AE开始日期` = ifelse(is.na(j), "", dts_raw(AE_A$AESTDAT[j])),
+                        `匹配病史/AE结束日期` = ifelse(is.na(j), "", dts_raw(AE_A$AEENDAT[j])),
+                        check.names = FALSE)
+      }
+      k <- k + 1; rows[[k]] <- cbind(r, v)
+    }
+  }
+  dplyr::bind_rows(rows)
+}
+## 生命体征系列：一行含 4 个测量项，各有独立的 判定/编号 列组
+## （VSCLSIG1-4 = 体温/脉搏/呼吸频率/血压临床意义判定 + MHNO1-4/AENO1-4）。
+## 判定为 CS 的测量项按其编号抓取匹配；spec 仍要求一条匹配一行拆分
+expand_ref_vs <- function(d) {
+  rows <- list(); k <- 0
+  for (i in seq_len(nrow(d))) {
+    r <- as.data.frame(d[i, ])
+    ids <- character(0)
+    for (n in 1:4) {
+      cc <- paste0("VSCLSIG", n)
+      if (is.null(r[[cc]]) || !isTRUE(cs_flag(r[[cc]]))) next
+      mi <- ae_ids(r[[paste0("MHNO", n)]]); ai <- ae_ids(r[[paste0("AENO", n)]])
+      ids <- c(ids, if (length(mi)) paste0("M|", mi), if (length(ai)) paste0("A|", ai))
+    }
+    if (!length(ids)) {
+      k <- k + 1
+      rows[[k]] <- cbind(r, `匹配病史/AE编号` = "", `匹配病史/AE名称` = "",
+                         `匹配病史/AE开始日期` = "", `匹配病史/AE结束日期` = "")
+      next
+    }
+    for (kk in ids) {
+      tt <- substr(kk, 1, 1); idd <- substr(kk, 3, nchar(kk))
+      if (tt == "M") {
+        j <- match(paste(r$SID, idd), paste(MH_A$SID, MH_A$CSNc))
+        v <- data.frame(`匹配病史/AE编号` = idd,
+                        `匹配病史/AE名称` = ifelse(is.na(j), "", chr_(MH_A$MHTERM[j])),
+                        `匹配病史/AE开始日期` = ifelse(is.na(j), "", dts_raw(MH_A$MHSTDAT[j])),
+                        `匹配病史/AE结束日期` = ifelse(is.na(j), "", dts_raw(MH_A$MHENDAT[j])),
+                        check.names = FALSE)
+      } else {
+        j <- match(paste(r$SID, idd), paste(AE_A$SID, AE_A$CSNc))
+        v <- data.frame(`匹配病史/AE编号` = idd,
+                        `匹配病史/AE名称` = ifelse(is.na(j), "", chr_(AE_A$AETERM[j])),
+                        `匹配病史/AE开始日期` = ifelse(is.na(j), "", dts_raw(AE_A$AESTDAT[j])),
+                        `匹配病史/AE结束日期` = ifelse(is.na(j), "", dts_raw(AE_A$AEENDAT[j])),
+                        check.names = FALSE)
+      }
+      k <- k + 1; rows[[k]] <- cbind(r, v)
+    }
+  }
+  dplyr::bind_rows(rows)
+}
+## 仅 AE 编号列展开（注射部位反应等单列场景）
+## with_dis=TRUE：附匹配 AE 的 是否导致试验参与者退出试验？（治疗结束 listing，
+## 编号拆分一行一条 + 是否导致退出列，取代"全量退出=是 AE join"口径）
+expand_ae <- function(df, ae_col, with_dis = FALSE) {
+  rows <- list(); k <- 0
+  for (i in seq_len(nrow(df))) {
+    r <- as.data.frame(df[i, ]); ai <- ae_ids(r[[ae_col]])
+    if (!length(ai)) {
+      k <- k + 1
+      rows[[k]] <- if (with_dis)
+        cbind(r, 匹配AE编号 = "", 匹配AE名称 = "", 匹配AE开始日期 = "", 匹配AE结束日期 = "",
+              `是否导致试验参与者退出试验？` = "")
+      else cbind(r, 匹配AE编号 = "", 匹配AE名称 = "", 匹配AE开始日期 = "", 匹配AE结束日期 = "")
+      next
+    }
+    for (id in ai) {
+      j <- match(paste(r$SID, id), paste(AE_A$SID, AE_A$CSNc))
+      base <- cbind(r, 匹配AE编号 = id,
+                   匹配AE名称 = ifelse(is.na(j), "", chr_(AE_A$AETERM[j])),
+                   匹配AE开始日期 = ifelse(is.na(j), "", dts_raw(AE_A$AESTDAT[j])),
+                   匹配AE结束日期 = ifelse(is.na(j), "", dts_raw(AE_A$AEENDAT[j])))
+      k <- k + 1
+      rows[[k]] <- if (with_dis)
+        cbind(base, `是否导致试验参与者退出试验？` = ifelse(is.na(j), "", yn0(YN(AE_A$AEDIS[j]))))
+      else base
+    }
+  }
+  dplyr::bind_rows(rows)
+}
+## 字段清单型 listing 的收尾：状态 + 访视展示列 + 前导列（等价 lead_cols 但保留字段筛选）
+finish_fields <- function(df) {
+  df <- df %>% mutate(SUBJKEY = dig5(SUBJID)) %>% left_join(SUBJ_STATUS, by = "SUBJKEY") %>%
+    select(-SUBJKEY) %>% mutate(VISIT = vlab(VISITOID, VISITNAME))
+  leadc <- intersect(c("SITEID", "SUBJID", "STATUS", "VISIT", "TNAME", "RECORDID", "SUBTRID", "CSN"),
+                     names(df))
+  df <- df %>% select(all_of(leadc), everything())
+  if ("TNAME" %in% names(df)) attr(df[["TNAME"]], "label") <- "表单名称"
+  df
+}
+cat("common ready:", length(rawdata), "datasets,", nrow(CTX), "subjects\n")
+
+# >>> DSH-BUSINESS-ZONE:listings <<< harness AI 业务生成区（B2：DVP 逐行 outlisting 装配，模板零业务值）
+stop("业务生成区 [listings] 未生成：DVP 每一需求行一节装配 outlisting——按文件头生成区契约 B2 生成后重跑")
+# <<< DSH-BUSINESS-ZONE:listings >>>
+
+# >>> DSH-BUSINESS-ZONE:titles <<< harness AI 业务生成区（B3：LISTING_TITLES 显示词表，模板零业务值）
+stop("业务生成区 [titles] 未生成：LISTING_TITLES=ALS 官方词汇——按文件头生成区契约 B3 生成后重跑")
+# <<< DSH-BUSINESS-ZONE:titles >>>
+
+## 输出样式：对齐 dsh listing 插件 LISTING_MULTI_SHEET_SPEC.md（manual 场景）##
+##   Content 首页 + 业务页（返回链接/Label表头/冻结A3/筛选/隐藏网格线）    ##
+## ------------------------------------------------------------------ ##
+dir.create(work_root, showWarnings = FALSE, recursive = TRUE)
+setwd(work_root)
+## ALS 兜底重排：核查节未自行 als_arrange 的新项目由这里统一执行；
+## 已执行的（.als_applied）跳过——二次重排会把按 spec 锚回的派生列再次甩尾
+if (exists("als_arrange") && !exists(".als_applied")) {
+  outlisting <- lapply(outlisting, als_arrange)
+  cat("als_arrange done\n")
+}
+saveRDS(outlisting, file = out_file("RDS"))
+
+## [REPLACE R10] TAISHAN 模板的旧版比对输出（本项目暂无旧版，样式规格直接落盘）：
+##   ##   olddata <- readRDS(out_file("RDS", paste0("(vs", old_folder, ")")))
+##   compare_data(compare_New_file = outlisting, compare_Old_file = olddata,
+##                config_table = config_table, ...,
+##                ##                output_path = out_file("xlsx", paste0(
+##                                     
+
+## RT01 manual 固定审核列：FLAG(New/Modified/Old)（首版=New）、Update Detail、
+## Review Comments、Initial/Date 供 DM 填写。
+## 注意：Flag1 只在该行 DVP 本身有 flag 逻辑时存在，不为凑格式注入空列。
+append_audit_cols <- function(df) {
+  df <- as.data.frame(df)
+  for (cc in names(df)) {                              # 日期/时间转文本，避免 openxlsx 数字化
+    if (inherits(df[[cc]], "Date")) {                  # 纯日期按原始 SAS 数据集显示形态（不带时间后缀）
+      lab <- attr(df[[cc]], "label")                   # format() 会丢 attr label，先保后还原
+      df[[cc]] <- format(df[[cc]], "%Y-%m-%d")
+      attr(df[[cc]], "label") <- lab
+    } else if (inherits(df[[cc]], "POSIXt")) {
+      lab <- attr(df[[cc]], "label")
+      df[[cc]] <- format(df[[cc]], "%Y-%m-%d %H:%M:%S")
+      attr(df[[cc]], "label") <- lab
+    }
+  }
+  for (cc in names(df)) {                              # SAS 时间(hms/difftime) -> HH:MM:SS 文本，NA 落空
+    if (inherits(df[[cc]], "difftime")) {
+      v <- suppressWarnings(as.numeric(df[[cc]]))
+      df[[cc]] <- ifelse(is.na(v), NA_character_,
+                         sprintf("%02d:%02d:%02d", as.integer(v %/% 3600),
+                                 as.integer((v %% 3600) %/% 60), as.integer(round(v %% 60))))
+    }
+  }
+  ## 注：不清洗字面 "NA"——源数据中存在录入为 "NA" 的真实值（如单位），
+  ## 时间列的 NA 显示问题已由上方 hms -> HH:MM:SS 转换解决
+  df[["FLAG(New/Modified/Old)"]] <- rep("New", nrow(df))   # 首次交付，无旧版比对
+  df[["Update Detail"]] <- rep("", nrow(df))
+  df[["Review Comments"]] <- rep("", nrow(df))
+  df[["Initial/Date"]] <- rep("", nrow(df))
+  df
+}
+lab_of <- function(df, col) {
+  l <- attr(df[[col]], "label")
+  if (is.null(l) || is.na(l) || !nzchar(l)) col else l
+}
+STY <- list(
+  title_c = createStyle(fontName = "Times New Roman", fontSize = 16,
+                        textDecoration = "bold", halign = "center", valign = "center"),
+  title_s = createStyle(fontName = "Times New Roman", fontSize = 14,
+                        textDecoration = "bold"),
+  header  = createStyle(fontName = "Times New Roman", fontSize = 13,
+                        textDecoration = "bold", fgFill = "#EDF2F9",
+                        halign = "center", valign = "center", wrapText = TRUE,
+                        border = "TopBottomLeftRight", borderStyle = "thin"),
+  data    = createStyle(fontName = "Times New Roman", fontSize = 13,
+                        valign = "center",
+                        border = "TopBottomLeftRight", borderStyle = "thin"),
+  link    = createStyle(fontName = "Times New Roman", fontSize = 13,
+                        fontColour = "#0563C1", textDecoration = "underline"),
+  link_bd = createStyle(fontName = "Times New Roman", fontSize = 13,
+                        fontColour = "#0563C1", textDecoration = "underline",
+                        border = "TopBottomLeftRight", borderStyle = "thin")
+)
+write_listing_sheet <- function(wb, nm, df0, ttl = NULL) {
+  ## nm：Sheet 名/显示名（已去掉 Manual_ 前缀）；返回链接文本按惯例为 "go back"
+  df  <- append_audit_cols(df0)
+  ## 剔除内部辅助列与 EDC 系统/审计列（对齐 KXZY drop_sys_varible_baiaozhi 清单），
+  ## 只在写盘层裁——RDS/比对仍保留全列；唯一值序号/键列（TNAME/RECORDID/SUBTRID/CSN）
+  ## 按需求保留，访视显示用 lead_cols 的解码 VISIT 列（原始 OID 码列一并裁掉）
+  drop_internal <- c(".inv", "PERF", "CSNc", "AESTd", "AEENDd", "MHSTd", "MHENDd",
+                     "CMSTd", "CMENDd", "PRSTd", "PRENd", "LBDATEd", "DSSTDATd",
+                     "DTHDATd", "DSLSTDATd", "ICDATd", "ICREDATd", "ECDATd", "VISDATd",
+                     "DSENDATd",
+                     "STUDYCODE", "SID", "TID", "SVNUM", "VISITOID", "VISITNAME",
+                     "CRFSTS", "CRFVER", "CUSERN", "CROLE", "CTIME", "MUSERN", "MROLE", "MTIME")
+  ## INVNAM（研究者）不在清单：SUBJECT 的 ALS 定义它是表单字段（普通表单由
+  ## als_arrange 按 ALS 裁掉；源数据本就全空）
+  df <- df[, !names(df) %in% drop_internal, drop = FALSE]
+  n   <- nrow(df); p <- ncol(df)
+  addWorksheet(wb, nm)
+  ## 网格线保持 Excel 默认显示（如需对齐 RT01 规范隐藏，改回 showGridLines = FALSE）
+  ## 第1行：A1 返回 Content 链接；B1:F1 合并显示中文表单名（2026-09-10 DM 口径，
+  ## 对齐 EDC 模板；ttl 参数 = Content 循环传入的显示标题（含同名（代码）去重后缀，
+  ## B1 与 Content 一致）；缺项回退 LISTING_TITLES/sheet 名）
+  writeFormula(wb, nm, 'HYPERLINK("#Content!A1","go back")', startCol = 1, startRow = 1)
+  addStyle(wb, nm, STY$link, rows = 1, cols = 1, stack = FALSE)
+  endm <- min(6, max(p, 2))
+  ttl1 <- if (!is.null(ttl) && nzchar(ttl)) ttl else
+    if (exists("LISTING_TITLES") && nm %in% names(LISTING_TITLES)) LISTING_TITLES[[nm]] else nm
+  writeData(wb, nm, data.frame(x = ttl1), startRow = 1, startCol = 2, colNames = FALSE)
+  if (endm > 2) mergeCells(wb, nm, cols = 2:endm, rows = 1)
+  addStyle(wb, nm, STY$title_s, rows = 1, cols = 2:endm, stack = FALSE)
+  ## 第2行：Label 表头（attr 标签优先；attr 丢失时按变量名从源数据恢复；缺失回退变量名）
+  labs <- vapply(names(df), function(cc) {
+    l <- lab_of(df, cc)
+    if (identical(l, cc) && cc %in% names(SRC_LABELS)) l <- SRC_LABELS[[cc]]
+    l
+  }, character(1))
+  ## 重名列消歧：同名 label 从第二个起追加"（变量名）"，便于 DM 与程序化解析区分
+  dupl <- duplicated(labs)
+  if (any(dupl)) labs[dupl] <- paste0(labs[dupl], "（", names(df)[dupl], "）")
+  writeData(wb, nm, t(labs), startRow = 2, colNames = FALSE)
+  addStyle(wb, nm, STY$header, rows = 2, cols = 1:p, stack = FALSE)
+  setRowHeights(wb, nm, rows = 2, heights = 60)
+  ## 第3行起：数据；空表写一行带边框的占位行，保持表格线可见
+  if (n > 0) {
+    writeData(wb, nm, df, startRow = 3, colNames = FALSE)
+    addStyle(wb, nm, STY$data, rows = 3:(n + 2), cols = 1:p, stack = FALSE, gridExpand = TRUE)
+    addFilter(wb, nm, rows = 2, cols = 1:p)
+  } else {
+    ph <- matrix(c("无数据记录", rep("", max(p - 1, 0))), nrow = 1)
+    writeData(wb, nm, ph, startRow = 3, colNames = FALSE)
+    addStyle(wb, nm, STY$data, rows = 3, cols = 1:p, stack = FALSE, gridExpand = TRUE)
+  }
+  freezePane(wb, nm, firstActiveRow = 3)
+  ## 列宽自适应（表头/数据最大字符宽，上限60下限10）
+  wdt <- vapply(names(df), function(cc) {
+    v <- as.character(df[[cc]]); v <- v[!is.na(v)]
+    m <- max(c(nchar(lab_of(df, cc)), if (length(v)) max(nchar(v)) else 0), na.rm = TRUE)
+    min(60, max(10, 1.3 * m))
+  }, numeric(1))
+  setColWidths(wb, nm, cols = 1:p, widths = wdt)
+}
+wb <- createWorkbook()
+## openxlsx 4.x 的 genBaseSheetRels 会在建 sheet 时写悬空的 drawing/vml 关系
+##（无对应文件；Excel 可打开，openpyxl/pandas 等严格解析器报错）。
+## 建表前临时收口：只保留真实存在的 printerSettings 关系，写盘后恢复原函数。
+genBaseSheetRels_fixed <- function(sheetInd) {
+  sprintf('<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/printerSettings" Target="../printerSettings/printerSettings%s.bin"/>', sheetInd)
+}
+genBaseSheetRels_orig <- openxlsx:::genBaseSheetRels
+assignInNamespace("genBaseSheetRels", genBaseSheetRels_fixed, ns = "openxlsx")
+on.exit(assignInNamespace("genBaseSheetRels", genBaseSheetRels_orig, ns = "openxlsx"), add = TRUE)
+## Content 首页（固定结构与列宽；网格线保持 Excel 默认）
+addWorksheet(wb, "Content")
+writeData(wb, "Content", "Comparison Summary", startCol = 1, startRow = 1)
+mergeCells(wb, "Content", cols = 1:7, rows = 1)
+addStyle(wb, "Content", STY$title_c, rows = 1, cols = 1, stack = FALSE)
+writeData(wb, "Content", t(c("Listing Seq.", "Form Name", "New/Modified ?",
+                             "Total", "New", "Modified", "Old")),
+          startRow = 2, colNames = FALSE)
+addStyle(wb, "Content", STY$header, rows = 2, cols = 1:7, stack = FALSE)
+## Content Form Name 显示中文表单名（对齐 EDC 模板；来源=DVP Form Name 列）：
+## 核查节提供 LISTING_TITLES（按 sheet 名键控）则用之，否则回退 sheet 名。
+## [2026-09-10 DM 口径] 同名表单多个 listing 时 DM 无法区分——重名标题追加
+## （sheet 名）后缀保持唯一（与 spec Unique ID 回写的 listing 代码互为溯源）
+cttl <- vapply(names(outlisting), function(nm) {
+  n2 <- sub("^Manual_", "", nm)
+  if (exists("LISTING_TITLES") && n2 %in% names(LISTING_TITLES)) LISTING_TITLES[[n2]] else n2
+}, character(1))
+dup_t <- names(table(cttl))[table(cttl) > 1]
+cttl[cttl %in% dup_t] <- paste0(cttl[cttl %in% dup_t], "（", sub("^Manual_", "", names(cttl))[cttl %in% dup_t], "）")
+i <- 0
+for (nm in names(outlisting)) {
+  i <- i + 1
+  d   <- as.data.frame(outlisting[[nm]])
+  nm2 <- sub("^Manual_", "", nm)          # Sheet 名/显示名不带 Manual_ 前缀
+  ttl <- cttl[[nm]]
+  write_listing_sheet(wb, nm2, d, ttl = ttl)   # B1 页名与 Content 同款（含同名去重后缀）
+  r <- 2 + i
+  writeData(wb, "Content", sprintf("%02d", i), startCol = 1, startRow = r, colNames = FALSE)
+  writeFormula(wb, "Content",
+               sprintf('HYPERLINK("#\'%s\'!A1","%s")', nm2, ttl), startCol = 2, startRow = r)
+  writeData(wb, "Content", "New", startCol = 3, startRow = r, colNames = FALSE)
+  writeData(wb, "Content", nrow(d), startCol = 4, startRow = r, colNames = FALSE)
+  writeData(wb, "Content", nrow(d), startCol = 5, startRow = r, colNames = FALSE)
+  writeData(wb, "Content", 0, startCol = 6, startRow = r, colNames = FALSE)
+  writeData(wb, "Content", 0, startCol = 7, startRow = r, colNames = FALSE)
+  addStyle(wb, "Content", STY$data, rows = r, cols = c(1, 3:7), stack = FALSE)
+  addStyle(wb, "Content", STY$link_bd, rows = r, cols = 2, stack = FALSE)
+}
+freezePane(wb, "Content", firstActiveRow = 3)
+## openxlsx 写入时自动 +0.7109375 边距，传裸宽度使 XML 值等于规范定值
+setColWidths(wb, "Content", cols = 1:7,
+             widths = c(16, 50, 18, 9, 8, 12, 8))
+## openxlsx 4.x 的 genBaseSheetRels 会给每个 sheet 写悬空的 drawing/vml 关系
+##（无对应文件；Excel 可打开，openpyxl/pandas 等严格解析器报错）。
+## 保存前临时收口：只保留真实存在的 printerSettings 关系，保存后恢复原函数。
+genBaseSheetRels_fixed <- function(sheetInd) {
+  sprintf('<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/printerSettings" Target="../printerSettings/printerSettings%s.bin"/>', sheetInd)
+}
+genBaseSheetRels_orig <- openxlsx:::genBaseSheetRels
+assignInNamespace("genBaseSheetRels", genBaseSheetRels_fixed, ns = "openxlsx")
+saveWorkbook(wb, out_file("xlsx"), overwrite = TRUE)
+## 保存后自检：sheet 数 = listing 数 + Content；不符则告警并列出实际 sheet
+chk <- getSheetNames(out_file("xlsx"))
+if (length(chk) != length(outlisting) + 1L)
+  warning("sheet数异常: ", length(chk), "（期望 ", length(outlisting) + 1L, "）-> ",
+          paste(chk, collapse = ", "))
+
+cat("done:", length(outlisting), "listings ->", work_root, "\n")
+
+
+## ------------------------------------------------------------------ ##
+## 运行摘要（宿主 enterprise_listing_run_r 聚合回执的唯一来源）：只含      ##
+## listing 名 / 行数 / flag 数 / 产物文件名 / 告警，不含任何数据行值         ##
+## ------------------------------------------------------------------ ##
+json_str <- function(x) {
+  x <- gsub("\\", "\\\\", x, fixed = TRUE); x <- gsub("\"", "\\\"", x, fixed = TRUE)
+  x <- gsub("\r", "", x, fixed = TRUE); x <- gsub("\n", "\\n", x, fixed = TRUE)
+  x <- gsub("\t", "\\t", x, fixed = TRUE)
+  paste0("\"", x, "\"")
+}
+json_arr <- function(items) paste0("[", paste(items, collapse = ","), "]")
+flag_count <- function(d) {
+  fc <- grep("^flag", names(d), value = TRUE)
+  if (!length(fc)) return(0L)
+  sum(vapply(fc, function(cc) sum(!is.na(d[[cc]]) & nzchar(as.character(d[[cc]]))), numeric(1)))
+}
+list_items <- vapply(names(outlisting), function(nm) {
+  d <- outlisting[[nm]]
+  sprintf('{"name":%s,"sheet":%s,"rowCount":%d,"flagCount":%d}',
+          json_str(nm), json_str(sub("^Manual_", "", nm)), nrow(d), as.integer(flag_count(d)))
+}, character(1))
+summary_json <- paste0(
+  "{",
+  '"status":"ok",',
+  '"studyKey":', json_str(study_key), ",",
+  '"dataDate":', json_str(foldername), ",",
+  '"oldDate":', json_str(old_folder), ",",
+  '"listingCount":', length(outlisting), ",",
+  '"rowCount":', sum(vapply(outlisting, nrow, numeric(1))), ",",
+  '"flagCount":', sum(vapply(outlisting, flag_count, numeric(1))), ",",
+  '"sheetCount":', length(chk), ",",
+  '"outputs":', json_arr(c(json_str(out_file("xlsx")), json_str(out_file("RDS")))), ",",
+  '"warnings":', json_arr(vapply(run_warnings, json_str, character(1))), ",",
+  '"listings":', json_arr(list_items),
+  "}")
+writeLines(enc2utf8(summary_json), summary_path, useBytes = TRUE)
+
+cat("done:", length(outlisting), "listings ->", work_root, "\n")
+

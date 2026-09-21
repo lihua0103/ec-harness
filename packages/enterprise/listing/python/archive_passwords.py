@@ -12,6 +12,23 @@ try:
 except ImportError:  # 允许非 AES 项目继续使用标准 zipfile。
     pyzipper = None
 
+if pyzipper is not None:
+    try:
+        import pyzipper.zipfile as _pyzipper_zipfile
+    except ImportError:  # pragma: no cover - 老版本 pyzipper 结构差异
+        _pyzipper_zipfile = None
+else:
+    _pyzipper_zipfile = None
+
+#: pyzipper 内嵌独立的 zipfile 副本，其 BadZipFile 与标准库不是同一个类
+#: （issubclass 为 False）。密码候选试解时，错误密码可能恰好通过 ZipCrypto
+#: 8 位校验并 inflate 出垃圾数据，CRC 校验抛的是 pyzipper 的类——漏接会让
+#: 异常逃出整个候选循环，真密码永远轮不到（实测 ARCHIVE_EXTRACT_FAILED 根因）。
+BAD_ZIP_ERRORS: tuple[type[Exception], ...] = (
+    (zipfile.BadZipFile, _pyzipper_zipfile.BadZipFile)
+    if _pyzipper_zipfile is not None else (zipfile.BadZipFile,)
+)
+
 
 class ArchivePasswordRequired(RuntimeError):
     """归档成员加密且当前凭据引用未能解锁。"""
@@ -142,7 +159,15 @@ def extract_with_password(archive_path: Path, extract_to: Path, project: Path,
     except zipfile.BadZipFile as exc:
         raise InvalidArchive("Archive is not a valid zip") from exc
     archive_class = pyzipper.AESZipFile if pyzipper is not None else zipfile.ZipFile
-    for password in password_candidates(project, archive_path, explicit_password):
+
+    def attempt(password: Optional[bytes]) -> ArchiveExtractionResult:
+        """单候选完整试解；加密成员的解密/inflate/CRC 失败一律计为候选未命中。
+
+        错误密码通过 ZipCrypto 8 位校验后解出的垃圾数据可能成功 inflate、
+        拖到 CRC 校验才失败（BadZipFile，两种类都要接住）——这在候选搜索中
+        是"该密码没中"而非"归档损坏"，必须记数并继续下一个候选。
+        """
+        nonlocal last_error
         extracted_count = 0
         password_required_count = 0
         # 每次候选前清空，避免失败密码留下部分文件。
@@ -162,16 +187,18 @@ def extract_with_password(archive_path: Path, extract_to: Path, project: Path,
                 try:
                     zf.extract(member, path=extract_to, pwd=password)
                     extracted_count += 1
-                except zipfile.BadZipFile as exc:
-                    raise InvalidArchive(
-                        f"Archive member is not a valid zip entry: {member.filename}"
-                    ) from exc
                 except zlib.error as exc:
                     if not member.flag_bits & 1:
                         raise InvalidArchive(
                             f"Archive member is corrupt: {member.filename}"
                         ) from exc
-                    # ZipCrypto 的 8 位口令校验可能误通过；解压失败仍属密码未命中。
+                    password_required_count += 1
+                    last_error = exc
+                except BAD_ZIP_ERRORS as exc:
+                    if not member.flag_bits & 1:
+                        raise InvalidArchive(
+                            f"Archive member is not a valid zip entry: {member.filename}"
+                        ) from exc
                     password_required_count += 1
                     last_error = exc
                 except RuntimeError as exc:
@@ -179,11 +206,19 @@ def extract_with_password(archive_path: Path, extract_to: Path, project: Path,
                         raise
                     password_required_count += 1
                     last_error = exc
-        if password_required_count == 0:
-            return ArchiveExtractionResult(extracted_count, 0)
-    if extracted_count > 0:
-        # 混合归档：先给调用方可用成员；缺失加密成员必须作为缺陷回执。
         return ArchiveExtractionResult(extracted_count, password_required_count)
-    if isinstance(last_error, zipfile.BadZipFile):
-        raise InvalidArchive(f"Archive is not a valid zip: {archive_path.name}") from last_error
+
+    best: tuple[ArchiveExtractionResult, Optional[bytes]] | None = None
+    for password in password_candidates(project, archive_path, explicit_password):
+        result = attempt(password)
+        if result.password_required_count == 0:
+            return result
+        if best is None or result.extracted_count > best[0].extracted_count:
+            best = (result, password)
+    if best is not None and best[0].extracted_count > 0:
+        # 混合归档/带坏成员：把最优候选的可用成员落盘交给调用方；缺失成员
+        # 必须作为缺陷回执。attempt 每轮清空目录，末次落盘的是最后一个候选，
+        # 需重放最优候选再返回。
+        attempt(best[1])
+        return best[0]
     raise ArchivePasswordRequired("Archive credential was not resolved") from last_error

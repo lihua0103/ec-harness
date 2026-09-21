@@ -112,6 +112,103 @@ def test_spreadsheet_ml_2003_xls_is_fully_read(tmp_path):
     assert payload["rows"][0]["rows"] == [["AE", None, "DOC-XML-CELL"]]
 
 
+# ---------------------------------------------------------------------------
+# 通用表格读取入口：按文件内容识别格式，与扩展名/调用路径无关
+# ---------------------------------------------------------------------------
+
+_SSML_ALS_XML = (
+    '<?xml version="1.0"?>'
+    '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet">'
+    '<Worksheet xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet" ss:Name="ALS">'
+    "<Table>"
+    "<Row><Cell><Data>Dataset Name</Data></Cell><Cell><Data>Variable Name</Data></Cell>"
+    "<Cell><Data>Label</Data></Cell></Row>"
+    "<Row><Cell><Data>AE</Data></Cell><Cell><Data>AETERM</Data></Cell>"
+    "<Cell><Data>Adverse Event Term</Data></Cell></Row>"
+    "</Table>"
+    "</Worksheet>"
+    "</Workbook>"
+)
+
+_HTML_ALS = (
+    "<html><head><meta charset=\"utf-8\"><title>ALS</title></head><body>"
+    "<table><tr><th>Dataset Name</th><th>Variable Name</th><th>Label</th></tr>"
+    "<tr><td>AE</td><td>AETERM</td><td>Adverse Event Term</td></tr>"
+    "</table></body></html>"
+)
+
+
+def test_aux_excel_route_reads_spreadsheet_ml_xls(tmp_path):
+    """回归：根绑定会话把 doc/ 下 SSML .xls 扫成辅助文件时曾读失败。
+
+    辅助路径必须与 doc/ 路径同样通过内容识别入口，不能裸调 pd.read_excel。
+    """
+    (tmp_path / "304_manual" / "doc").mkdir(parents=True)
+    (tmp_path / "304_manual" / "doc" / "466.xls").write_bytes(
+        b"\xef\xbb\xbf" + _SSML_ALS_XML.encode("utf-8"))
+    documents, failures = discovery.read_aux_excel_files(tmp_path)
+    assert failures == []
+    assert documents[0]["type"] == "als"
+    assert documents[0]["mappings"] == [
+        {"datasetName": "AE", "sourceColumn": "AETERM", "label": "Adverse Event Term"},
+    ]
+
+
+def test_aux_excel_route_reads_html_xls(tmp_path):
+    """HTML 表格导出冒名 .xls：按文件头识别，不要求用户改文件。"""
+    (tmp_path / "als_export.xls").write_text(_HTML_ALS, encoding="utf-8")
+    documents, failures = discovery.read_aux_excel_files(tmp_path)
+    assert failures == []
+    assert documents[0]["type"] == "als"
+    assert documents[0]["mappings"] == [
+        {"datasetName": "AE", "sourceColumn": "AETERM", "label": "Adverse Event Term"},
+    ]
+
+
+def test_aux_excel_route_reads_delimited_xls(tmp_path):
+    """TSV 文本冒名 .xls：无 NUL + 首行含分隔符即按分隔符表解析。"""
+    (tmp_path / "als_export.xls").write_text(
+        "Dataset Name\tVariable Name\tLabel\nAE\tAETERM\tAdverse Event Term\n",
+        encoding="utf-8")
+    documents, failures = discovery.read_aux_excel_files(tmp_path)
+    assert failures == []
+    assert documents[0]["type"] == "als"
+    assert documents[0]["mappings"] == [
+        {"datasetName": "AE", "sourceColumn": "AETERM", "label": "Adverse Event Term"},
+    ]
+
+
+def test_scan_excel_structures_reads_spreadsheet_ml_xls(tmp_path):
+    """结构扫描与辅助/doc 路径同口径：SSML .xls 不再是 NOT 支持格式。"""
+    target = tmp_path / "legacy.xls"
+    target.write_bytes(b"\xef\xbb\xbf" + _SSML_ALS_XML.encode("utf-8"))
+    payload = scan_excel_structures(target)
+    assert payload["path"] == "legacy.xls"
+    assert payload["structure"]["sheets"][0]["name"] == "ALS"
+
+
+def test_sheet_rows_keep_duplicate_columns(tmp_path):
+    """重复表头按位置保留全部列；to_dict("records") 会静默丢列。"""
+    doc = tmp_path / "doc"
+    doc.mkdir()
+    xml = (
+        '<?xml version="1.0"?>'
+        '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet">'
+        '<Worksheet xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet" ss:Name="ALS">'
+        "<Table>"
+        "<Row><Cell><Data>USUBJID</Data></Cell><Cell><Data>USUBJID</Data></Cell></Row>"
+        "<Row><Cell><Data>LEFT-99</Data></Cell><Cell><Data>RIGHT-77</Data></Cell></Row>"
+        "</Table>"
+        "</Worksheet>"
+        "</Workbook>"
+    )
+    (doc / "dup.xls").write_bytes(b"\xef\xbb\xbf" + xml.encode("utf-8"))
+    documents, failures = read_spec_files(doc)
+    assert failures == []
+    rows = documents[0]["rows"][0]["rows"]
+    assert rows == [["LEFT-99", "RIGHT-77"]]
+
+
 def test_load_datasets_tags_dataset_source(project):
     datasets, failures, sources = load_datasets(project)
     assert failures == []
@@ -161,18 +258,44 @@ def test_scan_excel_structures_rejects_non_excel(project):
         scan_excel_structures(project / "AE.csv")
 
 
+def _write_als_variant(path, extra_term):
+    """与 _write_als 同结构但内容可变：用于区分 需求副本(同内容) 与 独立辅助件。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "ALS"
+    ws.append(["Dataset Name", "Variable Name", "Label"])
+    ws.append(["AE", "AETERM", "Adverse Event Term"])
+    ws.append(["AE", "USUBJID", "Subject"])
+    ws.append(["AE", extra_term, "Extra"])
+    wb.save(path)
+
+
 def test_aux_excel_scope_covers_root_and_work_but_not_doc_or_output(tmp_path):
     (tmp_path / "doc").mkdir(parents=True)
     (tmp_path / "_work" / "nested").mkdir(parents=True)
     (tmp_path / ".clinical-listing" / "output").mkdir(parents=True)
-    _write_als(tmp_path / "root.xlsx")
-    _write_als(tmp_path / "_work" / "nested" / "work.xlsx")
-    _write_als(tmp_path / "doc" / "doc.xlsx")
-    _write_als(tmp_path / ".clinical-listing" / "output" / "published.xlsx")
+    _write_als_variant(tmp_path / "root.xlsx", "ROOTVAR")
+    _write_als_variant(tmp_path / "_work" / "nested" / "work.xlsx", "WORKVAR")
+    _write_als_variant(tmp_path / "doc" / "doc.xlsx", "DOCVAR")
+    _write_als_variant(tmp_path / ".clinical-listing" / "output" / "published.xlsx", "PUBVAR")
     documents, _ = discovery.read_aux_excel_files(tmp_path)
     assert [item["path"] for item in documents] == ["_work/nested/work.xlsx", "root.xlsx"]
     assert all("rows" not in item for item in documents)
     assert all("SECRET-CELL-42" not in json.dumps(item) for item in documents)
+
+
+def test_aux_excel_skips_requirement_copies_of_doc_files(tmp_path):
+    """与 doc/ 同名或同内容的文件是需求副本，不入 aux 通道（其业务值是模型
+    必读必写的需求词，进保护值索引会封死通用通道——2026-09-19 实测缺陷）。"""
+    (tmp_path / "doc").mkdir(parents=True)
+    _write_als(tmp_path / "doc" / "dvp.xlsx")
+    _write_als(tmp_path / "dvp.xlsx")            # 同内容副本 -> 跳过
+    _write_als(tmp_path / "doc2.xlsx")
+    (tmp_path / "doc2.xlsx").replace(tmp_path / "doc" / "doc2.xlsx")
+    _write_als(tmp_path / "doc2.xlsx")           # 同名副本 -> 跳过
+    _write_als_variant(tmp_path / "root-own.xlsx", "OWNVAR")  # 独立辅助件 -> 保留
+    documents, _ = discovery.read_aux_excel_files(tmp_path)
+    assert [item["path"] for item in documents] == ["root-own.xlsx"]
 
 
 def test_list_files_kinds_and_ignores(project):
@@ -367,6 +490,69 @@ def test_mixed_archive_extracts_available_members(project):
     assert not (project / "_extract-mixed" / "locked" / "AE.csv").exists()
 
 
+def test_bad_crc_on_wrong_candidates_does_not_kill_sweep(project, monkeypatch):
+    """回归（TAISHAN-304 实测根因）：错误密码误过 ZipCrypto 8 位校验后解出
+    垃圾数据，CRC 失败抛的是 pyzipper 自己的 BadZipFile（≠stdlib 子类）；
+    候选循环必须把它计为"候选未命中"并存活到真密码，而不是整个归档炸掉。"""
+    import pyzipper
+
+    archive = project / "data.zip"
+    with pyzipper.AESZipFile(
+        archive, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES
+    ) as zf:
+        zf.setpassword(b"TRUE-PW-9")
+        zf.writestr("nested/AE.csv", "ID\n1\n")
+        zf.writestr("nested/DM.csv", "ID\n2\n")
+    # sidecar 内容候选排在项目名候选之后：真密码前必然先经过多个错误候选，
+    # 确保旧代码（漏接 pyzipper.BadZipFile → 异常逃出循环）在此测试下必炸。
+    (project / "data.txt").write_text("TRUE-PW-9", encoding="utf-8")
+
+    real_extract = pyzipper.AESZipFile.extract
+
+    def flaky_extract(self, member, path=None, pwd=None):
+        if pwd != b"TRUE-PW-9":
+            raise pyzipper.zipfile.BadZipFile(f"Bad CRC-32 for file {member.filename!r}")
+        return real_extract(self, member, path=path, pwd=pwd)
+
+    monkeypatch.setattr(pyzipper.AESZipFile, "extract", flaky_extract)
+
+    result = discovery.extract_with_password(archive, project / "_extract-flaky", project)
+    assert result.extracted_count == 2
+    assert result.password_required_count == 0
+    assert (project / "_extract-flaky" / "nested" / "DM.csv").read_text() == "ID\n2\n"
+
+
+def test_corrupt_member_partial_keeps_best_candidate(project, monkeypatch):
+    """真密码下坏成员 CRC 失败也不能丢掉其余可用成员：返回最优候选的部分
+    结果，并把最优候选的文件重新落盘（attempt 每轮清空目录）。"""
+    import pyzipper
+
+    archive = project / "data.zip"
+    with pyzipper.AESZipFile(
+        archive, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES
+    ) as zf:
+        zf.setpassword(b"TRUE-PW-9")
+        zf.writestr("bad/AE.csv", "ID\n1\n")
+        zf.writestr("good/DM.csv", "ID\n2\n")
+
+    real_extract = pyzipper.AESZipFile.extract
+
+    def corrupt_member_extract(self, member, path=None, pwd=None):
+        if member.filename == "bad/AE.csv":
+            raise pyzipper.zipfile.BadZipFile(f"Bad CRC-32 for file {member.filename!r}")
+        return real_extract(self, member, path=path, pwd=pwd)
+
+    monkeypatch.setattr(pyzipper.AESZipFile, "extract", corrupt_member_extract)
+
+    result = discovery.extract_with_password(
+        archive, project / "_extract-corrupt", project, "TRUE-PW-9")
+    assert result.partial
+    assert result.extracted_count == 1
+    assert result.password_required_count == 1
+    assert (project / "_extract-corrupt" / "good" / "DM.csv").read_text() == "ID\n2\n"
+    assert not (project / "_extract-corrupt" / "bad" / "AE.csv").exists()
+
+
 def test_xlsx_value_error_does_not_fall_back_to_xml(tmp_path, monkeypatch):
     from openpyxl import Workbook
 
@@ -409,6 +595,24 @@ def test_xlsx_value_error_does_not_fall_back_to_xml(tmp_path, monkeypatch):
 
     with zipfile.ZipFile(normalized, "r") as package:
         assert b"A1:XFD1" in package.read("xl/worksheets/sheet1.xml")
+
+
+def test_non_value_error_enters_content_fallback(tmp_path, monkeypatch):
+    """openpyxl InvalidFileException / zipfile.BadZipFile / xlrd XLRDError 都
+    不继承 ValueError：读取门的异常必须放宽，否则冒名文件绕过内容识别回退
+    链、以笼统读取失败逃逸（与 pyzipper BadZipFile 漏接同族缺陷）。"""
+    from openpyxl.utils.exceptions import InvalidFileException
+
+    fake = tmp_path / "masqueraded.xlsx"
+    fake.write_text("COL1\tCOL2\n1\t2\n", encoding="utf-8")
+
+    def fake_read_excel(path, **kwargs):
+        raise InvalidFileException(f"openpyxl does not support the format {path}")
+
+    monkeypatch.setattr(discovery.pd, "read_excel", fake_read_excel)
+    sheets = discovery._read_excel_sheets(fake)
+    assert list(sheets) == ["masqueraded"]
+    assert sheets["masqueraded"].iloc[0, 0] == 1
 
 
 def test_password_value_never_in_receipt(project):

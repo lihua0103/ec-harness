@@ -11,6 +11,9 @@ importers:
       '@dsh-enterprise/branding':
         specifier: link:../../packages/enterprise/branding
         version: link:../../packages/enterprise/branding
+      '@dsh-enterprise/demo-video':
+        specifier: link:../../packages/enterprise/demo-video
+        version: link:../../packages/enterprise/demo-video
       '@dsh-enterprise/listing':
         specifier: link:../../packages/enterprise/listing
         version: link:../../packages/enterprise/listing

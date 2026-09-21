@@ -78,7 +78,7 @@ def test_publish_track_changes_default_true(project):
         "operation": "listing_run_code", "project": str(project),
         "code": 'out = datasets["AE"].copy()\nout.attrs["labels"]={"USUBJID":"S"}\noutputs={"AE":out}'})
     worker.dispatch({"operation": "listing_publish", "project": str(project), "scenario": "rbqm"})
-    log = project / ".clinical-listing" / "output" / "rbqm" / "RBQM_LISTINGS_changes.json"
+    log = project / ".clinical-listing" / "output" / "rbqm" / f"{project.name}_RBQM_LISTINGS_changes.json"
     assert log.exists()
     body = json.loads(log.read_text(encoding="utf-8"))
     assert body["changes"]["AE"] == {"new": 2, "modified": 0, "old": 0}
@@ -94,7 +94,7 @@ def test_republish_same_data_counts_zero(project):
     assert first["ok"] and second["ok"]
     assert second["receipt"]["outputCount"] == 1
     from openpyxl import load_workbook
-    ws = load_workbook(project / ".clinical-listing" / "output" / "manual" / "MANUAL_LISTINGS.xlsx")["Content"]
+    ws = load_workbook(project / ".clinical-listing" / "output" / "manual" / f"{project.name}_MANUAL_LISTINGS.xlsx")["Content"]
     assert [ws.cell(3, c).value for c in range(4, 8)] == [2, 0, 0, 0]   # Total/New/Modified/Old
 
 
@@ -140,7 +140,7 @@ def test_change_log_exact_format(project):
         "operation": "listing_run_code", "project": str(project),
         "code": 'out = datasets["AE"].copy()\nout.attrs["labels"]={"USUBJID":"S"}\noutputs={"受试表":out}'})
     worker.dispatch({"operation": "listing_publish", "project": str(project), "scenario": "rbqm"})
-    raw = (project / ".clinical-listing" / "output" / "rbqm" / "RBQM_LISTINGS_changes.json").read_text(encoding="utf-8")
+    raw = (project / ".clinical-listing" / "output" / "rbqm" / f"{project.name}_RBQM_LISTINGS_changes.json").read_text(encoding="utf-8")
     assert "受试表" in raw                    # ensure_ascii=False：中文 sheet 名原样落盘
     assert '\n  "' in raw                     # indent=2
 

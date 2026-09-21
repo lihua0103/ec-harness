@@ -10,7 +10,9 @@
 - `manual`、`medical`：使用 RT01 Manual Listing 固定结构与样式。
 - `report`：使用 `file_show (6).xlsx` 提炼的 DM Status Report 结构与样式。
 - `rbqm`：业务列结构可按需求定义，但复用 RT01 业务 Sheet 的视觉样式。
-- 每次发布只生成一个 `{SCENARIO}_LISTINGS.xlsx`。
+- 每次发布只生成一个交付工作簿，文件名跟随申办方文档命名规范
+  （`<项目标识>_<SCENARIO>_LISTINGS.xlsx`，项目标识取项目目录名；
+  2026-09-04 起，旧名 `{SCENARIO}_LISTINGS.xlsx` 弃用）。
 
 ## 2. Manual / Medical：固定 Content Sheet
 
@@ -47,11 +49,13 @@
 
 | 变量名 | Label |
 |---|---|
-| `Flag1` | `Flag1` |
 | `__cmp_FLAG__` | `FLAG(New/Modified/Old)` |
 | `__cmp_UpdateDetail__` | `Update Detail` |
 | `__cmp_RCcomment__` | `Review Comments` |
 | `__cmp_Idate__` | `Initial/Date` |
+
+不注入空 `Flag1` 占位列：`flag` 列仅在该表 Condition 明确要求（如 flag=duplicated）
+时存在，其余表不加（2026-09-09 用户否决空 Flag1，原表中的 Flag1 行已移除）。
 
 `report`、`rbqm` 不强制这些列。AI 可对单个表设置
 `DataFrame.attrs["_skip_default_template"] = True` 跳过审核列注入（模板
@@ -77,7 +81,7 @@ publish 时不与上一版做行级比较（无稳定回读结构），变化统
 
 ## 4. Report：DM Status Report 结构
 
-`report` 每次仍只生成一个 `REPORT_LISTINGS.xlsx`，但不使用 `Content`：
+`report` 每次仍只生成一个 `<项目标识>_REPORT_LISTINGS.xlsx`，但不使用 `Content`：
 
 - 首 Sheet 固定命名为 `Cover Page`。
 - `A1:G1` 合并，固定标题为“数据管理状态报告 / DM Status Report”。

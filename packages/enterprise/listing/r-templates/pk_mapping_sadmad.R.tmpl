@@ -1,0 +1,299 @@
+# {{STUDY_KEY}} PK Mapping（SAD/MAD 型：PK 浓度 × EDC 合并映射数据集）
+# 传输件形态：StudyID/Analyte/Subject/SubjectGroup/Day Nominal/Hour Nominal/Matrix 列
+# （区别于 BE 型 Period/Sampling Time(h) 形态，两型分模板，form 参数选择，勿猜）。
+# 输出三件套：PK_Mapping_unbinded_<date>.xlsx / PK_Mapping_binded_<date>.xlsx（投递编盲表时）/
+#   <studyKey>_PK Mapping_<date>.rds（QC 独立编程契约名）；人工主编程 rds=<studyCode>_<date>.rds
+#   双名共存（GP7），datasetQC 比对段自动跳过式。
+# 口径/门禁/坑：enterprise_listing_kb(pk-mapping)（GP1-GP9 + SAD/MAD L2 定案）。
+#
+# ★ 本模板零业务逻辑（2026-09-17 用户定案）：业务逻辑一律由 harness AI 识别本项目
+#   spec/方案/ALS/EDC 结构后生成，写入下方 DSH-BUSINESS-ZONE 生成区；模板只含
+#   harness 契约层（cfg 覆盖/读数发现/守卫红线/落盘三件套/运行摘要/通用工具函数）。
+#   未生成业务区即运行 → fail-fast 出路：先按门禁生成，再 render=false 运行。
+# 生成区契约（AI 逐区对照实证后填写）：
+#   Z1 constants —— 方案常量：STUDY_ID（spec 变量1）/ANALYTE 母药（spec 变量2）/
+#     PDOSE 方案剂量表（spec）/RT_DP、RT_NEG_ZERO（DM 定案）/CSF_OUTPUT（CSF 投递状态）/
+#     署名元数据。证据=spec 行逐条对照。
+#   Z2 bridge —— 受试者号体系桥接（GP2）：PK Subject 是随机号还是筛选号先实证；
+#     经哪张 EDC 表桥接、键列名、前导零数值归一、孤儿/未匹配计数出路。
+#   Z3 intake —— 给药/采样中间表与值域：EC/EC1/PC/PCT/PCCSF 等表单与列（EDC 结构
+#     实证）、Folder→队列/日映射、时点标签→名义小时显式值域（ALS 解码串实证，
+#     禁文本解析器）、计划外与单点口径。
+#   Z4 mapping —— 行级映射与参照给药（GP1）：分支互斥覆盖全部行+分支校验守卫、
+#     参照剂量规则（SAD/MAD/CSF/未计划）、RT 完整时间戳直取、NT 归属规则。
+#   Z5 demog —— 人口学/生命体征来源表单与列（EDC 结构实证，多条取最早并计数）。
+#   Z6 assembly —— 最终装配：spec Variable 全集=输出列全集、Label=逐列 attr、
+#     浓度精度口径（sig6/round3/原文直取——实证后选）、编盲时间点隐藏网格
+#     （项目便签口径）与豁免规则；行数守恒红线在全集上校验。
+
+rm(list = ls()); gc()
+tryCatch(Sys.setlocale("LC_CTYPE", "Chinese (Simplified)_China.utf8"), error = function(e) NULL)
+tryCatch(Sys.setlocale("LC_TIME", "English"), warning = function(w) NULL, error = function(e) NULL)
+options(warn = 1)
+cfg <- function(env, default) { v <- Sys.getenv(env, unset = ""); if (nzchar(v)) v else default }
+summary_path <- cfg("DSH_R_SUMMARY_PATH", "{{SUMMARY_PATH}}")
+options(error = function() {
+  if (exists("summary_path") && nzchar(summary_path)) tryCatch({
+    esc <- function(x) { x <- gsub("\\", "\\\\", x, fixed = TRUE); x <- gsub("\"", "\\\"", x, fixed = TRUE)
+                         gsub("\n", "\\n", gsub("\r", "", x, fixed = TRUE), fixed = TRUE) }
+    writeLines(enc2utf8(sprintf('{"status":"error","message":"%s"}', esc(geterrmessage()))),
+               summary_path, useBytes = TRUE)
+  }, error = function(e) NULL)
+  if (!interactive()) quit(status = 1)
+})
+
+# 依赖纪律（L2）：单文件只挂 readxl/dplyr/openxlsx + haven（RData 构建用）；
+# 本机常无 tidyverse 整包，map_*/crossing/tibble 勿用（vapply/expand.grid/data.frame 替代）
+library(haven)
+library(tools)
+library(readxl)
+library(dplyr)
+library(openxlsx)
+
+# -------- 配置（宿主渲染；目录契约：02_Raw_csv/01_Raw_sas/SAS_Program/Output） ----
+root       <- cfg("DSH_R_PROJECT_ROOT", "{{PROJECT_ROOT}}")
+study_key  <- cfg("DSH_R_STUDY_KEY",    "{{STUDY_KEY}}")
+study_code <- cfg("DSH_R_STUDY_CODE",   "{{STUDY_CODE}}")   # 方案号（可含期别后缀，缺省=studyKey）
+foldername <- cfg("DSH_R_DATA_DATE",    "{{DATA_DATE}}")
+out_prefix <- cfg("DSH_R_OUTPUT_PREFIX","{{OUTPUT_PREFIX}}")
+blind_mode <- cfg("DSH_R_BLIND_MODE",   "{{BLIND_MODE}}")
+csv_path <- file.path(root, "Project_Data/02_Raw_csv/PK Mapping", foldername)
+sas_path <- file.path(root, "Project_Data/01_Raw_sas/PK Mapping", foldername)
+out_path <- file.path(root, "Output/04_Out/PK Mapping")
+if (!dir.exists(root)) stop("项目根目录不存在：", root)
+for (p in c(csv_path, sas_path)) if (!dir.exists(p))
+  stop("数据日期目录不存在：", p, "（请确认 PK 传输件与 EDC sas 均已投递）")
+dir.create(out_path, showWarnings = FALSE, recursive = TRUE)
+if (!nzchar(summary_path)) summary_path <- file.path(out_path, paste0(".summary_", foldername, ".json"))
+run_warnings <- character(0)
+note <- function(...) { m <- paste0(...); run_warnings <<- c(run_warnings, m); message("NOTE: ", m) }
+qc <- c()
+qa <- function(nm, n) if (n > 0) qc <<- c(qc, setNames(n, nm))
+f_bind <- cfg("DSH_R_BLIND_MAP_FILE",
+              file.path(root, "SAS_Program/SAS_program/PK Mapping/编盲.xlsx"))
+
+# ---- 工具函数（通用件，非业务；生成区按需调用） -------------------------------
+# dd Mon yyyy + HH:MM 解析（GP3：%b 依赖英文月份；locale 链式容错，失败计数不静默 NA）
+dt_parse <- function(d, t) {
+  old <- Sys.getlocale("LC_TIME"); on.exit(Sys.setlocale("LC_TIME", old))
+  d <- trimws(as.character(d)); t <- trimws(as.character(t))
+  ok <- !is.na(d) & d != "" & !is.na(t) & t != ""
+  out <- as.POSIXct(rep(NA_character_, length(d)), tz = "UTC")
+  for (lc in c("English", "en_US.UTF-8", "C")) {
+    suppressWarnings(Sys.setlocale("LC_TIME", lc))
+    if (any(ok)) {
+      out[ok] <- suppressWarnings(as.POSIXct(paste(d, t)[ok],
+                                             format = "%d %b %Y %H:%M", tz = "UTC"))
+    }
+    if (all(!ok | !is.na(out))) break
+  }
+  n_fail <- sum(ok & is.na(out))
+  if (n_fail > 0) note("[QC] 日期时间解析失败 ", n_fail,
+                       " 条（GP3 计数，相关行 RT 留空，请核对源数据）")
+  out
+}
+# 半进位舍入（自带去噪版，不依赖运行环境包）
+round_half_up <- function(x, digits = 0) {
+  z <- abs(x) * 10^digits
+  sign(x) * floor(z + 0.5 + sqrt(.Machine$double.eps)) / 10^digits
+}
+# 浓度=6 位有效数字文本（首位非零起算，不足位补零；非科学计数；逐元素实现——
+# 向量版 format() 会整列统一格式补出 7 位；是否采用由 Z6 按项目口径实证决定）
+sig6 <- function(x) {
+  vapply(as.numeric(x), function(v) {
+    if (is.na(v)) return(NA_character_)
+    d <- 6 - floor(log10(abs(v))) - 1
+    if (!is.finite(d) || d < 0) d <- 6
+    sprintf(paste0("%.", d, "f"), v)
+  }, character(1))
+}
+norm_char <- function(x) {
+  x <- trimws(as.character(x))
+  num <- suppressWarnings(as.numeric(x))
+  ok <- !is.na(num) & !is.na(x) & x != ""
+  x[ok] <- trimws(formatC(num[ok], format = "fg", digits = 15))
+  x
+}
+fasted_fed <- function(x) case_when(
+  toupper(x) == "FASTED" ~ "Fasted", toupper(x) == "FED" ~ "Fed", TRUE ~ NA_character_)
+# 值域出路（GP0）：值域外时点/访视被过滤时点名告警，不静默
+drop_note <- function(n0, n1, label) {
+  if (n0 > n1) note("[QC][告警] ", label, " 有 ", n0 - n1,
+                    " 行时点/访视未识别（值域外），未参与匹配——请核对新增值域")
+}
+
+# -------- 读取数据（EDC：RData 缓存构建；传输件：_dec 解密副本发现式） ----------
+save_file <- file.path(sas_path, paste0("sas_data_", foldername, ".RData"))
+if (!file.exists(save_file)) {
+  setwd(sas_path)
+  password <- cfg("DSH_R_ZIP_PASSWORD", "{{ZIP_PASSWORD}}")
+  if (nzchar(password)) system(sprintf("unzip -P %s *.zip -d ./", password))
+  fs <- list.files(sas_path, pattern = "\\.sas7bdat$", full.names = TRUE, recursive = TRUE)
+  if (!length(fs)) stop("未找到 sas7bdat（也未见可解压产物或 RData 缓存）：", sas_path,
+                        "——请投递 EDC sas zip 并经密码参数解压，或按数据准备流程预置 RData 缓存")
+  datasets <- lapply(fs, function(x) haven::read_sas(x))
+  names(datasets) <- toupper(file_path_sans_ext(basename(fs)))
+  save(datasets, file = save_file)
+  unlink(fs)
+}
+load(save_file)
+if (!exists("datasets")) stop("RData 未含 datasets 对象")
+rawdata <- datasets; rm(datasets)
+
+# 解密=数据准备步骤（R 交付零 python）：程序只读 _dec 副本；加密原件由 read_pk 守卫给出路
+read_pk <- function(path) {
+  d <- tryCatch(
+    suppressMessages(as.data.frame(read_excel(path, col_types = "text"))),
+    error = function(e) {
+      if (grepl("encrypt|Unsupported format", e$message, ignore.case = TRUE))
+        stop("输入为加密 .xls：请先完成数据准备步骤——用 pw.txt 解密生成 _dec 副本，",
+             "并把传输件放回数据日目录（解密命令见数据交接说明）。")
+      stop("读取失败：", e$message)
+    })
+  names(d) <- trimws(names(d))
+  d
+}
+# 投递契约：解密副本 <官方件名>_dec.xlsx/.xls 落数据日目录，按文件名 CSF 标记区分
+# 血浆/脑脊液；项目命名不符时 AI 在 Z1/本段按投递协议调整发现式
+pk_fs <- list.files(csv_path, pattern = "_dec\\.(xlsx|xls)$", ignore.case = TRUE)
+pl_fs <- pk_fs[!grepl("csf", pk_fs, ignore.case = TRUE)]
+cs_fs <- pk_fs[grepl("csf", pk_fs, ignore.case = TRUE)]
+if (length(pl_fs) != 1)
+  stop("血浆解密副本不唯一（", length(pl_fs), " 个）：", paste(pk_fs, collapse = " | "),
+       "——确认数据准备步骤产物（官方件名+_dec）或调整传输件发现式")
+if (length(cs_fs) > 1)
+  stop("CSF 解密副本不唯一（", length(cs_fs), " 个）：", paste(cs_fs, collapse = " | "),
+       "——同上")
+f_plasma <- file.path(csv_path, pl_fs[1])
+pk_p <- read_pk(f_plasma)
+if (length(cs_fs) == 1 && file.exists(file.path(csv_path, cs_fs[1]))) {
+  pk_csf <- read_pk(file.path(csv_path, cs_fs[1]))
+} else {
+  note("[NOTE] 本批无 CSF 传输文件，CSF 按空处理（映射与开关保留）")
+  pk_csf <- pk_p[0, ]
+}
+PK_raw <- bind_rows(
+  pk_p %>% mutate(src = "plasma"),
+  pk_csf %>% mutate(src = "csf")) %>%
+  # 传输件列序契约：12 列固定序按投递协议命名（AI 在 Z1 对照投递协议核实列集与列序）
+  setNames(c("StudyID","Analyte","Subject","SubjectGroup","DayNom","HourNom",
+             "Conc","ConcUnit","Matrix","LLOQ","ULOQ","Comments", "src")) %>%
+  mutate(across(everything(), ~ trimws(as.character(.x))),
+         DayNom = norm_char(DayNom), HourNom = norm_char(HourNom),
+         row_id = row_number())
+cat(sprintf("[QC] 实验室输入行数：血浆 %d + CSF %d\n", nrow(pk_p), nrow(pk_csf)))
+
+# >>> DSH-BUSINESS-ZONE:constants <<< harness AI 业务生成区（模板零业务值）
+stop("业务生成区 [constants] 未生成：本模板不含业务逻辑——由 harness AI 识别本项目 spec 后",
+     "先过 U-Gate 需求理解自审（矩阵+红队三类必查，见 router/AGENTS），",
+     "再按程序头生成区契约（Z1-Z6 与场景库 pk-mapping GP 门禁）生成各业务区，以 render=false 运行")
+# <<< DSH-BUSINESS-ZONE:constants >>>
+
+bad_id <- setdiff(unique(PK_raw$StudyID), STUDY_ID)
+if (length(bad_id)) note("[QC] StudyID 异常值：", paste(bad_id, collapse = ","))
+
+# 分析物过滤：仅母药（spec 变量2），剔除计数留痕
+n_all <- nrow(PK_raw)
+PK_raw <- PK_raw %>% filter(toupper(Analyte) == toupper(ANALYTE))
+qa("剔除非母药分析物", n_all - nrow(PK_raw))
+if (n_all > nrow(PK_raw)) {
+  note("[QC] 剔除非母药分析物 ", n_all - nrow(PK_raw),
+       " 行（转 DM 确认去向），母药行 ", nrow(PK_raw))
+}
+
+# >>> DSH-BUSINESS-ZONE:bridge <<< 受试者号体系桥接（GP2，AI 按 EDC 结构实证生成）
+stop("业务生成区 [bridge] 未生成——见程序头生成区契约")
+# <<< DSH-BUSINESS-ZONE:bridge >>>
+
+# >>> DSH-BUSINESS-ZONE:intake <<< 给药/采样中间表与值域（AI 按 EDC 结构+ALS 实证生成）
+stop("业务生成区 [intake] 未生成——见程序头生成区契约")
+# <<< DSH-BUSINESS-ZONE:intake >>>
+
+# >>> DSH-BUSINESS-ZONE:mapping <<< 行级映射与参照给药（GP1，AI 按方案推演生成）
+stop("业务生成区 [mapping] 未生成——见程序头生成区契约")
+# <<< DSH-BUSINESS-ZONE:mapping >>>
+
+# >>> DSH-BUSINESS-ZONE:demog <<< 人口学/生命体征来源（AI 按 EDC 结构实证生成）
+stop("业务生成区 [demog] 未生成——见程序头生成区契约")
+# <<< DSH-BUSINESS-ZONE:demog >>>
+
+# >>> DSH-BUSINESS-ZONE:assembly <<< 最终装配与编盲隐藏（AI 按 spec Variable 全集生成）
+stop("业务生成区 [assembly] 未生成——见程序头生成区契约")
+# <<< DSH-BUSINESS-ZONE:assembly >>>
+
+# ---- 落盘三件套（sheet=PK_Mapping，write.xlsx 直出无样式） ---------------------
+# rds 双名共存（GP7）：人工主编程 rds = <studyCode>_<数据日>.rds（不归本程序写）；
+# 本程序（QC 独立编程）rds = 车道契约名 <studyKey>_PK Mapping_<数据日>.rds
+f_rds <- file.path(out_path, paste0(out_prefix, "_", foldername, ".rds"))
+f_unb <- file.path(out_path, paste0("PK_Mapping_unbinded_", foldername, ".xlsx"))
+# 落盘前收口：as.data.frame 后统一贴 label（spec Label；行子集后贴才不丢——GP8）
+PK_rds <- as.data.frame(PK_out[out_flag, ])
+PK_xls <- as.data.frame(PK_out[out_flag & keep_flag, ])
+for (j in seq_along(hdr_label)) attr(PK_rds[[j]], "label") <- hdr_label[j]
+for (j in seq_along(hdr_label)) attr(PK_xls[[j]], "label") <- hdr_label[j]
+saveRDS(PK_rds, f_rds)
+openxlsx::write.xlsx(PK_xls, f_unb, sheetName = "PK_Mapping", overwrite = TRUE)
+
+# 编盲段（P9）：缺编盲表自动跳过不伤主表
+outputs_extra <- NULL
+if (file.exists(f_bind)) {
+  BIND <- read_excel(f_bind, col_types = "text")
+  if (any(duplicated(BIND[[1]]))) stop("编盲表存在重复编号，一对一校验失败")
+  PK_binded <- PK_xls %>%
+    left_join(BIND, by = c("Subject" = "SUBJID")) %>%
+    mutate(`Subject` = if_else(is.na(BLINDID), `Subject`, BLINDID)) %>%
+    select(-BLINDID) %>%
+    select(`Study ID`, `Subject`, everything()) %>%
+    arrange(`Subject`, `Day Nominal`, `RT`)
+  f_bnd <- file.path(out_path, paste0("PK_Mapping_binded_", foldername, ".xlsx"))
+  openxlsx::write.xlsx(PK_binded, f_bnd, sheetName = "PK_Mapping", overwrite = TRUE)
+  note("[输出] 编盲版产物已生成（binded）")
+  outputs_extra <- basename(f_bnd)
+} else {
+  note("[NOTE] 未投递编盲表，跳过 binded 产物（P9 降级）")
+}
+
+# ---- datasetQC 双编程比对段（自动跳过式：主编程 rds 就位即比对，缺则 NOTE 出路） ----
+f_main <- file.path(out_path, paste0(study_code, "_", foldername, ".rds"))
+if (requireNamespace("datasetQC", quietly = TRUE)) {
+  if (file.exists(f_main)) {
+    cmp <- datasetQC::qc_compare(f_main, qc = f_rds)
+    datasetQC::qc_report(cmp, file.path(out_path, paste0("PK_Mapping_QC_", foldername, ".pdf")))
+    note("[QC] 双编程比对完成：", basename(f_main), " vs ", basename(f_rds))
+  } else {
+    note("[NOTE] 主编程 rds 未投递（", basename(f_main), "），跳过双编程比对段；投递后重跑自动比对")
+  }
+} else {
+  note("[NOTE] 未安装 datasetQC：已保存本方 rds，比对与 QC 报告在服务器运行时生成")
+}
+
+# ---- 运行摘要（宿主回执唯一来源；只含计数/文件名/告警） ------------------------
+if (length(qc)) note("一致性检查汇总：", paste(paste0(names(qc), "=", qc), collapse = "；"))
+run_warnings <- unique(run_warnings)
+json_str <- function(x) {
+  x <- gsub("\\", "\\\\", x, fixed = TRUE); x <- gsub("\"", "\\\"", x, fixed = TRUE)
+  x <- gsub("\r", "", x, fixed = TRUE); x <- gsub("\n", "\\n", x, fixed = TRUE)
+  paste0("\"", x, "\"")
+}
+json_arr <- function(items) paste0("[", paste(items, collapse = ","), "]")
+out_files <- c(basename(f_unb), basename(f_rds), outputs_extra)
+summary_json <- paste0(
+  "{",
+  '"status":"ok",',
+  '"lane":"r_pk",',
+  '"studyKey":', json_str(study_key), ",",
+  '"dataDate":', json_str(foldername), ",",
+  '"blindMode":', json_str(blind_mode), ",",
+  '"listingCount":', 1L, ",",
+  '"rowCount":', nrow(PK_out), ",",
+  '"flagCount":', as.integer(sum(qc)), ",",
+  '"sheetCount":', 1L, ",",
+  '"outputs":', json_arr(json_str(out_files)), ",",
+  '"warnings":', json_arr(vapply(run_warnings, json_str, character(1))), ",",
+  '"listings":', json_arr(sprintf(
+    '{"name":"PK Mapping","sheet":"PK_Mapping","rowCount":%d,"flagCount":%d}',
+    nrow(PK_out), as.integer(sum(qc)))),
+  "}")
+writeLines(enc2utf8(summary_json), summary_path, useBytes = TRUE)
+cat("done:", nrow(PK_out), "PK rows x", ncol(PK_out), "cols (", blind_mode,
+    ") ->", paste(out_files, collapse = ", "), "\n")

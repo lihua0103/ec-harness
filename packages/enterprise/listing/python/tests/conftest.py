@@ -10,6 +10,12 @@ if str(PYTHON_DIR) not in sys.path:
 
 
 @pytest.fixture(autouse=True)
+def isolated_edc_profiles(tmp_path, monkeypatch):
+    """学习型 EDC 注册表指向测试专用临时文件，绝不写入真实注册表。"""
+    monkeypatch.setenv("DSH_EDC_PROFILES", str(tmp_path / "edc-profiles.json"))
+
+
+@pytest.fixture(autouse=True)
 def isolated_worker_session():
     """每个测试独占会话状态，避免跨测试串扰。"""
     import worker

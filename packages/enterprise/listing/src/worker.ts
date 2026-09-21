@@ -1,6 +1,7 @@
 /** 持久 Python Worker：NDJSON 串行协议、取消时终止进程。 */
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export interface WorkerRequest { operation: string; project: string; [key: string]: unknown }
@@ -45,6 +46,10 @@ function minimalSpawnEnv(): NodeJS.ProcessEnv {
   }
   env.PYTHONUTF8 = '1'
   env.PYTHONIOENCODING = 'utf-8'
+  // 学习型 EDC 适配器注册表（只存表头形态/列角色，无数据值），与数据安全
+  // 开关配置同目录；未显式配置时 Python 侧回落用户目录。
+  env.DSH_EDC_PROFILES = process.env.DSH_EDC_PROFILES
+    ?? join(process.env.DSH_HOME || process.cwd(), 'profiles', 'enterprise', '.edc-profiles.json')
   return env
 }
 

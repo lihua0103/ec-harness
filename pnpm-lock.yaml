@@ -39,6 +39,21 @@ importers:
         specifier: 4.1.11
         version: 4.1.11(@types/node@22.20.1)(esbuild@0.28.2)(tsx@4.23.12)
 
+  packages/enterprise/demo-video:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 4.0.1
+        version: 4.0.1
+      '@types/node':
+        specifier: 22.20.1
+        version: 22.20.1
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@22.20.1)(esbuild@0.28.2)(tsx@4.23.12)
+
   packages/enterprise/listing:
     devDependencies:
       '@deepseek-ai/cordis':

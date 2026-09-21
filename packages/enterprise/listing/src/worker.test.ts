@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { PythonWorker } from './worker.js'
 
@@ -61,8 +61,8 @@ describe('PythonWorker Multi-Sheet runtime', () => {
         receipt: { outputCount: 2 },
       })
 
-      const workbook = join(project, '.clinical-listing', 'output', 'medical', 'MEDICAL_LISTINGS.xlsx')
-      const rbqmWorkbook = join(project, '.clinical-listing', 'output', 'rbqm', 'RBQM_LISTINGS.xlsx')
+      const workbook = join(project, '.clinical-listing', 'output', 'medical', `${basename(project)}_MEDICAL_LISTINGS.xlsx`)
+      const rbqmWorkbook = join(project, '.clinical-listing', 'output', 'rbqm', `${basename(project)}_RBQM_LISTINGS.xlsx`)
       const verificationScript = `
 import json
 import sys
@@ -163,7 +163,7 @@ print(json.dumps({
       })
       expect(JSON.stringify(reportPublish)).not.toContain('Missing Page')
 
-      const workbook = join(project, '.clinical-listing', 'output', 'report', 'REPORT_LISTINGS.xlsx')
+      const workbook = join(project, '.clinical-listing', 'output', 'report', `${basename(project)}_REPORT_LISTINGS.xlsx`)
       const script = `
 import json
 import sys

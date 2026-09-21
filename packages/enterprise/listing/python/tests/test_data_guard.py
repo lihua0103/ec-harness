@@ -133,7 +133,9 @@ def test_projection_table_is_exactly_two_rules():
         "dataset": DATASET_KEYS,
         "aux-excel": AUX_EXCEL_KEYS,
     }
-    assert AUX_EXCEL_KEYS == ("path", "type", "size", "structure", "mappings", "datasets")
+    assert AUX_EXCEL_KEYS == ("path", "type", "size", "structure", "mappings", "datasets",
+                              "designSheets", "inferredDesignSheets", "learnedEdcProfiles", "codelists")
+    assert "rows" not in AUX_EXCEL_KEYS
 
 
 def test_no_preview_no_pattern_scan():

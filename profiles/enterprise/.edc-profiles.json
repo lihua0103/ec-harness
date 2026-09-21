@@ -1,0 +1,33 @@
+[
+  {
+    "id": "learned-056a12643fe1",
+    "sheetName": "PlanPLAN1",
+    "headers": [
+      "Form\\Visit",
+      "SUBJECT",
+      "SCR",
+      "C1D1",
+      "C1D8",
+      "C1D15",
+      "C2D1",
+      "C3D1",
+      "C4D1",
+      "C5D1",
+      "C6D1",
+      "C7D1",
+      "C8D1",
+      "CND1",
+      "EOT",
+      "SA",
+      "LFU",
+      "TR",
+      "CM",
+      "DS",
+      "UN"
+    ],
+    "roles": {},
+    "seen": 1,
+    "learnedAt": "2026-09-07T11:13:06",
+    "lastSeen": "2026-09-07T11:13:06"
+  }
+]

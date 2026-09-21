@@ -202,3 +202,21 @@ describe('inspectToolExecution', () => {
     expect(records).toHaveLength(0)
   })
 })
+
+
+describe("交付域（2026-09-15，RBQM 实测）", () => {
+  it("R/RBQM 车道交付目录 Output/04_Out/** 判为 generated-output，不再按 aux-excel 拒绝", () => {
+    const deliverable =
+      "D:\\project\\company\\epro\\Project\\RBQM_test\\Output\\04_Out\\RBQM\\20260806\\KRI_010.xlsx"
+    expect(classifyReference(deliverable, "D:\\project\\company\\epro\\Project")).toBe("generated-output")
+    expect(classifyReference(deliverable)).toBe("generated-output")
+    // 正斜杠形态同样覆盖
+    expect(classifyReference("D:/project/company/epro/Project/RBQM_test/Output/04_Out/RBQM/20260806/KRI_020.xlsx")).toBe("generated-output")
+  })
+
+  it("源数据文件不因路径里恰好含 output 词而误豁免", () => {
+    const source =
+      "D:\\project\\company\\epro\\Project\\RBQM_test\\Project_Data\\01_Raw_sas\\RBQM\\20260806\\ae.sas7bdat"
+    expect(classifyReference(source, "D:\\project\\company\\epro\\Project")).toBe("dataset")
+  })
+})

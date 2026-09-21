@@ -53,7 +53,6 @@ export class DataSecurityService extends Service {
   private config: DataSecurityConfig = { ...DEFAULT_DATA_SECURITY_CONFIG }
   private configPath: string
   private auditPath: string
-  private disposers: Array<() => void> = []
 
   constructor(ctx: Context) {
     super(ctx, 'dataSecurityService')
@@ -62,7 +61,13 @@ export class DataSecurityService extends Service {
     this.auditPath = join(root, '.data-audit.jsonl')
   }
 
-  async start(): Promise<void> {
+  /**
+   * cordis 激活钩子：fiber 在类插件构造后调用本方法并 await 其完成
+   * （注册失败会让 boot 期 fail-loud）。普通 `start()` 方法 cordis 不会
+   * 自动调用——那是本次收口修掉的存量缺陷：路由此前从未注册成功过。
+   * 路由注册经 ctx.effect 挂到本插件 fiber，卸载时自动撤销。
+   */
+  async [Service.init](): Promise<void> {
     await this.loadConfig()
     // 开关加载即审计（2026-09-03：模型代码可篡改明文配置文件，持久化关闭
     // 必须在下一次启动时留下可追溯记录；手工改动同样入审计）。
@@ -74,7 +79,7 @@ export class DataSecurityService extends Service {
       this.ctx.logger?.warn('webServer not available, data security API will not be registered')
       return
     }
-    this.disposers.push(webServer.register({
+    this.ctx.effect(() => webServer.register({
       kind: 'exact',
       path: '/api/settings/data-security',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -108,22 +113,16 @@ export class DataSecurityService extends Service {
         }
         return json(res, 405, { error: 'Method Not Allowed' }, { Allow: 'GET, POST' })
       },
-    }))
-    this.disposers.push(webServer.register({
+    }), 'data-security api route')
+    this.ctx.effect(() => webServer.register({
       kind: 'exact',
       path: '/settings/enterprise',
       handler: async (_req: IncomingMessage, res: ServerResponse) => {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
         res.end(ENTERPRISE_SETTINGS_HTML)
       },
-    }))
+    }), 'data-security settings page')
     this.ctx.logger?.info(`Data security service started (${this.config.enabled ? 'enabled' : 'disabled'})`)
-  }
-
-  async stop(): Promise<void> {
-    for (const dispose of this.disposers.splice(0)) {
-      try { dispose() } catch (error) { this.ctx.logger?.warn('route dispose failed', error) }
-    }
   }
 
   isEnabled(): boolean { return this.config.enabled }

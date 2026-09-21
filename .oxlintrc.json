@@ -27,6 +27,14 @@
       "rules": {
         "typescript/no-explicit-any": "off"
       }
+    },
+    {
+      "files": ["packages/enterprise/demo-video/scripts/**/*.mjs"],
+      "rules": {
+        "no-underscore-dangle": "off",
+        "no-await-in-loop": "off",
+        "unicorn/consistent-function-scoping": "off"
+      }
     }
   ],
   "ignorePatterns": [

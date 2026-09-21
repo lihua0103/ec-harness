@@ -20,7 +20,10 @@ from source_registry import SOURCE_ATTR
 #: 源头 → 投影白名单。改这里就是改整条数据红线。
 PROJECTION: dict[str, tuple[str, ...]] = {
     "dataset": ("name", "path", "columns", "rowCount", "dtypes", "nullCount", "uniqueCount"),
-    "aux-excel": ("path", "type", "size", "structure", "mappings", "datasets"),
+    # designSheets/codelists 是 ALS 设计语义（表单/字段/访视/码表），与
+    # mappings 同属"方案结构"而非受试者数据；业务 rows 仍不在表中。
+    "aux-excel": ("path", "type", "size", "structure", "mappings", "datasets",
+                  "designSheets", "inferredDesignSheets", "learnedEdcProfiles", "codelists"),
 }
 
 #: 场景①白名单（数据集 → 元数据）。

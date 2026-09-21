@@ -1,5 +1,159 @@
 # 更新日志
 
+## [2026-09-21] 新增企业插件 demo-video：系统模块操作演示视频四阶段流水线
+
+- 第五个企业插件 `@dsh-enterprise/demo-video`（row id `enterprise-demo-video`，
+  ADR-0011）：把"模块全操作走查 + 英文界面 + 神经语音配音 + 动作级同步字幕"流水线
+  从项目 skill 固化为随 dsh 企业层部署的插件能力。六个模型工具：
+  `enterprise_demo_preflight / record / anchors / narrate / compose / kb` +
+  systemPrompt section `tool:enterprise-demo`（order 126）。
+- 四阶段契约：S1 录制（walk 脚本子进程，DV_* 环境变量注入，timings.json 含
+  flashWall/黑条打点）→ S2 锚点（ffmpeg 场景检测掐头 + 顶边黑条两指针对齐）→
+  S3 旁白（edge-tts 合成 + 44.1k wav 铺轨 + captions.srt，改文案不用重录）→
+  S4 合成（libx264+烧字幕+faststart，自动版本递增）。S2/S3 核心算法以纯函数用
+  TypeScript 重写并值级单测；walk 模板/虚拟光标/TTS 合成作为随包 mjs/py 资产。
+- **S2 锚点新发现并修复 VFR 坑（pitfalls #12 修订）**：可变帧率 webm 里
+  black_end 会被稀疏帧拉长（实测 110ms 黑条记成 0.56s/1.16s 事件），"时长>0.2s=闪光"
+  口径会误删黑条——改为按场景检测闪光窗口排除 + 锚点取 black_start。
+- 数据安全（沿用首例红线并落进工具契约）：只点按钮不动数据（弹窗打开→取消、无确认层
+  直连写库按钮只高亮）；回执只含步骤日志/UI 标签/计数/亮度电平指标，页面帧不回流；
+  录制密码经宿主凭据（credentialRef）解析仅注入子进程环境变量；录制单飞互斥。
+- workDir 单目录契约（一个模块一个目录，产物全落该目录，成片版本自动递增）；
+  部署参数（ffmpeg/Chromium/playwright-core/python/音色语速/超时）走 cordis.patch.yml，
+  解析顺序 patch config > DV_* 环境变量 > PATH。
+- 验证：包内 20 单测全绿（纯核值级+装卸+schema+红线）+ 真实 ffmpeg 集成 2 项 +
+  四阶段真链路 E2E 全绿（无登录样例页→录制→锚点 8/8 命中→edge-tts 真配音 8 句→
+  合成 mp4：YAVG 227.9 / max_volume -2.5dB / 尾留白 4.32s / 21.88s）；
+  architecture（5 插件 7 Bundle 层）/ secrets / typecheck / profile verify（5 企业
+  Bundle）全过；`pnpm start` 3080 WebUI 启动验证。lint 基线另有 7 个存量 error 在
+  listing/tool-audit/scripts 的在途 WIP 文件（与本插件无关，未代改）。
+
+## [2026-09-10 晚] r_pk 输出模型修正：PK 基础表 + 新加列 + 单表 Excel（DM 口径）
+
+- 输出模型对齐成熟项目示例：PK 表为基础表（列/值原样），spec 处理变量 append 为新加列
+  （盲态 8 列/非盲态 15 列），单 sheet 平铺 Excel；撤销 Content/QC 页/审核列，QC 只进
+  note() 日志。模板与 djh.R 同步。
+- 匹配零命中防护：PK Subject 与 SUBJ.SUBJID 零命中/<50% 时醒目警告 + 排查出路
+  （实测 dummy 受试者号 R 样式与真实 EDC SUBJID 5 字母数字样式零交集——dummy 跑真实
+  EDC 新加列必空，属数据事实）。
+- djh.R 本地测试模式（对齐 manual listing）：Windows 调试覆写段（数据只读复制到
+  localtest/，产物落 localtest/Output）+ library 容错加载 + 文件头 UTF-8 locale 行
+  （中文文件名字面量 Windows 必需，服务器无害）。
+- 验证：本地真实链路（真实 EDC 缓存 + dummy PK）跑通、结构层验证（16 列/224 行/空列
+  全在预期、零命中警告触发）；模板 e2e 9 项全 PASS；listing 单测 47 项全绿。
+
+## [2026-09-10 下午] r_pk 车道复核修订（数统 DM 逐行复核 spec）
+
+- 五处偏差修正（模板 + 设计文档 §7）：VISIT=文件夹名原样（含 "(Period n)" 后缀，
+  spec 枚举与真实 FolderName 逐字一致）；FAST 矛盾 QC 改双向（两组给药前均要求禁食
+  ≥10h，"fed" 是给药前高脂餐不是不禁食）；ECDSTTIM 非 HH:MM 时给药时刻置 NA（绝不
+  拿 ECSTDAT 录入时间戳冒充）；QC_Match 新增 PK 重复行；QC_Derive 新增 Analyte≠SLFS。
+- P6 澄清：随机化 schedule 联表键可能按 RAND_ID。
+- 合成端到端 33 项断言全 PASS；listing 单测 47 项全绿。
+
+## [2026-09-10] listing 新增 r_pk 车道：PK Mapping 双盲映射数据集（R 程序）
+
+- 新工具 `enterprise_listing_run_pk(project, studyKey, dataDate, blindMode?, oldDate?,
+  password?, outputPrefix?, render?)` + 系统提示 section `tool:enterprise-listing-pk`
+  （order 118）；工具总数 6→7。
+- `src/r-runner.ts` 重构为 `RLaneSpec` 参数化：`RLaneRunner` 共用执行/回执骨架，
+  `RManualRunner` 原行为零变化，新增 `RPKRunner`（PK_LANE_DIRS 双数据目录校验、
+  `<studyKey>_PK_Mapping.R`、`DSH_R_BLIND_MODE` 运行时覆盖）。既有 40 项测试不动全绿。
+- 模板资产 `r-templates/pk_mapping.R.tmpl`：PK 浓度数据（02_Raw_csv，只读）× EDC sas
+  （01_Raw_sas，Rave 形态）按 受试者×周期×采样时点 合并成 spec 行序 23 变量数据集 +
+  3 张 QC sheet（受试者一致性/PK↔EDC 匹配/派生变量）。
+- 双盲：blinded（默认）SUBJID 确定性掩码 + SEQ/TRT/SEX/AGE/HEIGHT/WEIGHT/BMI 七列不出
+  （QC 同步掩码整本可外发）；unblinded 需随机化 schedule 文件（RAND_SCHED_FILE）。
+- 前置条件（数统编码口径，模板头 C1–C4）：ECYN 肯定才计给药；RT 给药时间=ECSTDAT+
+  ECDSTTIM 拼接；VS2 筛选期+VSPERF 肯定（无筛选期行 NA 不拿治疗期值充数）；PC=PCDAT
+  非空不做启发式过滤。成熟项目惯例（X1–X3）：原始 PK excel/EDC zip 只读不改；负 RT
+  按 0 截断+QC 留痕；时点标签优先 TPT_HOURS_OVERRIDE 显式映射表。
+- 已知坑（合成端到端实测）：`regmatches(regexpr)` 丢未命中元素导致向量错位——先 grepl
+  子集再提取；`attr<-` copy-on-modify——label 必须在对象进 outlisting 前贴。
+- 验证：listing 包单测 47 项全绿 + tsc 干净；合成数据端到端 25 项断言全 PASS
+  （盲态 16 列/非盲态 23 列、双盲列差恰 7 受限列、QC 全类别、RT/C1/C3 派生抽查）。
+  设计与待确认清单：`docs/enterprise/LISTING_PK_MAPPING_DESIGN.md`。
+
+## [2026-09-07] listing 新增 r_manual 车道：交付可独立运行的单文件 R 程序
+
+- 新工具 `enterprise_listing_run_r(project, studyKey, dataDate, oldDate?, password?, outputPrefix?, render?)`
+  + 系统提示 section `tool:enterprise-listing-r`（order 117）。project/studyKey/dataDate 由用户在对话中提供，
+  作为普通参数进入模型上下文；提示禁止推断。
+- 模板资产 `packages/enterprise/listing/r-templates/manual_listing.R.tmpl`（HXN6005 已验证程序泛化：
+  头部 7 个占位符 + 尾部 `summary.json` 运行摘要 + `note()` 告警收集 + `options(error)` 失败也写摘要）。
+- 宿主 `src/r-runner.ts`：渲染/写入 `SAS_Program/SAS_program/Manual Listing/<studyKey>_Manual_Listing.R` →
+  `Rscript` → 聚合回执；运行时参数经 `DSH_R_*` 环境变量覆盖（修改过的程序 `render=false` 换日期直接重跑，密码不落盘）。
+  稳定错误码：`PROJECT_NOT_FOUND / DATA_DATE_NOT_FOUND / R_PROGRAM_NOT_FOUND / R_NOT_FOUND / R_TIMEOUT / R_EXECUTION_ERROR`。
+- 部署配置 `rListing: { projectRoot, rscript, timeoutMs, templatePath }`（cordis.patch.yml），缺省项目根 `/mnt/project`，
+  Rscript 亦可经 `DSH_RSCRIPT` 指定。
+- 验证：本地按目录契约构造中文项目目录，仅放数据 zip（强制走解压分支），经宿主 runner 首次渲染 + 执行 →
+  83 listing / 12,729 行 / 6,269 flag / 84 sheet，27 秒；`render=false` 复用路径通过；产物页名无 `Manual_` 前缀、
+  Content 首页结构正确。单测 26/26（r-runner 8 + index 18）。
+- 平台坑：Windows 子进程最小环境缺 `PROCESSOR_ARCHITECTURE` 时 R 以 0xC0000005 崩溃，白名单已补齐处理器变量。
+- 需求口径修正（用户 2026-09-07）：DVP Manual Review 的 Report Description / Discrepancy Text 是 DM 人工核查逻辑，程序**不实现**；
+  程序只按 Visits Applied To × Related Fields 定范围、Condition 定行（Output if / flag=duplicated）、Column Heading 定列
+  （Raw data + 【表单】上下文列 + 派生列 + 匹配病史/AE/CM/PR 编号多选拆行）。模板 83 节按此重写（1887 → 800 行，公共原子
+  `raw/vis_scope/fields/dup_flag/ctx_cols/explode_match/stack_raw`），旧阈值配置段（R2–R7/R9）随之删除；真实数据重跑
+  83 listing / 17,762 行 / 84 sheet，duplicated 仅出现在 Condition 要求的 7 个 listing。已知占位：PT 术语来源编码结果未随数据包投递（[REPLACE R11]）。
+- R/dplyr 坑：`mutate(.d = ...)` 之类以 `.d` 开头的列名会部分匹配泛型 `.data` 形参，表达式在数据掩码外求值报 not found；hms 时间列经 dplyr 动词丢 haven 标签，`raw()` 先转文本再回填。
+- 新旧比对：首次交付无旧版，审核列统一记 New；模板 `[REPLACE R10]` 段是公司 `compare_data` 的挂接点，有旧版数据后传 oldDate 并接入即可，不属本次范围。HXN6005 即真实项目，车道已在其真实数据上完整验证。
+
+## [2026-09-07] ALS 设计表三层识别 + 保护值索引按真实 EDC 结构收窄
+
+### 背景（8 个真实项目核对）
+- 真实交付的 ALS 至少三种形态：Medidata Rave（Forms/Fields/Folders/DataDictionaryEntries/Matrix*）、
+  太美 EDC（Forms/Items/FormItem/CodeList*/DataStructure/Checks…）、ODM-DED 中文导出
+  （eCRF表单/变量列表/受控术语/访视流程）。原解析只认合成格式 `Dataset Name/Variable Name/Label`，
+  真实项目 ALS 映射为 0，整张设计表（表单名/字段标签/码表值/访视名）被当业务值灌入保护索引。
+- 实测 GQ1005-301（78 数据集）：保护哈希 14999，12 条普通 harness 输出 3 条被误拦
+  （vitest 统计行、`True False 2026` 字面量、ALS 表单名）。
+
+### 改动（红线不变：数据集行值 + 辅助 Excel 业务单元格值不出域；本地执行面不加任何限制）
+- `discovery`：已知 EDC 表头适配器（`_DESIGN_SHEET_SIGNATURES`）抽取 mappings/codelists/designSheets；
+  受试者级列（Subject/USUBJID/筛选号…）一票否决；`type=als` 仅在提取到映射或码表时判定。
+- `design_inference`（新）：名字无关的结构推断兜底任何新 EDC——值贴合数据集列名/数据集名为正向
+  证据；某列大量落在数据集高基数行值集合、日期列、行数超变量总数量级为负向一票否决；数据集未
+  加载时不推断（fail-closed）。否决集合只用于让更多表被判为业务表，从不用于放行任何值。
+- `edc_profiles`（新）：学习型注册表。推断成功的设计 sheet 登记表头形态与列角色（dataset/variable/label），
+  只存结构不存单元格值/项目名；此后同一 EDC 的导出在 discovery 层直接命中，无数据集也能抽映射。
+  路径由宿主 `DSH_EDC_PROFILES` 下发（默认 profiles/enterprise/.edc-profiles.json）；读写失败只降级为
+  "本次不学习"。
+- `worker.protected_value_hashes`：**哪些值是受试者数据由列基数决定，不看值的长相**——值随行变化的
+  列（受试者号、日期、检验值、自由文本、质疑内容）入索引；几十上百行只有几个值的列（码表解码、
+  访视名、表单名、状态、年份、中心、方案号）是方案词表，不入索引。小表（<20 行）借用同名列跨
+  数据集汇总的基数证据（EDC 同名列语义一致），汇总后仍不足才按数据保护。已披露结构值（数据集
+  列名、mappings、codelists、设计 sheet 单元格、项目目录名/文件名及其分词片段）不入索引。值级过滤
+  只剩：最小长度 4、JSON 字面量、孤立纯小写 ASCII 词（"text" 与英文散文无法区分）。撤掉本轮中途
+  引入的全部"值长相"启发式（含数字/大小写/纯数字位数/EDC 状态词表/主键猜测/_forced_hashes）。
+  bigram 只对含字母的多词值生成；时刻/日期切出的纯数字片段不拼 bigram。
+- `worker.text_contains_protected_value`：普通文本额外按空白切分做整值比对，`09:15`、`2024/01/05`
+  这类带内部分隔符的整值按原样精确匹配，不再依赖碎片拼接。
+- `index.ts`：post-execute 命中"扫描进程未就绪"时等待预热完成（上限 120s）再扫，不再把 inspect 之后
+  紧接着的普通工具调用整体封路；预热失败才 fail-closed。
+- `data_guard` aux-excel 白名单补 designSheets/inferredDesignSheets/learnedEdcProfiles/codelists；rows 仍不在表。
+- 系统提示与 AGENTS.md 同步 ALS 语义口径。
+
+### 验证
+- WebUI 真实会话（GLM-5.3-Flash，重启后 lib 生效）：GQ1005-301 inspect → `Get-ChildItem` 项目目录
+  → 列 Project 根目录 → grep 源码 → git status → Get-Date → read_metadata，6 步零拦截；修复前同一
+  会话 `Get-ChildItem` 被"受保护临床数据值"整体拦截（命中方案号 GQ1005-301 与文件名片段 V1.0）。
+  ALS 映射 4399 条、78 数据集经企业车道正常披露。
+- TAISHAN-304 真实项目冒烟通过：真实行值命中、普通英文诊断句放行。
+- 新增 tests/test_design_inference.py（虚构中文列名新 EDC：识别、推断映射、学习、二次无数据集命中、
+  受试者级导出不误判、注册表不可写不打断 inspect）、tests/test_scan_false_positives.py（列基数口径）。
+- pytest 200 通过（含真实项目冒烟）；listing TS 30 通过。
+
+## [2026-09-04] publish 交付文件名跟随申办方命名规范
+
+- listing_publish 输出由 `{SCENARIO}_LISTINGS.xlsx` 改为
+  `<项目标识>_{SCENARIO}_LISTINGS.xlsx`（项目标识 = 项目目录名），对齐申办方
+  `<方案号>_<文档类型>` 交付命名（如 CGB3002-RT01_DM Status Report
+  Specification_11Aug2026.xlsx）；八个真实项目同跑时交付文件不再同名混淆。
+- 侧车文件（`_changes.json` / `_run_history.jsonl`）随主文件 stem 自动跟随；
+  目录布局 `.clinical-listing/output/<scenario>/` 与 track_changes 同路径基线
+  回读机制不变。已发布的旧名文件不迁移，升级后首跑变化统计按全量新增重建基线。
+- 验证：pytest 183 通过；listing TS 30 通过（typecheck 0 错误）。
+
 ## [2026-09-03 第二批] 红线加固与智能保持并行:窄版 pre-execute 拒绝恢复 + 专用扫描 Worker
 
 ### 决策(双重标准:数据不出域 ∧ 不降低 harness 智能)

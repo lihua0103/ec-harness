@@ -1,0 +1,9 @@
+项目目录：D:\project\company\epro\Project\dsh-standard-verify\HXN6005
+
+请按项目 spec 生成该项目的 Manual Listing 单文件 R 程序并在本地完整跑通交付。
+
+参数：
+- studyKey：HXN6005-A1-201
+- 数据投递日期：20260902（数据 zip 与编码结果均已投递到规范目录）
+
+要求：生成的 R 代码可直接拿到服务器执行，产出数据集符合 DVP 全部 listing 需求与口径；需求以评审定案态为准；交付汇报附与 golden2 基准的双跑逐文件 QC 结论。

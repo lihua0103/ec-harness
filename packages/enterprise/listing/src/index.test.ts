@@ -101,7 +101,7 @@ describe('enterprise-listing plugin', () => {
     apply(made.ctx)
   })
 
-  it('声明正式 JSON Schema 并注册五个模型工具', () => {
+  it('声明正式 JSON Schema 并注册八个模型工具（含场景知识库 / r_manual / r_pk 车道）', () => {
     expect(inject).toEqual(['tools', 'systemPrompt', 'credentials'])
     expect([...tools.keys()]).toEqual([
       'enterprise_listing_inspect',
@@ -109,8 +109,42 @@ describe('enterprise-listing plugin', () => {
       'enterprise_listing_read_document',
       'enterprise_listing_run_code',
       'enterprise_listing_publish',
+      'enterprise_listing_kb',
+      'enterprise_listing_run_r',
+      'enterprise_listing_run_pk',
     ])
     for (const tool of tools.values()) expect(tool.output?.schema).toMatchObject({ type: 'object' })
+  })
+
+  it('注册场景知识库工具与五场景路由 section（order 116）', async () => {
+    const section = promptSections.find(item => item.name === 'knowledge:listing-scenarios')
+    expect(section?.order).toBe(116)
+    expect(section?.text).toContain('enterprise_listing_kb')
+    expect(section?.text).toContain('pk-mapping')
+    expect(section?.text).toContain('禁止猜场景')
+    const tool = tools.get('enterprise_listing_kb')
+    const properties = tool?.parameters as { properties: Record<string, unknown>; required: string[] }
+    expect(properties.required).toEqual(['scenario'])
+    expect(properties.properties.scenario).toMatchObject({ enum: ['router', 'manual', 'pk-mapping', 'medical', 'rbqm', 'report'] })
+    const result = await tool?.execute(
+      { scenario: 'manual' },
+      { agent: {}, signal: new AbortController().signal },
+    ) as { scenario: string; topic: string; content: string }
+    expect(result.scenario).toBe('manual')
+    expect(result.content).toContain('G1 医学编码')
+    const deep = await tool?.execute(
+      { scenario: 'manual', topic: 'pitfalls' },
+      { agent: {}, signal: new AbortController().signal },
+    ) as { content: string }
+    expect(deep.content).toContain('预防索引')
+    await expect(tool?.execute(
+      { scenario: 'manual', topic: 'nope' },
+      { agent: {}, signal: new AbortController().signal },
+    )).rejects.toMatchObject({ code: 'KB_TOPIC_INVALID' })
+    await expect(tool?.execute(
+      { scenario: 'nope' },
+      { agent: {}, signal: new AbortController().signal },
+    )).rejects.toMatchObject({ code: 'KB_SCENARIO_INVALID' })
   })
 
   it('工具 schema 不暴露拦截开关或扩展名配置', () => {
@@ -122,15 +156,55 @@ describe('enterprise-listing plugin', () => {
     }
   })
 
+  it('systemPrompt 注入 r_manual 车道引导（order 117，项目输入由用户提供）', () => {
+    const section = promptSections.find(item => item.name === 'tool:enterprise-listing-r')
+    expect(section?.order).toBe(117)
+    expect(section?.text).toContain('enterprise_listing_run_r')
+    expect(section?.text).toContain('不要猜测或从其他材料推断')
+    expect(section?.text).toContain('render=false')
+    expect(section?.text).toContain('/mnt/project')
+    const tool = tools.get('enterprise_listing_run_r')
+    const properties = (tool?.parameters as { properties: Record<string, unknown>; required: string[] })
+    expect(properties.required).toEqual(['project', 'studyKey', 'dataDate'])
+  })
+
+  it('systemPrompt 注入 r_pk 车道引导（order 118，双盲口径与目录契约）', () => {
+    const section = promptSections.find(item => item.name === 'tool:enterprise-listing-pk')
+    expect(section?.order).toBe(118)
+    expect(section?.text).toContain('enterprise_listing_run_pk')
+    expect(section?.text).toContain('02_Raw_csv/PK Mapping')
+    expect(section?.text).toContain('01_Raw_sas/PK Mapping')
+    expect(section?.text).toContain('SAS_Program/SAS_program/PK Mapping')
+    expect(section?.text).toContain('blindMode=blinded')
+    expect(section?.text).toContain('LISTING_PK_MAPPING_DESIGN.md')
+    const tool = tools.get('enterprise_listing_run_pk')
+    const properties = (tool?.parameters as { properties: Record<string, unknown>; required: string[] })
+    expect(properties.required).toEqual(['project', 'studyKey', 'dataDate'])
+    expect(properties.properties.redactDisabled).toBeUndefined()
+  })
+
+  it('run_r 不经过 Python Worker，且项目根来自部署配置', async () => {
+    const made = makeContext()
+    apply(made.ctx, { rListing: { projectRoot: 'D:/deploy/projects' } })
+    const section = made.promptSections.find(item => item.name === 'tool:enterprise-listing-r')
+    expect(section?.text).toContain('D:/deploy/projects')
+    await expect(made.tools.get('enterprise_listing_run_r')?.execute(
+      { project: 'nope', studyKey: 'X-1', dataDate: '20260907' },
+      { agent: {}, signal: new AbortController().signal },
+    )).rejects.toMatchObject({ code: 'PROJECT_NOT_FOUND' })
+    expect(requests).toHaveLength(0)
+  })
+
   it('systemPrompt 注入模板引导与宿主数据安全边界', () => {
-    expect(promptSections).toHaveLength(1)
+    expect(promptSections).toHaveLength(4)
     const text = promptSections[0]?.text || ''
     expect(text).toContain('标准输出范例')
     expect(text).toContain('RT01 标准')
     expect(text).toContain('DM Status Report')
     expect(text).toContain('doc/ 全目录')
     expect(text).toContain('完整进入 requirementDocuments 分片')
-    expect(text).toContain('未读完不得 run_code')
+    expect(text).toContain('不必整本读入上下文')
+    expect(text).toContain('unreadRequirementChunkCount')
     expect(text).toContain('doc/ 外 spec 需求辅助 Excel')
     expect(text).toContain('stdout/stderr 内容省略')
     expect(text).toContain('_layout')

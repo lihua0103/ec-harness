@@ -23,4 +23,6 @@ llm-pi-ai:
       apiKeyEnv: OPENAI_API_KEY
 agent-default-model:
   provider: zai-coding-cn
-  model: glm-5.3
+  model: GLM-5.3-Flash
+ui-theme:
+  preference: system

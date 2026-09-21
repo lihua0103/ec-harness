@@ -11,7 +11,8 @@
         "@dsh-enterprise/ui-settings",
         "@dsh-enterprise/tool-audit",
         "@dsh-enterprise/branding",
-        "@dsh-enterprise/listing"
+        "@dsh-enterprise/listing",
+        "@dsh-enterprise/demo-video"
       ]
     }
   },
@@ -19,6 +20,7 @@
     "@dsh-enterprise/tool-audit": "link:../../packages/enterprise/tool-audit",
     "@dsh-enterprise/ui-settings": "link:../../packages/enterprise/ui-settings",
     "@dsh-enterprise/branding": "link:../../packages/enterprise/branding",
-    "@dsh-enterprise/listing": "link:../../packages/enterprise/listing"
+    "@dsh-enterprise/listing": "link:../../packages/enterprise/listing",
+    "@dsh-enterprise/demo-video": "link:../../packages/enterprise/demo-video"
   }
 }

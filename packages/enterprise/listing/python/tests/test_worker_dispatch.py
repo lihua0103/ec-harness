@@ -133,12 +133,15 @@ def test_inspect_seeds_session_so_run_code_skips_reload(project):
     assert result["receipt"]["outputCount"] == 1
 
 
-def test_run_code_requires_all_documents_when_session_cold(project):
+def test_run_code_soft_discloses_unread_requirements(project):
+    """未读完需求分片不再硬拦 run_code（22MB 通用 DVP 模板整本读入上下文
+    不可行）：回执软披露未读覆盖，由模型自行判断需求理解是否充分。"""
     result = worker.dispatch({
         "operation": "listing_run_code", "project": str(project),
         "code": 'outputs={"AE": datasets["AE"].copy()}'})
-    assert result["ok"] is False
-    assert result["code"] == "REQUIREMENTS_NOT_FULLY_READ"
+    assert result["ok"] is True, result
+    assert result["receipt"]["requirementsFullyRead"] is False
+    assert result["receipt"]["unreadRequirementChunkCount"] > 0
 
 def test_run_code_stdout_value_omitted(project):
     inspect_and_read(project)
@@ -212,7 +215,7 @@ def test_publish_flow_and_fingerprint(project):
     assert result["ok"] is True, result
     receipt = result["receipt"]
     assert receipt["format"] == "single-workbook-multi-sheet-xlsx"
-    assert receipt["outputFile"] == ".clinical-listing/output/medical/MEDICAL_LISTINGS.xlsx"
+    assert receipt["outputFile"] == f".clinical-listing/output/medical/{project.name}_MEDICAL_LISTINGS.xlsx"
     assert (project / receipt["outputFile"]).exists()
     assert receipt["outputCount"] == 1
     assert "statistics" not in receipt and "sheetNames" not in receipt
@@ -299,6 +302,31 @@ def test_scan_text_keeps_protected_values_in_worker_session(project):
     assert protected == {"ok": True, "containsProtectedValue": True}
     assert ordinary == {"ok": True, "containsProtectedValue": False}
     assert "SUBJ-777" not in json.dumps(protected)
+
+
+def test_scan_text_ignores_lane_disclosed_als_triples(project):
+    """ALS 三元组（datasetName/variableName/label）经 read_metadata 本就披露
+    给模型，不再作为通用扫描保护值；辅助 Excel 业务单元格（Notes 页）仍然
+    拦截——否则 grep inspect spill 等正常侦察必被误拦。"""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "ALS"
+    ws.append(["Dataset Name", "Variable Name", "Label"])
+    ws.append(["AE", "USUBJID", "Adverse Event Term"])
+    notes = wb.create_sheet("Notes")
+    notes.append(["note"])
+    notes.append(["SECRET-NOTE-42"])
+    wb.save(project / "als.xlsx")
+
+    worker.dispatch({"operation": "listing_inspect", "project": str(project)})
+    def scan(text):
+        return worker.dispatch({
+            "operation": "listing_scan_text", "project": str(project),
+            "text": text})["containsProtectedValue"]
+    assert scan("check USUBJID and Adverse Event Term mappings") is False
+    assert scan("leaked SECRET-NOTE-42") is True
 
 
 def test_scan_text_requires_initialized_session(project):

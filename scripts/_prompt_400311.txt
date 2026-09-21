@@ -1,0 +1,10 @@
+项目目录：D:\project\company\epro\Project\dsh-standard-verify\400311
+
+请按项目 spec 生成该项目的 PK Mapping R 程序并在本地完整跑通交付。
+
+参数：
+- studyKey：400311
+- 数据投递日期：20260910（EDC sas 与 PK 浓度传输件均已投递到规范目录）
+- 本批为双盲项目，按双盲口径交付
+
+要求：生成的 R 代码可直接拿到服务器执行，产出数据集符合 spec 的变量全集与口径；交付汇报附与 golden 基准的双跑逐文件 QC 结论。

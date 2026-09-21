@@ -11,11 +11,13 @@
  * 通用工具结果经宿主保护值扫描，命中两类受保护值的结果被整体拦截
  * （2026-09-03 口径修订：通用车道防线 = 值级 post-execute 扫描，见 ADR-0010 修订记录）。
  */
-import { existsSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import { PythonWorker, type WorkerResponse } from './worker.js'
+import { RManualRunner, RPKRunner, R_LANE_DIRS, PK_LANE_DIRS, DEFAULT_PROJECT_ROOT, type RLaneConfig } from './r-runner.js'
 
 export const name = 'enterprise-listing'
 export const inject = ['tools', 'systemPrompt', 'credentials']
@@ -24,11 +26,17 @@ export const inject = ['tools', 'systemPrompt', 'credentials']
 export interface ListingConfig {
   /** report 场景 Cover Page 行标签（如申办方特定文案）。 */
   reportCoverLabels?: string[]
+  /** r_manual 车道：项目根（缺省 /mnt/project）、Rscript 路径、超时、模板路径。 */
+  rListing?: RLaneConfig
 }
 
 const HEAVY_TIMEOUT_MS = 900_000
 const SCAN_TIMEOUT_MS = 60_000
-const SCENARIOS = ['medical', 'rbqm', 'manual', 'report'] as const
+/** 程序执行工具：其结果是程序工作日志（生成 listing Excel 的管道），按用户口径不拦截。 */
+const EXECUTION_TOOLS = new Set(['pwsh', 'bash', 'sh', 'shell', 'terminal'])
+/** 扫描预热等待上限：大项目（99 数据集归档）预热实测数十秒，超时才 fail-closed。 */
+const SCAN_WARMUP_WAIT_MS = 120_000
+const SCENARIOS = ['medical', 'rbqm', 'manual', 'report', 'r_manual'] as const
 
 interface ToolExecutionContext {
   agent: { ctx?: { effect: (effect: () => () => void) => unknown } }
@@ -108,7 +116,7 @@ async function resolveArchiveCredential(
 ): Promise<string | undefined> {
   if (credentialRef === undefined) return undefined
   if (!CREDENTIAL_REF_PATTERN.test(credentialRef)) {
-    throw Object.assign(new Error('加密归档凭据引用格式无效；credentialRef 必须是宿主凭据名，不是密码。'), {
+    throw Object.assign(new Error('加密归档凭据引用格式无效；credentialRef 必须是宿主凭据名，不是密码。不要重试其他凭据名变体：若密码可由项目材料推导（项目名/归档名/doc 内 .txt 等文件名），直接省略 credentialRef，Worker 会自动推导。'), {
       code: 'ARCHIVE_CREDENTIAL_REF_INVALID', expose: true,
     })
   }
@@ -116,14 +124,14 @@ async function resolveArchiveCredential(
     const resolved = await ctx.credentials?.resolve(credentialRef)
     const value = resolved?.value
     if (typeof value !== 'string' || value.length === 0) {
-      throw Object.assign(new Error(`宿主凭据 ${credentialRef} 未配置加密归档密码。`), {
+      throw Object.assign(new Error(`宿主凭据 ${credentialRef} 未配置加密归档密码。省略 credentialRef 重试即可启用自动密码推导（项目名/归档名/doc 内文件名候选）。`), {
         code: 'ARCHIVE_CREDENTIAL_NOT_CONFIGURED', expose: true,
       })
     }
     return value
   } catch (error) {
     if ((error as { code?: string }).code?.startsWith('ARCHIVE_CREDENTIAL_')) throw error
-    throw Object.assign(new Error(`宿主凭据 ${credentialRef} 解析失败。`), {
+    throw Object.assign(new Error(`宿主凭据 ${credentialRef} 解析失败。省略 credentialRef 重试即可启用自动密码推导（项目名/归档名/doc 内文件名候选）。`), {
       code: 'ARCHIVE_CREDENTIAL_RESOLVE_FAILED', expose: true,
     })
   }
@@ -250,15 +258,21 @@ export function apply(ctx: Context, config: ListingConfig = {}): void {
    *  同时预热专用扫描 Worker（listing_scan_init）：只保留保护值哈希、
    *  释放数据，与主车道 Worker 分进程——通用工具结果扫描不再被
    *  900 秒 run_code 阻塞（实测暴露的批量误拦根因）。 */
+  /** 扫描预热的进行中 Promise（按 Agent）：post-execute 命中"未就绪"时等它
+   *  完成再扫，而不是把 inspect 之后紧接着的普通工具调用整体封路——那是
+   *  纯时序误伤，不是泄露。预热失败才 fail-closed。 */
+  const scanReady = new Map<object, Promise<boolean>>()
   const bindProject = (exec: ToolExecutionContext, project: string): void => {
     activeProjects.set(exec.agent, project)
     try {
-      void scanWorkerFor(exec).request(
+      const warmup = scanWorkerFor(exec).request(
         { operation: 'listing_scan_init', project, ...hostFlags(listing) },
-        HEAVY_TIMEOUT_MS, exec.signal,
-      ).catch(() => {
+        HEAVY_TIMEOUT_MS,
+      ).then(result => result.ok === true, () => {
         listing.logger?.warn?.('[enterprise-listing] scan worker init failed; generic results stay blocked until ready')
+        return false
       })
+      scanReady.set(exec.agent, warmup)
     } catch {
       // 预热启动失败不阻断主车道；后续扫描按未初始化 fail-closed。
     }
@@ -318,14 +332,14 @@ export function apply(ctx: Context, config: ListingConfig = {}): void {
 
 ## 强制工作流
 1. enterprise_listing_inspect：获取 doc/ 全量需求清单（requirementDocuments manifest）、doc 外辅助 Excel 结构与 ALS 语义映射、数据集元数据（列名/行数/dtype/null/unique）；大结果不得读取通用工具 spill，改用 enterprise_listing_read_metadata 分页
-2. enterprise_listing_read_document：按 documentId 和 chunkIndex 顺序读取需求分片；每个文件必须从 0 读到最后一个 isFinal chunk，所有分片按顺序拼接后解析，未读完不得 run_code
+2. enterprise_listing_read_document：按 documentId 和 chunkIndex 顺序读取需求分片（从 0 开始，按序拼接解析）。大型模板类需求（如通用 DVP）不必整本读入上下文：未读完的分片不阻塞 run_code——沙箱已注入完整 requirements/spec_documents 对象，可在 run_code 内按 sheet 名或关键字直接提取目标需求表；交付所依赖的需求表必须已确认理解，run_code 回执的 unreadRequirementChunkCount 提示未读覆盖
 3. enterprise_listing_read_metadata：在企业车道分页读取完整数据集元数据和辅助文件结构；只返回结构，不返回数据集行值或辅助 Excel rows。数据集较多时先调用 compact=true（只含 name/path/columns/rowCount，全目录一页读完），再仅对关键数据集用普通分页取详细统计
 4. enterprise_listing_run_code：生成 outputs 字典，每个键是工作表名，每个值是 pandas DataFrame
 5. enterprise_listing_publish：唯一交付路径，生成单个规范化 Multi-Sheet Excel
 
 场景选择必须依据完整 doc/ 需求和表单结构，在 publish 时显式传入 manual、medical、rbqm 或 report 之一；禁止根据项目目录名、数据集名称或历史产物推断场景，无法确定时不得发布。
 
-加密归档的 credentialRef 只能填宿主凭据引用名；宿主解析密码，密码值不会进入模型。
+加密归档默认不传任何密码参数：省略 credentialRef 时 Worker 自动从项目名、归档名与项目内 .txt/.xlsx/.xls 文件名及归档同名 sidecar 内容推导密码。仅当自动推导失败且部署方已在宿主配置凭据时，才传宿主凭据引用名；不能把密码本身填进 credentialRef，也不要反复尝试凭据名变体。
 
 **交付纪律**：交付一律走 enterprise_listing_publish（自动处理全部格式化和样式）；run_code 中不要用 to_excel/to_csv 写交付文件——中间/临时文件随意（执行面不受限，别绕过统一交付即可）。数据安全开关开启时，run_code 成功回执只含输出数量、行数、列数、dtype 与空值统计，不含输出名、列名或 stdout/stderr 内容；开关关闭时按原始回执返回。
 
@@ -334,7 +348,7 @@ export function apply(ctx: Context, config: ListingConfig = {}): void {
 ### Manual/Medical 场景（RT01 标准）
 - Content Sheet（自动生成）：Row 1 标题 "Comparison Summary"；Row 2 表头 ["Listing Seq.", "Form Name", "New/Modified ?", "Total", "New", "Modified", "Old"]；Row 3+ 每业务表变化统计
 - 业务 Sheet：Row 1 返回链接 + Sheet 名；Row 2 字段 Label；Row 3+ 数据
-- 默认补齐审核列：Flag1, __cmp_FLAG__, __cmp_UpdateDetail__, __cmp_RCcomment__, __cmp_Idate__
+- 默认补齐审核列：__cmp_FLAG__, __cmp_UpdateDetail__, __cmp_RCcomment__, __cmp_Idate__（不注入空 Flag1；flag 列仅该表 Condition 明确要求时存在）
 
 ### Report 场景（DM Status Report 标准）
 - Cover Page（自动生成）：申办方 / 方案编号 / 项目编号 / 报告日期（来自首个 DataFrame 的 attrs["report_metadata"]）
@@ -364,7 +378,7 @@ df.attrs["_layout"] = {
 
 ## 数据可见性（部署方策略，非模型可控）
 - **doc/ 全目录（含文本、Excel、模板、二进制文件）**：完整进入 requirementDocuments 分片；不截断、不摘要、不投影，所有业务单元格值可读
-- **doc/ 外 spec 需求辅助 Excel**：结构、统计、ALS 三元组可读；业务单元格值不出域
+- **doc/ 外 spec 需求辅助 Excel**：结构、统计、ALS 语义可读（mappings 三元组、codelists 码表、designSheets 设计 sheet 清单；EDC 设计表按已知适配器或与数据集结构对照自动识别，新 EDC 首次识别后会被学习）；质疑日志/页面明细/编码结果等业务单元格值不出域
 - **数据集（sas7bdat/xpt/csv）**：只含元数据（列名/行数/dtype/nullCount/uniqueCount），行值不出域；行数据在 sandbox 的 datasets 变量中供你计算
 - **执行快照**：sandbox 已注入 \`requirements\`/\`spec_documents\`（inspect 读取的 doc/ 全量对象）和 \`auxiliary_documents\`（同一次 inspect 读取的 doc 外辅助表内部对象）；优先使用这些对象，不要重新猜测或定位 Coding Results/ALS 文件路径
 - **run_code 回执（开关开启）**：stdout/stderr 内容省略；输出名与列名留在 Worker 会话和最终 Excel，避免成为数据值通道
@@ -384,11 +398,11 @@ df.attrs["_layout"] = {
 
   registerTool(listing, {
     name: 'enterprise_listing_inspect',
-    description: '获取 doc/ 全量需求文件 manifest、doc 外辅助 Excel 结构与 ALS 语义映射，并扫描 SAS/XPT/CSV 数据集元数据。credentialRef 是宿主凭据引用名。调用后必须用 read_document 读完所有分片。',
+    description: '获取 doc/ 全量需求文件 manifest、doc 外辅助 Excel 结构与 ALS 语义映射，并扫描 SAS/XPT/CSV 数据集元数据。加密归档密码自动推导，credentialRef 可省略。调用后必须用 read_document 读完所有分片。',
     parameters: { type: 'object', properties: {
       project: { type: 'string', description: 'harness 项目绝对路径' },
       scenario: { type: 'string', enum: SCENARIOS, description: 'Listing 场景类型（可选）' },
-      credentialRef: { type: 'string', description: '加密归档凭据引用（可选）' },
+      credentialRef: { type: 'string', description: '宿主凭据引用名（可选）；仅在自动密码推导失败且宿主已配置时使用，不要填密码本身' },
     }, required: ['project'], additionalProperties: false },
     async execute(args, exec) {
       const { scenario, credentialRef } = args as {
@@ -459,7 +473,7 @@ df.attrs["_layout"] = {
     parameters: { type: 'object', properties: {
       project: { type: 'string', description: 'harness 项目绝对路径' },
       code: { type: 'string', description: '多行 Python/pandas 代码，必须定义 outputs' },
-      credentialRef: { type: 'string', description: '加密归档凭据引用（可选）' },
+      credentialRef: { type: 'string', description: '宿主凭据引用名（可选）；仅在自动密码推导失败且宿主已配置时使用，不要填密码本身' },
     }, required: ['project', 'code'], additionalProperties: false },
     async execute(args, exec) {
       const { code, credentialRef } = args as {
@@ -501,11 +515,269 @@ df.attrs["_layout"] = {
     },
   })
 
+  // ---- 场景知识库（企业级 master，随插件部署、git 版本化）--------------------
+  const KB_DOCS: Record<string, Record<string, string>> = {
+    router: { overview: 'router.md' },
+    manual: {
+      overview: 'manual/listing-manual.md',
+      'scenario-kb': 'manual/baiaozhi-scenario-kb.md',
+      'edc-baiaozhi': 'manual/edc-baiaozhi.md',
+      'export-template': 'manual/baiaozhi-export-template.md',
+      'dvp-patterns': 'manual/dvp-patterns.md',
+      pitfalls: 'manual/pitfalls.md',
+      'output-spec': 'manual/output-spec.md',
+      'password-rule': 'manual/password-rule.md',
+    },
+    'pk-mapping': {
+      overview: 'pk-mapping/listing-pk-mapping.md',
+      'style-exemplar': 'pk-mapping/assets/mainprog-style-exemplar.R',
+    },
+    medical: { overview: 'medical/listing-medical.md' },
+    rbqm: { overview: 'rbqm/listing-rbqm.md' },
+    report: { overview: 'report/listing-report.md' },
+  }
+  const KNOWLEDGE_DIR = fileURLToPath(new URL('../knowledge', import.meta.url))
+  const kbContent = (scenario: string, topic: string): string => {
+    const docs = KB_DOCS[scenario]
+    if (!docs)
+      throw Object.assign(new Error(`未知场景：${scenario}（可选 ${Object.keys(KB_DOCS).join('/')}）`), { code: 'KB_SCENARIO_INVALID', expose: true })
+    const rel = docs[topic]
+    if (!rel)
+      throw Object.assign(
+        new Error(`场景 ${scenario} 无该主题：${topic}（可选 ${Object.keys(docs).join('/')}）`),
+        { code: 'KB_TOPIC_INVALID', expose: true })
+    const p = join(KNOWLEDGE_DIR, rel)
+    if (!existsSync(p))
+      throw Object.assign(new Error(`场景库文件缺失：${rel}（部署不完整）`), { code: 'KB_FILE_MISSING', expose: true })
+    return readFileSync(p, 'utf8')
+  }
+  listing.systemPrompt.section({
+    name: 'knowledge:listing-scenarios', order: 116,
+    text: `# Listing 场景知识库（五场景自动发现 + 写码前门禁）
+
+企业级场景知识库随本插件部署（master，git 版本化）。**处理任何 listing 需求的第一步**：
+按需求特征签名自动发现场景——manual（DVP/数据核查计划→单文件 R 程序）、pk-mapping
+（PK 浓度×EDC 合并/双盲）、medical（医学核查）、rbqm（风险指标）、report（报表）——
+先调 \`enterprise_listing_kb({scenario:"router"})\` 取路由表确认场景，再取对应场景库，
+**声明本次适用的门禁（Gate）清单**；门禁未过不得渲染/编辑程序或写码。medical 与
+manual 需求文本可能相似但**各自走库**，禁止互相代理口径。签名不命中→向用户澄清，
+禁止猜场景。
+
+经验沉淀（企业级"再训练"闭环）：项目收尾/新错误/新口径 → postmortem 提案写入项目
+目录 \`.dsh/kb-capture/<场景>-<日期>.md\`（AI 不直写部署库）→ 人工评审合入
+knowledge/<场景>/（Gate 强化/口径/坑三处落地）→ 跑 dsh-standard-verify eval →
+随插件版本化发布。铁律：没有回填 Gate 的修复不算完成；没跑 eval 的知识库改动不算
+完成；沉淀方法论不沉淀字段值。`,
+  })
+  registerTool(listing, {
+    name: 'enterprise_listing_kb',
+    description: '读取随插件部署的企业级 listing 场景知识库（五场景：manual/pk-mapping/medical/rbqm/report；scenario="router" 取总路由做场景自动发现与门禁清单）。manual 场景支持 topic 深库：scenario-kb（口径终案+编码方法论）/edc-baiaozhi（EDC 系统数据模式）/export-template/dvp-patterns（派生列模式）/pitfalls（坑库+预防索引）/output-spec/password-rule。知识内容为方法论与门禁，不含任何数据值。',
+    parameters: { type: 'object', properties: {
+      scenario: { type: 'string', enum: Object.keys(KB_DOCS), description: '场景名；router=总路由（五场景矩阵/沉淀闭环）' },
+      topic: { type: 'string', description: '主题（可选，缺省 overview=场景总览含门禁清单；manual 场景可选深库主题见工具描述）' },
+    }, required: ['scenario'], additionalProperties: false },
+    async execute(args) {
+      const { scenario, topic } = args as { scenario: string; topic?: string }
+      return { scenario, topic: topic ?? 'overview', content: kbContent(scenario, topic ?? 'overview') }
+    },
+  })
+
+  // ---- r_manual 车道：交付物 = 可独立 Rscript 运行的单文件 R 程序 ----------
+  const rRunner = new RManualRunner(config.rListing, listing.logger)
+  const rProjectRoot = config.rListing?.projectRoot || DEFAULT_PROJECT_ROOT
+  listing.systemPrompt.section({
+    name: 'tool:enterprise-listing-r', order: 117,
+    text: `# 临床 Manual Listing R 车道（r_manual）
+
+适用：DVP 已固化、项目目录按固定契约投递、交付物是**一份可直接在服务器 Rscript 运行的 R 程序**（TAISHAN 风格单文件）。此时不走 inspect → run_code → publish，改走 enterprise_listing_run_r。
+
+## 目录契约（固定，只有项目目录名可变；项目根 ${rProjectRoot}）
+- ${R_LANE_DIRS.data}/<dataDate>/：数据 zip（+ 可选密码 .txt）与 R 程序生成的 RData 缓存
+- ${R_LANE_DIRS.program}/<studyKey>_Manual_Listing.R：渲染后的 R 程序（交付物）
+- ${R_LANE_DIRS.output}/：<studyKey>_Manual Listing_<dataDate>.xlsx/.RDS（唯一交付目录）
+
+## 工作流
+1. 向用户确认三项输入并原样传入：project（项目目录名，如 "华睿医药_HXN6005-A1-201_HHSZCNDM01"，或绝对路径）、studyKey（方案号，如 HXN6005-A1-201）、dataDate（数据投递文件夹名，如 20260907）；可选 oldDate（旧版日期）、password（zip 密码）。不要猜测或从其他材料推断这些值。
+2. **模板零业务逻辑（2026-09-17 用户定案，2026-09-19 manual 车道同型落地）**：首次调用
+   enterprise_listing_run_r（render 缺省）先渲染程序骨架到项目目录——模板只含契约层
+   （读数缓存/ALS/解码/PT+WHODrug 装载/展开原语/输出样式/运行摘要），业务区未生成即运行
+   会 fail-fast 并给出生成契约出路（这是预期守卫，不是缺陷）。随后按程序头 DSH-BUSINESS-ZONE
+   生成区契约生成三个业务区：B1 context（受试者上下文与项目参照表：A_* 活动表/CTX 跨表
+   上下文列/add_ctx/CTX_DROP/AE_REF/MH_REF/PT_DUP——列集与聚合规则逐列对照本项目 DVP
+   Column Heading 实证）、B2 listings（DVP Manual Review 每一需求行一节装配
+   outlisting$<数据集>_<序号>，漏行=失败）、B3 titles（LISTING_TITLES 显示词表=ALS 官方
+   词汇零自造）；生成后 render=false 执行。回执只含聚合计数（listing 数/行数/flag 数/
+   sheet 数）、产物文件名与告警，不含任何数据行值。
+3. 需要按项目 DVP 调整时：直接编辑项目目录中的 R 程序（对应业务生成区或各行节），再以
+   render=false 重跑。render=true 会用模板覆盖已修改的程序，只在需要重置时使用。
+   DVP Manual Review 各列的职责：Visits Applied To × Related Fields 定范围（ALL / All items
+   即全量）；Condition 定行（Output if 筛选、flag=duplicated 重复标记）；Column Heading 定列
+   （Raw data 原样红线 + 【表单】上下文列 + 派生列 + 匹配病史/AE/药物/非药物拆行）。
+   Report Description / Discrepancy Text Message 是 DM 人工核查内容，程序不实现、不产出核查 flag。
+4. 换数据日期重跑同一程序：只改 dataDate，render=false（运行时参数经环境变量覆盖，无需重新渲染）。
+5. 执行失败回执带 R 的 stop 信息与程序路径；按提示核对数据目录、依赖包（haven/dplyr/tidyr/purrr/stringr/openxlsx）或修正程序后重跑。R_NOT_FOUND 表示部署机缺 Rscript，属部署问题，如实告知用户。
+
+## 经验知识库与前置门禁（企业库 master，推式复用）
+manual listing 场景的全部经验（真实项目收官验证，车道模板与其骨架同源同算法）沉淀在
+**企业场景知识库**（随本插件部署）。**执行前第一步**：调 \`enterprise_listing_kb\`
+（scenario="manual"）取场景总览，按 DVP/spec 特征签名**声明本次适用的门禁（Gate）**——
+要点：G1 医学编码（PT术语类派生列→必探测 编码|coding 文件、页名键对 DataPageName
+实际值域核对，勿从 spec 抄词）；G3 访视过滤（kw 必对 vlab 解码后实际访视值域核对，
+合并表单是"X/Y"完整组合串，零命中即停）；G5 判定字段（按列自身 format.sas 绑定解码，
+勿按列名猜）；G7 派生列（逐列识别来源，拿不准问用户不代理）。**门禁未过不得渲染/
+编辑程序**——已知坑靠门禁前置拦截，不靠报错后修正。门禁对应的深库按需拉取：
+topic=scenario-kb（口径终案+编码方法论）/ edc-baiaozhi（EDC 数据模式）/
+dvp-patterns（派生列模式）/ pitfalls（坑库+预防索引）/ output-spec / password-rule。
+门禁仍拦不住的新错误：修完回填 Gate（pitfalls 新 postmortem，经 .dsh/kb-capture
+提案人工合入）并跑 dsh-standard-verify 回归，才算闭环（沉淀闭环全貌见
+enterprise_listing_kb scenario="router"）。
+
+## 边界
+- 宿主不解析数据行值；R 程序内部读数、核查、样式化 xlsx 全程在项目目录完成。
+- 一次运行的全部 listing 由同一份 R 程序产出、落同一个 xlsx，不要再用 publish 二次发布。`,
+  })
+
+  registerTool(listing, {
+    name: 'enterprise_listing_run_r',
+    description: 'r_manual 车道：按模板渲染（首次）并以 Rscript 执行项目目录中的单文件 Manual Listing R 程序，返回聚合回执（listing/行/flag 计数、产物文件名、告警）。project/studyKey/dataDate 必须由用户提供，不要推断。',
+    parameters: { type: 'object', properties: {
+      project: { type: 'string', description: `用户提供的项目目录名（位于 ${rProjectRoot} 下）或项目目录绝对路径` },
+      studyKey: { type: 'string', description: '用户提供的方案号/项目关键字，如 HXN6005-A1-201；构成程序文件名与交付文件名前缀' },
+      dataDate: { type: 'string', description: '用户提供的数据投递文件夹名，如 20260907' },
+      oldDate: { type: 'string', description: '旧版数据日期（新旧比对用，可选）' },
+      password: { type: 'string', description: '数据 zip 密码（可选；经环境变量传给 R，不写入程序文件）' },
+      outputPrefix: { type: 'string', description: '交付文件名前缀（可选；缺省 "<studyKey>_Manual Listing"）' },
+      render: { type: 'boolean', description: '缺省=程序不存在时才渲染；true=用模板覆盖重生成；false=必须复用已有程序（修改过程序后重跑用）' },
+    }, required: ['project', 'studyKey', 'dataDate'], additionalProperties: false },
+    async execute(args, exec) {
+      const { project, studyKey, dataDate, oldDate, password, outputPrefix, render } = args as {
+        project: string; studyKey: string; dataDate: string; oldDate?: string
+        password?: string; outputPrefix?: string; render?: boolean
+      }
+      return rRunner.run(
+        { project, studyKey, dataDate, oldDate, password, outputPrefix, render, signal: exec.signal },
+        interceptionEnabled(listing),
+      )
+    },
+  })
+
+  // ---- r_pk 车道：PK Mapping（双盲映射数据集）R 程序 --------------------
+  const pkRunner = new RPKRunner(config.rListing, listing.logger)
+  listing.systemPrompt.section({
+    name: 'tool:enterprise-listing-pk', order: 118,
+    text: `# PK Mapping R 车道（r_pk）
+
+适用：PK/PD Mapping Spec（如双盲 BE 项目的 "PK (PD) Non-Compartmental Model" sheet）已固化、
+目录按固定契约投递，交付物是**一份可直接在服务器 Rscript 运行的 R 程序**——把 PK 浓度数据
+（csv/xls，只读）与 EDC sas（Rave 形态导出）按 受试者×周期×采样时点 合并成 spec 行序的映射
+数据集（STUDYID/SUBJID/COHORT/FAST/SEQ/TRT/PERIOD/VISIT/ANALYTE/DOSE/NTPT/NT/RT/
+Concentration/…，spec 行序）；输出=人工主编程三件套形态（unbinded/binded xlsx+rds），
+QC 一致性检查只进 note() 运行日志。红线：原始 PK excel 与 EDC zip 只读不改，
+产物只落 Output。设计记录见 docs/enterprise/LISTING_PK_MAPPING_DESIGN.md。
+
+## 研究形态（form 参数，两型分模板；签名不命中向用户澄清禁止猜）
+- be（默认）：双盲 BE 型——PK 传输件带 Period/Sampling Time(h) 列，COHORT=REGIME_NAME
+  透传；BE 专属 [REPLACE P1-P8]。
+- sad-mad：SAD/MAD I 期型——PK 传输件带 Matrix/Day Nominal/Hour Nominal 列；studyCode
+  必填（完整方案号，可含期别后缀）；ANALYTE 母药名经程序 [REPLACE SA2] 或运行时
+  DSH_R_PK_ANALYTE 提供；交付=血浆单表（CSF_OUTPUT 开关）；含编盲时间点隐藏规则。
+  业务生成区 Z1-Z6（constants/bridge/intake/mapping/demog/assembly）由 AI 按
+  spec/方案/ALS 解码串/EDC 结构逐区实证生成，模板零业务值。
+- 判型证据=投递传输件表头（结构事实）+ spec Variable 全集；传输件缺列的报错即形态
+  信号，先核对再换 form 重渲染，勿盲试。
+
+## 目录契约（固定，只有项目目录名可变；项目根 ${rProjectRoot}）
+- ${PK_LANE_DIRS.dataCsv}/<dataDate>/：PK 浓度 csv/xls（只读，程序不回写）
+- ${PK_LANE_DIRS.dataSas}/<dataDate>/：EDC sas zip（+ R 程序生成的 RData 缓存）
+- ${PK_LANE_DIRS.program}/<studyKey>_PK_Mapping.R：渲染后的 R 程序（交付物；spec xlsx 也放这里）
+- ${PK_LANE_DIRS.output}/：PK_Mapping_unbinded_<dataDate>.xlsx / PK_Mapping_binded_<dataDate>.xlsx（有编盲表时）/ <studyKey>_PK Mapping_<dataDate>.rds（人工主编程三件套形态，唯一交付目录）
+
+## 双盲口径（终案见场景库 pk-mapping L2；受试者显示口径项目级确认勿固化）
+- 全 23 列输出（datasetQC 双编程比对需与主编程交付集一致）：SEQ/TRT 走随机化
+  schedule（无文件空串占位）；SEX/AGE/HEIGHT/WEIGHT/BMI 常输出；SUBJ_MASK_MODE
+  默认 none=号原样（随机号盲态安全），需掩码项目改 S001 型确定性掩码。
+- blindMode=blinded（默认）/unblinded：不再影响文件名（输出形态=人工三件套，见上）；
+  unblinded 揭盲真值仍须先配置随机化 schedule。
+- blindMode=unblinded：必须先把随机化 schedule 文件放入项目目录并填进程序配置段
+  RAND_SCHED_FILE（[REPLACE P6] 列契约：Subject+Period+Seq+Trt 长表）后重跑。
+- 编盲双产物形态（投递编盲表的项目，参照场景库 L3 人写样本）：binded=编盲表
+  SUBJID→BLINDID join 换号+剔敏感列；unbinded=全 23 列；RDS=未编盲全集。
+
+## 工作流
+1. 向用户确认 project（项目目录名或绝对路径）/ studyKey（方案号）/
+   dataDate（数据投递文件夹名，csv 与 sas 同日期）；可选 password（EDC zip 密码）、
+   form（研究形态，见上）、studyCode（sad-mad 形态必填）。
+   不要猜测或从其他材料推断这些值。
+2. 模板零业务逻辑（2026-09-17 用户定案）：业务逻辑一律由 AI 识别本项目 spec/方案/
+   EDC 结构后生成——首次调用 enterprise_listing_run_pk（render 缺省）先渲染出程序骨架，
+   按程序头 DSH-BUSINESS-ZONE 生成区契约（BE=Z1-Z4；SAD/MAD=Z1-Z6）与场景库 GP 门禁
+   逐区生成业务段，再 render=false 执行；未生成业务区即运行会 fail-fast 并给出路
+   （这是预期守卫，不是缺陷）。回执只含聚合计数与告警，不含数据行值。
+3. 需要按项目口径调整时：直接编辑业务生成区或 [REPLACE] 常量（BE：盲化方案/随机化表
+   路径等 P 项；SAD/MAD：ANALYTE/PDOSE/CSF_OUTPUT 等 SA 项），再 render=false 重跑；
+   换数据日期同样 render=false（运行时参数经环境变量覆盖）。
+4. 首个真实数据跑完必须向用户汇报业务生成区待确认清单（BE=[REPLACE P1-P8]；
+   SAD/MAD=[REPLACE SA1-SA9]）。
+
+## 边界
+- 宿主不解析数据行值；读数/合并/QC/样式化 xlsx 全程在项目目录完成，不与 manual 车道共用输出。
+- Rave 形态读数（Subject 内部名 ↔ SUBJID 筛选号经 SUBJ 表归一）；文件夹→周期与时点标签→小时
+  解析失败的记录会进 note()/QC_Match，收到告警先核对 FOLDER_EXACT/FOLDER_KEYS 与标签拼写。`,
+  })
+
+  registerTool(listing, {
+    name: 'enterprise_listing_run_pk',
+    description: 'r_pk 车道：按模板渲染（首次）并以 Rscript 执行项目目录中的单文件 PK Mapping R 程序（PK 浓度 csv × EDC sas 合并成 spec 行序映射数据集，输出人工主编程三件套形态 unbinded/binded xlsx+rds，QC 只进运行日志），返回聚合回执。project/studyKey/dataDate 必须由用户提供，不要推断。',
+    parameters: { type: 'object', properties: {
+      project: { type: 'string', description: `用户提供的项目目录名（位于 ${rProjectRoot} 下）或项目目录绝对路径` },
+      studyKey: { type: 'string', description: '用户提供的方案号/项目关键字；构成程序文件名与 QC rds 契约名前缀' },
+      dataDate: { type: 'string', description: '用户提供的数据投递文件夹名（csv 与 sas 同日期），如 20260909' },
+      form: { type: 'string', enum: ['be', 'sad-mad'], description: '研究形态（缺省 be=双盲 BE，Period/Sampling Time(h) 传输件）；sad-mad=SAD/MAD I 期（Matrix/Day Nominal/Hour Nominal 传输件，分模板渲染）。形态由 spec 与投递件表头实证决定，签名不命中向用户澄清，禁止猜' },
+      studyCode: { type: 'string', description: '完整方案号（可选；缺省=studyKey）——sad-mad 形态必填（如含期别后缀），构成 STUDY_ID 预期常量与人工主编程 rds 名（双名共存）' },
+      blindMode: { type: 'string', enum: ['blinded', 'unblinded'], description: '盲态（默认；输出形态=人工三件套 unbinded/binded xlsx+rds，blindMode 不再影响文件名）/ 揭盲（程序内须先配置随机化表 RAND_SCHED_FILE）' },
+      oldDate: { type: 'string', description: '旧版数据日期（新旧比对用，可选，预留）' },
+      password: { type: 'string', description: 'EDC sas zip 密码（可选；经环境变量传给 R，不写入程序文件）' },
+      outputPrefix: { type: 'string', description: '交付文件名前缀（可选；缺省 "<studyKey>_PK Mapping"）' },
+      render: { type: 'boolean', description: '缺省=程序不存在时才渲染；true=用模板覆盖重生成；false=必须复用已有程序（修改过程序后重跑用）' },
+    }, required: ['project', 'studyKey', 'dataDate'], additionalProperties: false },
+    async execute(args, exec) {
+      const { project, studyKey, dataDate, form, studyCode, blindMode, oldDate, password, outputPrefix, render } = args as {
+        project: string; studyKey: string; dataDate: string; form?: 'be' | 'sad-mad'; studyCode?: string
+        blindMode?: 'blinded' | 'unblinded'; oldDate?: string
+        password?: string; outputPrefix?: string; render?: boolean
+      }
+      return pkRunner.run(
+        { project, studyKey, dataDate, form, studyCode, blindMode, oldDate, password, outputPrefix, render, signal: exec.signal },
+        interceptionEnabled(listing),
+      )
+    },
+  })
+
   if (listing.on) {
     const onPostExecute = listing.on
     listing.effect(() => onPostExecute('tools/post-execute', async (exec, result, next) => {
       const decision = await next()
-      if (exec.name.startsWith('enterprise_') || isInternalControlTool(exec.name)) return decision
+      // 红线边界（用户口径 2026-09-15）：拦截的是"源数据值进入 AI 上下文"，
+      // 不是程序执行本身——
+      //  1) 程序执行工具（pwsh/bash 跑 R/编译器等）的结果是程序工作日志，
+      //     listing Excel 的生成与运行日志一律放行；
+      //  2) enterprise 车道工具是授权分析/发布通道（run_code 聚合、publish
+      //     投影），放行；
+      //  3) 其余通用工具（read/glob/grep 等）结果若携带源数据值（SAS 行值、
+      //     辅助 Excel 业务值）才拦截。
+      if (EXECUTION_TOOLS.has(exec.name)) return decision
+      // 交付物域放行：Output/04_Out/** 是项目产出（listing Excel 等），
+      // 生成与 QC 读取都不拦；保护值溯源到源数据为止。
+      {
+        // JSON 序列化会把反斜杠转义成双写（Output\\04_Out），分隔符按 1-2 个匹配。
+        const argsText = stringifyPostValue((exec as { arguments?: unknown }).arguments)
+        const resultText = postResultText(result, decision)
+        if (/Output[/\\]{1,2}04_Out/i.test(argsText) || /Output[/\\]{1,2}04_Out/i.test(resultText)) {
+          return decision
+        }
+      }
+      if (exec.name !== 'enterprise_listing_run_code'
+        && (exec.name.startsWith('enterprise_') || isInternalControlTool(exec.name))) return decision
       if (decision.kind === 'block' || !interceptionEnabled(listing)) return decision
 
       // 专用扫描 Worker：受保护值哈希常驻、与主车道计算分进程，扫描不被
@@ -515,6 +787,15 @@ df.attrs["_layout"] = {
       const scanWorker = scanWorkers.get(exec.agent)
       if (!scanWorker) return blockedProtectedResult()
       try {
+        // 预热未完成：等待预热（上限 SCAN_WARMUP_WAIT_MS），大项目 inspect 后
+        // 紧接着的 ls/git 等普通调用不再被"未就绪"整体拦下。
+        const warmup = scanReady.get(exec.agent)
+        if (warmup !== undefined) {
+          const ready = await Promise.race([
+            warmup, new Promise<boolean>(resolve => setTimeout(() => resolve(false), SCAN_WARMUP_WAIT_MS)),
+          ])
+          if (!ready) return blockedProtectedResult()
+        }
         const scan = await scanWorker.request({
           operation: 'listing_scan_text',
           project,
@@ -536,6 +817,7 @@ df.attrs["_layout"] = {
     activeProjects.clear()
     for (const scanWorker of scanWorkers.values()) scanWorker.dispose()
     scanWorkers.clear()
+    scanReady.clear()
   })
   const swept = sweepStaleSpillDirs()
   listing.logger?.info(`Enterprise Listing tools registered (host-side data security switch; stale spill dirs removed: ${swept})`)

@@ -130,8 +130,15 @@ function projectSegments(reference: string, cwd?: string): string[] | undefined 
 /** doc/ 与系统输出必须锚定在当前项目根内，避免外部同名目录成为豁免通道。
  *  无 cwd 锚定时退化为路径形态启发（直接父级为 doc / .clinical-listing/output
  *  视为需求域/交付域）：误放行的方向还有 post-execute 保护值扫描兜底，
- *  误拒则会无意义打断模型。 */
+ *  误拒则会无意义打断模型。
+ *  交付域补充（2026-09-15，RBQM 实测）：R 车道/RBQM 的交付目录是项目下
+ *  Output/04_Out/**（跨项目根的绝对路径，cwd 锚定不到），按「output 段后跟
+ *  04_out 段」的路径形态识别为交付物——生成与 QC 读取 listing Excel 不拦，
+ *  拦的只是源数据（SAS/辅助 Excel）入上下文。 */
+const DELIVERABLE_PATH_PATTERN = /(^|[\\/])output([\\/])04_out([\\/])/i
+
 export function classifyReference(reference: string, cwd?: string): PathClass {
+  if (DELIVERABLE_PATH_PATTERN.test(reference)) return 'generated-output'
   if (cwd === undefined) {
     const raw = pathSegments(reference).map(segment => segment.toLowerCase())
     if (raw.length >= 2 && raw[raw.length - 2] === 'doc') return 'spec-document'

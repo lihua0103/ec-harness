@@ -11,7 +11,9 @@ ALS 语义、数据集回执只构建元数据；开关关闭时完整行值照�
 """
 import datetime
 import decimal
+import hashlib
 import base64
+import io
 import xml.etree.ElementTree as ET
 import math
 import re
@@ -24,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from archive_passwords import ArchivePasswordRequired, InvalidArchive, extract_with_password
+from edc_profiles import load_profiles, match_profile
 from source_registry import DataSource, tag_dataframe, tag_payload
 
 DATA_EXTENSIONS = frozenset({".sas7bdat", ".xpt", ".csv"})
@@ -150,7 +153,7 @@ def scan_excel_structures(path: Path) -> dict[str, Any]:
     path = Path(path)
     if path.suffix.lower() not in EXCEL_EXTENSIONS:
         raise ValueError(f"NOT_EXCEL: {path.name}")
-    sheets = pd.read_excel(path, sheet_name=None)
+    sheets = _read_excel_sheets(path)
     return tag_payload({
         "path": path.name,
         "structure": {"sheets": [_sheet_structure(name, frame) for name, frame in sheets.items()]},
@@ -252,7 +255,7 @@ def _extracted_sources(
             if extraction.has_password_required:
                 failures.append(_failure(
                     archive, project, "extract-archive",
-                    RuntimeError("mixed archive contains password-protected members"),
+                    RuntimeError("archive members not extracted (wrong password or corrupt member)"),
                     include_error=include_errors, code="ARCHIVE_PASSWORD_PARTIAL"))
             archive_display = f"archive/{archive.relative_to(project).as_posix()}"
             display_roots = _extract_nested_archives(
@@ -422,31 +425,284 @@ def dataset_payloads(
 # spec / ALS 辅助文件读取——源头 spec-document
 # ---------------------------------------------------------------------------
 
-def _als_mappings(sheets: dict[str, pd.DataFrame]) -> tuple[list[dict[str, str]], set[str]]:
+#: 已知 EDC 设计表（ALS）的表头适配器：表头包含该列集合即判为设计 sheet，
+#: 并按各系统的列语义抽取映射/码表（比结构推断更完整：能拿到 label、码表
+#: 解码）。2026-09-07 用 8 个真实项目核对，覆盖 Medidata Rave、太美、
+#: ODM-DED 中文导出与最早的合成格式 Dataset Name / Variable Name / Label。
+#: 这不是判定的全部：未命中适配器的工作簿（新 EDC）由 design_inference 在
+#: 数据集加载后按值与数据集结构的关系推断，不依赖任何列名。
+_DESIGN_SHEET_SIGNATURES: tuple[tuple[str, frozenset[str]], ...] = (
+    ("legacy-mapping", frozenset({"Dataset Name", "Variable Name"})),
+    ("rave-fields", frozenset({"FormOID", "FieldOID"})),
+    ("rave-forms", frozenset({"OID", "DraftFormName"})),
+    ("rave-folders", frozenset({"OID", "FolderName"})),
+    ("rave-dictionary-entries", frozenset({"DataDictionaryName", "CodedData", "UserDataString"})),
+    ("rave-dictionaries", frozenset({"DataDictionaryName", "OID"})),
+    ("rave-unit-dictionaries", frozenset({"UnitDictionaryName"})),
+    ("rave-matrices", frozenset({"MatrixName", "OID"})),
+    ("rave-draft", frozenset({"DraftName", "ProjectName"})),
+    ("taimei-datastructure", frozenset({"FormOID", "SASDatasetName", "SASFieldName"})),
+    ("taimei-formitem", frozenset({"FormOID", "ItemOID"})),
+    ("taimei-items", frozenset({"ItemOID", "SASFieldName"})),
+    ("taimei-forms", frozenset({"FormOID", "FormName"})),
+    ("taimei-codelist-items", frozenset({"CodeListOID", "DisplayValue", "CodedValue"})),
+    ("taimei-codelist", frozenset({"OID", "Name", "DataType"})),
+    ("taimei-units", frozenset({"UnitGroupOID"})),
+    ("taimei-draft", frozenset({"DraftName", "StudyName"})),
+    ("taimei-formsets", frozenset({"FormsetOID"})),
+    ("taimei-events", frozenset({"EventOID", "FormOID"})),
+    ("taimei-checks", frozenset({"CheckOID"})),
+    ("taimei-derivations", frozenset({"DerivationOID"})),
+    ("taimei-analytes", frozenset({"AnalytesCode", "AnalytesName"})),
+    ("odm-forms", frozenset({"表单代码", "表单名称", "数据集名称"})),
+    ("odm-visits", frozenset({"访视编号", "表单代码"})),
+)
+
+#: 强锚点：工作簿含任一强锚点 sheet 才启用"同簿弱识别"（Matrix* 网格、
+#: ODM-DED 表头写在首行的中文 sheet、含 OID 列的其他设计 sheet）。
+_DESIGN_ANCHOR_KINDS = frozenset({
+    "legacy-mapping", "rave-fields", "taimei-datastructure", "taimei-formitem", "odm-forms",
+})
+_ODM_DED_UNNAMED_SHEETS = frozenset({
+    "变量列表", "受控术语", "页面事件设置", "前端逻辑设置", "Editcheck设置", "邮件通知",
+})
+#: 受试者级列：只要出现就绝不是设计 sheet（审计轨迹/质疑日志等导出也带 FormOID/ItemOID）。
+_SUBJECT_LEVEL_HEADERS = frozenset({
+    "Subject", "Subject Name", "SubjectName", "USUBJID", "SUBJID", "Patient", "Patient Name",
+    "受试者", "受试者编号", "筛选号", "随机号",
+})
+_EMPTY_CELL_TEXTS = frozenset({"", "nan", "none", "null"})
+
+
+def _cell_text(value: Any) -> str:
+    """单元格的裁剪字符串；空缺（None/NaN）与其字符串形态一律回空串。"""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return "" if text.lower() in _EMPTY_CELL_TEXTS else text
+
+
+def _header_texts(frame: pd.DataFrame) -> list[str]:
+    return [str(column).strip() for column in frame.columns]
+
+
+def _signature_kind(headers: list[str]) -> Optional[str]:
+    header_set = set(headers)
+    for kind, required in _DESIGN_SHEET_SIGNATURES:
+        if required <= header_set:
+            return kind
+    return None
+
+
+def _classify_design_sheets(
+    sheets: dict[str, pd.DataFrame],
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """返回 ({sheet 名: 设计 sheet 类型}, {sheet 名: 学习到的列角色})；
+    未识别的 sheet 不在结果里（照常按业务值保护）。
+
+    类型来源两路：手写适配器签名，以及 edc_profiles 学习型注册表（类型
+    "learned:<id>"，由 design_inference 在先前项目里推断后登记）。受试者级
+    列（Subject/USUBJID/筛选号…）一票否决，两路都不例外。
+    """
+    kinds: dict[str, str] = {}
+    learned_roles: dict[str, dict[str, str]] = {}
+    profiles = _learned_profiles()
+    for name, frame in sheets.items():
+        headers = _header_texts(frame)
+        if headers and headers[0].startswith("Matrix:"):
+            kinds[str(name)] = "rave-matrix"          # 先于受试者列判定：Matrix 的 Subject 是文件夹 OID
+            continue
+        if _SUBJECT_LEVEL_HEADERS & set(headers):
+            continue
+        kind = _signature_kind(headers)
+        if kind is None and profiles:
+            profile = match_profile(headers, profiles)
+            if profile is not None:
+                kind = f"learned:{profile['id']}"
+                learned_roles[str(name)] = dict(profile.get("roles") or {})
+        if kind is not None:
+            kinds[str(name)] = kind
+    anchored = bool(_DESIGN_ANCHOR_KINDS & set(kinds.values())) or any(
+        kind.startswith("learned:") for kind in kinds.values())
+    if not anchored:
+        # 没有强锚点时 Matrix 网格单独出现不可信（可能是业务表恰好如此命名）
+        return {name: kind for name, kind in kinds.items() if kind != "rave-matrix"}, learned_roles
+    for name, frame in sheets.items():
+        if str(name) in kinds:
+            continue
+        headers = _header_texts(frame)
+        if _SUBJECT_LEVEL_HEADERS & set(headers):
+            continue
+        if str(name) in _ODM_DED_UNNAMED_SHEETS and "odm-forms" in kinds.values():
+            kinds[str(name)] = "odm-unnamed"
+        elif any(header == "OID" or header.endswith("OID") for header in headers):
+            kinds[str(name)] = "design-oid"
+    return kinds, learned_roles
+
+
+def _learned_profiles() -> list[dict[str, Any]]:
+    """学习型注册表读取失败只等于"没有学习过"，不影响读取流程。"""
+    try:
+        return load_profiles()
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _first_text(row: pd.Series, *columns: str) -> str:
+    for column in columns:
+        if column in row.index:
+            text = _cell_text(row[column])
+            if text:
+                return text
+    return ""
+
+
+def _als_semantics(
+    sheets: dict[str, pd.DataFrame],
+) -> tuple[list[dict[str, str]], set[str], dict[str, str], dict[str, list[dict[str, str]]]]:
+    """从 ALS 设计表提取语义：变量映射、数据集名、设计 sheet 类型、码表。
+
+    映射三元组保持 datasetName/sourceColumn/label 口径（消费方与投影白名单
+    不变）；码表按 {码表名: [{code, decode}]} 组织。设计表的值是研究方案的
+    结构描述（表单、字段、访视、码表），不是受试者数据——它们必须披露给
+    模型才能识别表单字段，也必须从保护值索引里排除，否则每个正常引用表单
+    名/字段标签的通用工具结果都被误判为泄露。
+    """
     mappings: list[dict[str, str]] = []
     names: set[str] = set()
-    for frame in sheets.values():
-        for _, row in frame.iterrows():
-            dataset = str(row.get("Dataset Name", "")).strip().upper()
-            variable = str(row.get("Variable Name", "")).strip()
-            if dataset and variable and dataset != "NAN" and variable != "nan":
-                names.add(dataset)
-                mappings.append({
-                    "datasetName": dataset,
-                    "sourceColumn": variable,
-                    "label": str(row.get("Label", "")).strip(),
-                })
+    codelists: dict[str, list[dict[str, str]]] = {}
+    kinds, learned_roles = _classify_design_sheets(sheets)
+
+    def add_mapping(dataset: str, variable: str, label: str) -> None:
+        dataset = dataset.upper()
+        if not dataset or not variable:
+            return
+        names.add(dataset)
+        mappings.append({"datasetName": dataset, "sourceColumn": variable, "label": label})
+
+    def add_code(name: str, code: str, decode: str) -> None:
+        if not name or not (code or decode):
+            return
+        codelists.setdefault(name, []).append({"code": code, "decode": decode})
+
+    for sheet_name, frame in sheets.items():
+        kind = kinds.get(str(sheet_name))
+        if kind is None:
+            continue
+        if kind == "legacy-mapping":
+            for _, row in frame.iterrows():
+                add_mapping(_first_text(row, "Dataset Name"), _first_text(row, "Variable Name"),
+                            _first_text(row, "Label"))
+        elif kind == "rave-fields":
+            for _, row in frame.iterrows():
+                add_mapping(_first_text(row, "FormOID"),
+                            _first_text(row, "FieldOID", "VariableOID"),
+                            _first_text(row, "DraftFieldName", "PreText", "SASLabel"))
+        elif kind in {"taimei-datastructure", "taimei-formitem"}:
+            for _, row in frame.iterrows():
+                add_mapping(_first_text(row, "SASDatasetName", "FormOID"),
+                            _first_text(row, "SASFieldName", "ItemOID"),
+                            _first_text(row, "SASLabel", "ItemName"))
+        elif kind == "rave-dictionary-entries":
+            for _, row in frame.iterrows():
+                add_code(_first_text(row, "DataDictionaryName"), _first_text(row, "CodedData"),
+                         _first_text(row, "UserDataString"))
+        elif kind == "taimei-codelist-items":
+            for _, row in frame.iterrows():
+                add_code(_first_text(row, "CodeListOID"), _first_text(row, "CodedValue"),
+                         _first_text(row, "DisplayValue"))
+        elif kind == "odm-unnamed" and str(sheet_name) == "变量列表":
+            _odm_variable_mappings(frame, add_mapping)
+        elif kind == "odm-unnamed" and str(sheet_name) == "受控术语":
+            _odm_codelists(frame, add_code)
+        elif kind.startswith("learned:"):
+            roles = learned_roles.get(str(sheet_name), {})
+            if roles.get("variable"):
+                for _, row in frame.iterrows():
+                    add_mapping(_first_text(row, roles.get("dataset", "")),
+                                _first_text(row, roles["variable"]),
+                                _first_text(row, roles.get("label", "")))
+    return mappings, names, kinds, codelists
+
+
+def _odm_variable_mappings(frame: pd.DataFrame, add_mapping) -> None:
+    """ODM-DED 变量列表：表头写在首列列名（"Common--系统变量"），各表单以
+    "FORM--名称" 段头分节，段内行是 变量名称/变量标签/变量类型/变量格式。"""
+    headers = _header_texts(frame)
+    dataset = headers[0].split("--", 1)[0].strip() if headers and "--" in headers[0] else ""
+    for row in frame.itertuples(index=False, name=None):
+        cells = [_cell_text(value) for value in row]
+        if not cells or not cells[0]:
+            continue
+        rest = [cell for cell in cells[1:] if cell]
+        if not rest and "--" in cells[0]:
+            dataset = cells[0].split("--", 1)[0].strip()
+            continue
+        if cells[0] in {"变量名称", "Variable Name"}:
+            continue
+        add_mapping(dataset, cells[0], cells[1] if len(cells) > 1 else "")
+
+
+def _odm_codelists(frame: pd.DataFrame, add_code) -> None:
+    """ODM-DED 受控术语：段头列名 "FORM--问题文本, 变量名"，段内行 Code Value/Code Text。"""
+    headers = _header_texts(frame)
+    name = headers[0].rsplit(",", 1)[-1].strip() if headers else ""
+    for row in frame.itertuples(index=False, name=None):
+        cells = [_cell_text(value) for value in row]
+        if not cells or not cells[0]:
+            continue
+        if len(cells) < 2 or not cells[1]:
+            if "--" in cells[0]:
+                name = cells[0].rsplit(",", 1)[-1].strip()
+            continue
+        if cells[0] in {"Code Value", "Code"}:
+            continue
+        add_code(name, cells[0], cells[1])
+
+
+def _als_mappings(sheets: dict[str, pd.DataFrame]) -> tuple[list[dict[str, str]], set[str]]:
+    """兼容入口：只取映射与数据集名。"""
+    mappings, names, _, _ = _als_semantics(sheets)
     return mappings, names
 
 
+def _excel_type(semantics: dict[str, Any]) -> str:
+    """提取到变量映射或码表才算 ALS；只匹配到表头签名的空表仍是普通 excel。"""
+    return "als" if semantics.get("mappings") or semantics.get("codelists") else "excel"
+
+
+def _als_payload_fields(sheets: dict[str, pd.DataFrame]) -> dict[str, Any]:
+    """ALS 语义字段（映射/数据集/设计 sheet 清单/码表）；非设计工作簿返回空字典。"""
+    mappings, names, kinds, codelists = _als_semantics(sheets)
+    fields: dict[str, Any] = {}
+    if kinds:
+        fields["designSheets"] = sorted(kinds)
+    if mappings:
+        fields["mappings"] = mappings
+        fields["datasets"] = sorted(names)
+    if codelists:
+        fields["codelists"] = codelists
+    return fields
+
+
 def _sheet_rows(sheets: dict[str, pd.DataFrame]) -> list[dict[str, Any]]:
-    """doc/ Excel 整表行值；这是需求材料，不属于数据红线。"""
+    """doc/ Excel 整表行值；这是需求材料，不属于数据红线。
+
+    必须按列位置逐行取值（itertuples）：to_dict("records") 会把重复列名
+    静默并列丢失，SpreadsheetML/HTML 表里重复表头很常见，属于内容缺失。
+    """
     return [
         {
             "sheet": str(name),
+            "columns": [str(column) for column in frame.columns],
             "rows": [
-                [jsonable(value) for value in record.values()]
-                for record in frame.to_dict(orient="records")
+                [jsonable(value) for value in row]
+                for row in frame.itertuples(index=False, name=None)
             ],
         }
         for name, frame in sheets.items()
@@ -457,6 +713,43 @@ def _is_aux_excel(path: Path, project: Path) -> bool:
     return classify_project_file(path, project) == "aux-excel"
 
 
+def _doc_file_fingerprints(project: Path) -> tuple[set[str], set[tuple[int, str]]]:
+    """doc/ 需求域文件指纹：basename 集合 + (大小, md5) 集合。
+
+    doc/ 是需求理解域（模型必读、业务词必然进程序），与 doc/ 文件同名或
+    同内容的文件是需求文档的根目录副本/历史版本，不是辅助数据引用；
+    其业务单元格值不得进保护值索引——用模型本来就能读到的需求文本去拦
+    通用工具结果，会把整个会话的通用通道封死（实测 DVP 根目录副本把
+    Condition/Column Heading 需求词注册成保护值后，读程序/write 回执全拦）。
+    """
+    names: set[str] = set()
+    fps: set[tuple[int, str]] = set()
+    doc_dir = project / "doc"
+    if not doc_dir.is_dir():
+        return names, fps
+    for path in doc_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        names.add(path.name)
+        try:
+            data = path.read_bytes()
+            fps.add((len(data), hashlib.md5(data).hexdigest()))
+        except OSError:
+            continue
+    return names, fps
+
+
+def _is_requirement_copy(path: Path, doc_names: set[str],
+                         doc_fps: set[tuple[int, str]]) -> bool:
+    if path.name in doc_names:
+        return True
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    return (len(data), hashlib.md5(data).hexdigest()) in doc_fps
+
+
 def read_aux_excel_files(
     project: Path, include_rows: bool = False, include_errors: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
@@ -464,26 +757,26 @@ def read_aux_excel_files(
     project = Path(project).resolve()
     documents: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
+    doc_names, doc_fps = _doc_file_fingerprints(project)
     candidates = sorted(
         (path for path in project.rglob("*")
-         if path.is_file() and _is_aux_excel(path, project)),
+         if path.is_file() and _is_aux_excel(path, project)
+         and not _is_requirement_copy(path, doc_names, doc_fps)),
         key=str,
     )
     for path in candidates:
         try:
-            sheets = pd.read_excel(path, sheet_name=None)
-            mappings, names = _als_mappings(sheets)
+            sheets = _read_excel_sheets(path)
+            semantics = _als_payload_fields(sheets)
             payload: dict[str, Any] = {
                 "path": path.relative_to(project).as_posix(),
-                "type": "als" if mappings else "excel",
+                "type": _excel_type(semantics),
                 "size": path.stat().st_size,
                 "structure": {"sheets": [
                     _sheet_structure(name, frame) for name, frame in sheets.items()
                 ]},
+                **semantics,
             }
-            if mappings:
-                payload["mappings"] = mappings
-                payload["datasets"] = sorted(names)
             if include_rows:
                 payload["rows"] = _sheet_rows(sheets)
             documents.append(tag_payload(payload, DataSource.AUX_EXCEL))
@@ -534,19 +827,17 @@ def read_spec_files(
                 }, DataSource.SPEC_DOCUMENT))
             elif suffix in EXCEL_EXTENSIONS:
                 sheets = _read_excel_sheets(path)
-                mappings, names = _als_mappings(sheets)
+                semantics = _als_payload_fields(sheets)
                 payload: dict[str, Any] = {
                     "documentId": f"doc-{index:06d}",
                     "path": path.relative_to(doc_dir).as_posix(),
-                    "type": "als" if mappings else "excel",
+                    "type": _excel_type(semantics),
                     "size": path.stat().st_size,
                     "structure": {"sheets": [
                         _sheet_structure(name, frame) for name, frame in sheets.items()
                     ]},
+                    **semantics,
                 }
-                if mappings:
-                    payload["mappings"] = mappings
-                    payload["datasets"] = sorted(names)
                 payload["rows"] = _sheet_rows(sheets)
                 documents.append(tag_payload(payload, DataSource.SPEC_DOCUMENT))
             else:
@@ -610,11 +901,63 @@ def _read_spreadsheet_ml(path: Path) -> dict[str, pd.DataFrame]:
     return sheets
 
 
+def _sniff_head(path: Path, size: int = 512) -> bytes:
+    """文件头（去 BOM/空白）。内容识别的唯一依据，扩展名只作参考——
+    交付材料里 .xls 常是 SpreadsheetML/HTML/文本导出，与真实格式无关。"""
+    with path.open("rb") as stream:
+        prefix = stream.read(size)
+    return prefix.lstrip(b"\xef\xbb\xbf\r\n \t")
+
+
 def _looks_like_spreadsheet_ml(path: Path) -> bool:
     """按文件头识别 SpreadsheetML，不依赖 pandas 的异常分类。"""
-    with path.open("rb") as stream:
-        prefix = stream.read(512)
-    return prefix.lstrip(b"\xef\xbb\xbf\r\n \t").startswith((b"<?xml", b"<Workbook"))
+    return _sniff_head(path).startswith((b"<?xml", b"<Workbook"))
+
+
+_HTML_HEAD_SIGNATURES = (b"<!doctype html", b"<html", b"<table")
+
+
+def _looks_like_html_table(path: Path) -> bool:
+    """按文件头识别 HTML 表格导出（旧系统常用它冒名 .xls/.xlsx）。"""
+    head = _sniff_head(path, 2048).lower()
+    return head.startswith(_HTML_HEAD_SIGNATURES) or b"<table" in head[:1024]
+
+
+def _read_html_sheets(path: Path) -> dict[str, pd.DataFrame]:
+    """HTML 表格：每张 <table> 成为一个 sheet；header=0 与 read_excel 口径一致。"""
+    frames = pd.read_html(path, header=0)
+    return {f"Table{index}": frame for index, frame in enumerate(frames, start=1)}
+
+
+_DELIMITER_CANDIDATES = ("\t", ",", ";", "|")
+
+
+def _looks_like_delimited_text(path: Path) -> bool:
+    """按内容识别冒名 .xls 的分隔符文本（TSV/CSV 导出）：无 NUL 且首行含分隔符。"""
+    head = _sniff_head(path, 2048)
+    if b"\x00" in head:
+        return False
+    first_line = head.split(b"\n", 1)[0]
+    return any(marker.encode("ascii") in first_line for marker in _DELIMITER_CANDIDATES)
+
+
+def _decode_text_bytes(raw: bytes) -> str:
+    """与 doc/ 文本一致的编码回退链：UTF-8 → BOM 判 UTF-16 → GBK 兜底。"""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+            return raw.decode("utf-16")
+        return raw.decode("gbk", errors="replace")
+
+
+def _read_delimited_sheets(path: Path) -> dict[str, pd.DataFrame]:
+    """分隔符文本：分隔符按首行出现次数选取（TSV/CSV/分号/竖线）。"""
+    text = _decode_text_bytes(path.read_bytes())
+    first_line = text.lstrip("\ufeff\r\n \t").split("\n", 1)[0]
+    delimiter = max(_DELIMITER_CANDIDATES, key=lambda marker: first_line.count(marker))
+    frame = pd.read_csv(io.StringIO(text), sep=delimiter)
+    return {path.stem: frame}
 
 
 _ROW_AUTOFILTER_PATTERN = re.compile(rb'(?<=ref=")(\d+):(\d+)(?=")')
@@ -636,17 +979,35 @@ def _normalize_xlsx_row_autofilters(path: Path, target: Path) -> bool:
 
 
 def _read_excel_sheets(path: Path) -> dict[str, pd.DataFrame]:
+    """通用表格读取入口：只认文件内容，不认扩展名。
+
+    真实 OLE2 .xls（xlrd）与 .xlsx/.xlsm（openpyxl）交 pandas；冒名的
+    SpreadsheetML/HTML/分隔符文本与行范围 AutoFilter 的 xlsx 按文件头
+    识别后走对应解析器。doc/ 需求、辅助 Excel、结构扫描三条路径都必须
+    经过这里，不允许直接调 pd.read_excel。
+    """
     if _looks_like_spreadsheet_ml(path):
         return _read_spreadsheet_ml(path)
     try:
         return pd.read_excel(path, sheet_name=None)
-    except ValueError as exc:
+    except Exception as exc:
+        # 门必须是宽异常：openpyxl InvalidFileException、xlrd XLRDError、
+        # zipfile.BadZipFile 都不继承 ValueError，窄接会让冒名文件绕过内容
+        # 识别回退链、以笼统读取失败逃逸（与 pyzipper BadZipFile 同族缺陷）。
         if _looks_like_spreadsheet_ml(path):
             # 兼容无 XML 声明但仍是 SpreadsheetML 的历史文件。
             return _read_spreadsheet_ml(path)
+        if _looks_like_html_table(path):
+            return _read_html_sheets(path)
         if zipfile.is_zipfile(path):
-            with tempfile.TemporaryDirectory(prefix="dsh-xlsx-autofilter-") as temp_dir:
-                normalized = Path(temp_dir) / path.name
-                if _normalize_xlsx_row_autofilters(path, normalized):
-                    return pd.read_excel(normalized, sheet_name=None)
+            try:
+                with tempfile.TemporaryDirectory(prefix="dsh-xlsx-autofilter-") as temp_dir:
+                    normalized = Path(temp_dir) / path.name
+                    if _normalize_xlsx_row_autofilters(path, normalized):
+                        return pd.read_excel(normalized, sheet_name=None)
+            except Exception:
+                # 损坏的 xlsx 成员不阻断回退链，继续尝试其余内容识别。
+                pass
+        if _looks_like_delimited_text(path):
+            return _read_delimited_sheets(path)
         raise

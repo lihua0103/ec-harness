@@ -10,3 +10,8 @@
           - "方案编号：\nProtocol No:"
           - "康德弘翼项目编号：\nWuXi Project ID:"
           - "最新报告生成日期："
+        # r_manual 车道（单文件 R 程序交付）：项目根 + Rscript；缺省 /mnt/project 与 PATH 中的 Rscript
+        # rListing:
+        #   projectRoot: /mnt/project
+        #   rscript: /usr/bin/Rscript
+        #   timeoutMs: 900000

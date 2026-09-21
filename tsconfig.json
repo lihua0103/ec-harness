@@ -12,6 +12,9 @@
     },
     {
       "path": "packages/enterprise/listing"
+    },
+    {
+      "path": "packages/enterprise/demo-video"
     }
   ]
 }
