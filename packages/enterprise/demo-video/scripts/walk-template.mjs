@@ -6,7 +6,9 @@
 //   ③ 主流程 try 块「===== 段落 =====」区块（模块步骤；全部用 doAim/doAimClick/rowOp/tabOps，
 //      每步前 act('旁白锚点key')；写库类按钮只 doAim 高亮）
 // 通用机制（勿删）：英文界面注入、闪光标记（掐头）、act() 黑条打点（配音同步）、
-//   ensureCtx 被踢自愈、双语别名查找器、SVG/dropdown/select 交互兜底。
+//   ensureCtx 被踢自愈（登录被拒不循环重试）、双语别名查找器、SVG/dropdown/select 交互兜底、
+//   closeOverlay 三段式 + purgeStrayPoppers + assertClean（弹层卫生三件套，防遮罩累积/幽灵下拉）、
+//   scrollSteps（长页逐屏滚动，带出懒渲染）、cjk() 语言体检（可见性过滤中文计数，S0 门禁）。
 //
 // 运行契约（enterprise_demo_record 工具按此驱动，本脚本不解析命令行参数）：
 //   环境变量 DV_WORK（工作目录，必填）/ DV_BASE / DV_USER / DV_PASS /
@@ -55,7 +57,8 @@ const steps = [], actions = [];
 let flashWall = null;
 const step = (name, ok, extra = '') => { steps.push({ name, ok, t: +(((Date.now() - t0) / 1000).toFixed(2)) }); console.log(`[step] ${name}: ${ok ? 'OK' : 'FAIL'}${extra ? ' | ' + extra : ''}`); };
 // 动作打点：除了记墙钟，还在画面顶边闪一条 120x6 黑条（110ms，肉眼不可见）——
-// 后期 crop=120:6:0:0 + blackdetect 逐动作提取「真实视频时刻」，彻底绕开 webm 时钟漂移。
+// 后期 crop=120:6:0:0 + 逐帧 YMIN 帧簇提取「真实视频时刻」，彻底绕开 webm 时钟漂移
+// （旧 blackdetect 口径已弃用：闪光帧可能被虚拟光标压住、深色侧边栏 luma 恰在 pix_th 临界）。
 const act = key => {
   actions.push({ key, t: +(((Date.now() - t0) / 1000).toFixed(2)) });
   page.evaluate(() => {
@@ -216,6 +219,27 @@ const FINDER_SRC = `
       const svg = [...h.querySelectorAll('svg')].filter(self.vis)[0];
       return svg ? window.__dmvCursor.aim(svg) : false;
     },
+    // 语言体检（S0 门禁）：可见性过滤后统计可见叶节点里的中文字符数，按 tag.class 归类。
+    // 只输出计数与元素类型，不输出中文内容（回执红线）；canvas（ECharts）文本抓不到，
+    // 用 canvases 计数提示「图表标签语言未程序化验证」。
+    cjk() {
+      const self = this;
+      const vis = el => { const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); return r.height > 0 && r.width > 0 && cs.display !== 'none' && cs.visibility !== 'hidden' && +cs.opacity > 0.05; };
+      const counts = {}; let total = 0;
+      const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = w.nextNode())) {
+        const p = n.parentElement;
+        if (!p || !vis(p)) continue;
+        const m = (n.textContent || '').match(/[\\u4e00-\\u9fff]/g);
+        if (!m) continue;
+        total += m.length;
+        const k = p.tagName + '.' + String(p.className || '').split(/\\s+/).slice(0, 2).join('.');
+        counts[k] = (counts[k] || 0) + m.length;
+      }
+      const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => k + ':' + v);
+      return { total, top, canvases: [...document.querySelectorAll('canvas')].filter(vis).length };
+    },
     dump() {
       const self = this;
       const btns = [...new Set([...document.querySelectorAll('button, .el-button')].filter(self.vis).map(b => (b.textContent || '').replace(/\\s+/g, ' ').trim()).filter(t => t && t.length <= 20))];
@@ -283,7 +307,103 @@ const hasDialog = kind => page.evaluate(k => [...document.querySelectorAll('.' +
 // 注意：gate() 会把传入函数序列化进页面执行，必须是无闭包的纯 DOM 谓词
 const P_OVERLAY = () => [...document.querySelectorAll('.el-dialog, .el-drawer, .el-message-box')].some(d => d.getBoundingClientRect().height > 0);
 const P_MESSAGEBOX = () => [...document.querySelectorAll('.el-message-box')].some(d => d.getBoundingClientRect().height > 0);
-const P_NO_OVERLAY = () => ![...document.querySelectorAll('.el-dialog, .el-message-box, .el-drawer')].some(d => d.getBoundingClientRect().height > 0);
+
+// ---------- 弹层卫生三件套（RBQM 实测：遮罩累积会把整支视频蒙黑） ----------
+// 遮罩清干净的判据是「可见 .el-overlay 数」归零，不是抽屉 height（关闭动画期 height 残留）。
+async function visibleOverlayCount() {
+  return page.evaluate(() => {
+    const vis = el => { const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); return r.height > 0 && r.width > 0 && cs.display !== 'none' && cs.visibility !== 'hidden' && +cs.opacity > 0.05; };
+    return [...document.querySelectorAll('.el-overlay')].filter(vis).length;
+  }).catch(() => -1);
+}
+async function waitOverlaysClosed(timeout = 4000) {
+  const t = Date.now();
+  while (Date.now() - t < timeout) {
+    const n = await visibleOverlayCount();
+    if (n === 0) return true;
+    await sleep(250);
+  }
+  return false;
+}
+// 幽灵下拉清理：抽屉内 el-select 的下拉 teleport 到 body，抽屉卸载不带走（即便先前
+// Escape 关过，关抽屉时它仍会再冒出来）。只在弹层全关后调用：此时任何可见 popper 都是幽灵。
+async function purgeStrayPoppers() {
+  await page.evaluate(() => {
+    const vis = el => { const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); return r.height > 0 && r.width > 0 && cs.display !== 'none' && cs.visibility !== 'hidden' && +cs.opacity > 0.05; };
+    const overlays = [...document.querySelectorAll('.el-overlay')].filter(vis);
+    for (const p of document.querySelectorAll('.el-popper')) {
+      if (!vis(p)) continue;
+      if (overlays.some(o => o.contains(p))) continue;
+      p.remove();
+    }
+  }).catch(() => {});
+}
+// 关闭链三段式：Escape blur 下拉 → Cancel/X → before-close 确认框点主按钮 → 轮询遮罩归零。
+// 带.before-close 的抽屉只按 Esc/X 关不掉，且每试一次再叠一层 rgba(0,0,0,.5) 遮罩。
+// 红线守卫：主按钮只点「放弃编辑/关闭确认」类消息框；含破坏性词（删除/发布/提交…）的
+// 消息框绝不点主按钮（走取消）——主按钮在那种框里是执行写操作。
+const DESTRUCTIVE_RE = /删除|清空|发布|停用|启用|提交|删除|Delete|Publish|Submit|Deactivate|Activate/i;
+async function closeOverlay(opt = {}) {
+  await page.keyboard.press('Escape').catch(() => {});   // 先 blur 掉打开中的下拉
+  await beat(300);
+  // opt.mb=true：调用方明确这是破坏性确认框（删除/发布等）→ 只走取消，绝不碰主按钮
+  let ok = await doAimClick('dlgBtn', '取消', { mb: !!opt.mb });
+  if (!ok) ok = await doAimClick('dlgClose');
+  await beat(400);
+  if (!opt.mb) {
+    const mbTexts = await page.evaluate(() => {
+      const vis = el => { const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); return r.height > 0 && r.width > 0 && +cs.opacity > 0.05; };
+      return [...document.querySelectorAll('.el-message-box')].filter(vis).map(b => (b.textContent || '').slice(0, 200));
+    }).catch(() => []);
+    if (mbTexts.length && !mbTexts.some(t => DESTRUCTIVE_RE.test(t))) {
+      await doAimClick('dlgBtn', '确定', { mb: true });
+      await beat(400);
+    }
+  }
+  if (!(await waitOverlaysClosed(1200))) {
+    await page.keyboard.press('Escape').catch(() => {});
+    await waitOverlaysClosed(2500);
+  }
+  await purgeStrayPoppers();
+  await beat(250);
+}
+// 每段开始前的卫生门：脏则自愈一次再查；仍脏只记账（S2 亮度剖面会点名）不炸段。
+async function assertClean(tag) {
+  let n = await visibleOverlayCount();
+  if (n > 0) {
+    console.log(`[clean] ${tag} 前发现 ${n} 层残留遮罩，尝试关闭`);
+    await closeOverlay();
+    n = await visibleOverlayCount();
+  }
+  await purgeStrayPoppers();
+  step(`  [clean] ${tag}`, n === 0, n === 0 ? '' : `仍有 ${n} 层可见遮罩（继续录制，交付前按亮度剖面决定是否重录）`);
+  return n === 0;
+}
+
+// ---------- 长页逐屏滚动（懒渲染：图表只在滚到视口时初始化） ----------
+// 找最大可滚容器分步滚，每步可 aim 一个目标（边滚边带出懒渲染图表）；结束回顶。
+// 万像素级长页 4 屏起步；预热段先全页滚一遍再开录，否则片头扫视拍到空图。
+async function scrollSteps(times, px, aimFn) {
+  const scrollLargest = delta => page.evaluate(p => {
+    const cands = [document.scrollingElement, ...document.querySelectorAll('.el-scrollbar__wrap, .el-table__body-wrapper, .main-content, main')].filter(Boolean);
+    let best = document.scrollingElement, bestH = 0;
+    for (const c of cands) {
+      const h = (c.scrollHeight || 0) - (c.clientHeight || 0);
+      if (h > bestH) { bestH = h; best = c; }
+    }
+    if (!best) return false;
+    if (p > 0) { best.scrollTop += p; if (typeof best.scrollBy === 'function') best.scrollBy(0, p); } else { best.scrollTop = 0; }
+    return true;
+  }, delta).catch(() => false);
+  for (let i = 0; i < times; i++) {
+    await scrollLargest(px);
+    await sleep(700);
+    if (aimFn) await aimFn(i);
+    await waitIdle(4000);
+  }
+  await scrollLargest(0);
+  await sleep(500);
+}
 
 // 【模块适配区①：G 区谓词】列表判定=表头文案（双语概念对）；详情判定=5 个 tab 概念各至少一个可见按钮
 const G = {
@@ -300,15 +420,7 @@ async function dumpUi(tag) {
   console.log(`    [ui:${tag}] rows=${d.rows} dlg=[${d.dlg.join(',')}] btns=[${d.btns.join('|')}]`);
   return d;
 }
-// 关掉当前弹窗：取消优先 → X → Esc；绝不点确定
-async function dismiss(opt = {}) {
-  let ok = await doAimClick('dlgBtn', '取消', opt);
-  if (!ok) ok = await doAimClick('dlgClose');
-  if (!ok) await page.keyboard.press('Escape').catch(() => {});
-  await beat(450);
-  await gate(P_NO_OVERLAY, 4000);
-  await beat(250);
-}
+// 关弹窗统一走 closeOverlay（弹层卫生三段式，见上方定义）。
 // 详情页判定：5 个 tab 概念各至少一个（中/英任一）可见按钮（列表页不会有）
 const P_DETAIL = () => {
   const norm = s => (s || '').replace(/\s+/g, '');
@@ -398,7 +510,7 @@ async function rowOp(op, tag = '', key = '') {
     act(key + '_audit');
     const ok = await doAimClick('rowBtn', op, 0);
     const opened = ok && await gate(P_OVERLAY, 10000);
-    if (opened) { await beat(3000); await dismiss(); }
+    if (opened) { await beat(3000); await closeOverlay(); }
     step('  ' + tag + '行·稽查轨迹', !!opened);
   } else if (op === '编辑' || op === '删除') {
     const st = await page.evaluate(([f, a]) => window.__dmvFind[f](...a), ['btnState', [op, { inTable: true, row: 0 }]]).catch(() => 'missing');
@@ -415,18 +527,18 @@ async function rowOp(op, tag = '', key = '') {
     if (op === '编辑') {
       await beat(600);
       const dlg = await hasDialog();
-      if (dlg) { await beat(2200); await dismiss(); }
+      if (dlg) { await beat(2200); await closeOverlay(); }
       step('  ' + tag + '行·编辑', !!ok && dlg, dlg ? '弹窗已展示并取消' : '未出现弹窗');
     } else {
       const mb = ok && await gate(P_MESSAGEBOX, 8000);
-      if (mb) { await beat(2200); await dismiss({ mb: true }); }
+      if (mb) { await beat(2200); await closeOverlay({ mb: true }); }
       step('  ' + tag + '行·删除确认', !!mb, mb ? '确认框已展示并取消' : '未出现确认框');
     }
   } else if (op === '详情') {
     act(key + '_detail');
     const ok = await doAimClick('rowBtn', op, 0);
     const opened = ok && await gate(P_OVERLAY, 10000);
-    if (opened) { await beat(3200); await dumpUi(tag + '详情抽屉'); await dismiss(); }
+    if (opened) { await beat(3200); await dumpUi(tag + '详情抽屉'); await closeOverlay(); }
     step('  ' + tag + '行·详情', !!opened);
   }
   await waitIdle();
@@ -458,7 +570,7 @@ async function tabOps({ exportItems = [], addText, rowOps = [], query = false, t
       const ok = await doAimClick('toolBtn', addText);
       await beat(700);
       const dlg = await hasDialog();
-      if (dlg) { await beat(2400); await dismiss(); }
+      if (dlg) { await beat(2400); await closeOverlay(); }
       step('  ' + tag + '添加弹窗', !!ok && dlg, dlg ? '弹窗已展示并取消' : '未出现弹窗');
     }
     await waitIdle();
@@ -484,7 +596,12 @@ async function loginAndEnter() {
   await page.locator('button:has-text("登录"), button:has-text("Login"), button:has-text("Sign")').first().click();
   let cur = await path_(), w = 0;
   while (/login/.test(cur) && w < 20000) { await sleep(800); w += 800; cur = await path_(); }
-  if (/login/.test(cur)) return false;
+  if (/login/.test(cur)) {
+    // 登录被拒（密码错误或账号被占用，单点互踢）：页面停在登录页。
+    // 实测教训：这种情况循环重试永远不会成功——返回 rejected 让调用方停手换账号。
+    const stillForm = await page.evaluate(() => { const p = document.querySelector('input[type="password"]'); return !!(p && p.getBoundingClientRect().height > 0); }).catch(() => false);
+    return stillForm ? 'rejected' : false;
+  }
   await settle(1500);
   if (!/welcome/i.test(cur)) { await page.goto(hashTo('/welcome/index'), { waitUntil: 'domcontentloaded' }).catch(() => {}); await settle(2000); }
   await waitIdle();
@@ -525,12 +642,18 @@ async function isKicked() {
   if (/login/i.test(h)) return true;
   return page.evaluate(() => { const p = document.querySelector('input[type="password"]'); return !!(p && p.getBoundingClientRect().height > 0); }).catch(() => false);
 }
-// 被踢自愈：重登 → 进研究 → 回到指定位置（列表 或 详情+指定 tab）
+// 被踢自愈：重登 → 进研究 → 回到指定位置（列表 或 详情+指定 tab）。
+// 登录被拒（账号被占用/密码错）时立即停手不循环重试——换不互踢的账号或请用户释放。
 async function ensureCtx(pos) {
   if (!(await isKicked())) return true;
   console.log('[recover] 会话被踢，自愈恢复 → ' + pos.seg + (pos.tab ? '/' + pos.tab : ''));
   for (let i = 0; i < 3; i++) {
-    if (await loginAndEnter()) {
+    const r = await loginAndEnter();
+    if (r === 'rejected') {
+      console.log('[recover] 登录被拒（密码错误或账号被占用）：停止重试，请换不互踢的账号或请用户释放会话');
+      return false;
+    }
+    if (r) {
       await clickMenuRact();
       if (pos.seg === 'detail') {
         await openVersion(DEMO_VERSION);
@@ -557,8 +680,9 @@ try {
   step('登录页就绪', loginOk, 'navigations=' + navCount + ' url=' + maskUrl(await path_()));
   if (!loginOk) throw new Error('登录页未渲染 BASE=' + BASE_DESC + ' nav=' + navCount);
   const entered = await loginAndEnter();
-  step('登录跳转+进入演示研究', entered);
-  if (!entered) throw new Error('登录或进研究失败');
+  step('登录跳转+进入演示研究', entered === true, entered === 'rejected' ? '登录被拒（账号被占用/密码错）——换不互踢账号或请用户释放后重录' : '');
+  if (entered === 'rejected') throw new Error('登录被拒（密码错误或账号被占用）：停止录制，换不互踢的账号或请用户释放会话');
+  if (entered !== true) throw new Error('登录或进研究失败');
 
   // ===== 预热（成片掐掉）=====
   if (!process.env.DV_NO_WARMUP) {
@@ -570,6 +694,8 @@ try {
         await doAimClick('btn', name);
         await beat(1300); await waitIdle();
       }
+      // 全页滚动预热：懒渲染图表只在滚到视口时初始化，先滚一遍再开录（否则片头扫视拍到空图）
+      await scrollSteps(4, 900);
       await ensureList();
     }
     console.log('[warmup] 结束 ' + ((Date.now() - tw) / 1000).toFixed(0) + 's');
@@ -582,8 +708,8 @@ try {
   // 光标先落在列表头部，首帧有自然落点
   await doAim('btn', 'RACT 版本', { scope: '.el-table__header-wrapper th', exact: false });
   await beat(1200);
-  // 黑场闪光标记（260ms）：后期场景检测按此帧精确定位掐头点——
-  // 白底 UI 的页面切换分值低不可靠，闪光帧分值≈1 必然可检。
+  // 黑场闪光标记（260ms）：后期逐帧亮度法按「全帧 YAVG<40 的最长连续段」精确定位掐头点——
+  // 场景分值口径已弃用（闪光帧可能被虚拟光标压住几个像素导致分值不足）。
   // flashWall=闪光注入的墙钟秒，写进 timings.json 供 S2 对齐初始漂移（勿删）。
   flashWall = +(((Date.now() - t0) / 1000).toFixed(2));
   await page.evaluate(() => {
@@ -599,6 +725,7 @@ try {
   await beat(2800);
 
   act('export_list');
+  await assertClean('列表段');
   await ensureCtx({ seg: 'list' });
   await doAimClick('toolBtn', '导出');
   await beat(900);
@@ -611,6 +738,7 @@ try {
   step('列表·导出下拉', true, '导出列表 / 导出稽查轨迹');
 
   act('create_click');
+  await assertClean('创建段');
   await ensureCtx({ seg: 'list' });
   // 示例：真实点击演示（一键建草稿，无确认层）——真实点击必须经用户明确同意
   const createOk = await doAimClick('toolBtn', '创建RACT');
@@ -622,10 +750,12 @@ try {
   step('列表·创建（真实点击）', createOk && (toastOk || !!newRowAimed), '一键创建草稿并刷新列表（真实产生新草稿版本，交付说明须写明）');
 
   act('audit_list');
+  await assertClean('列表稽查');
   await ensureCtx({ seg: 'list' });
   await rowOp('稽查轨迹', '列表', 'list');
 
   act('publish');
+  await assertClean('发布段');
   await ensureCtx({ seg: 'list' });
   // 找带「发布」按钮的行（版本多时可能在第 2 页）
   const findPublishRow = () => page.evaluate(() => {
@@ -646,7 +776,7 @@ try {
     await doAimClick('btn', '发布', { inTable: true, row: pubIdx });
     const mbOk = await gate(P_MESSAGEBOX, 8000);
     step('列表·发布确认框', mbOk);
-    if (mbOk) { await beat(2600); await dismiss({ mb: true }); }
+    if (mbOk) { await beat(2600); await closeOverlay({ mb: true }); }
   } else { step('列表·发布确认框', false, '当前无带发布按钮的版本行'); }
 
   act('version_open');
@@ -677,6 +807,7 @@ try {
 
   // ===== 段三：Tab1 关键过程 =====
   act('tab_cp');
+  await assertClean('Tab1');
   await ensureCtx({ seg: 'detail', tab: '关键过程' });
   await doAimClick('btn', '关键过程');
   await beat(2000); await waitIdle();
@@ -686,6 +817,7 @@ try {
 
   // ===== 段四：Tab2 关键数据 =====
   act('tab_cd');
+  await assertClean('Tab2');
   await ensureCtx({ seg: 'detail', tab: '关键数据' });
   await doAimClick('btn', '关键数据');
   await beat(2000); await waitIdle();
@@ -695,6 +827,7 @@ try {
 
   // ===== 段五：Tab3 风险定义&评估 =====
   act('tab_rd');
+  await assertClean('Tab3');
   await ensureCtx({ seg: 'detail', tab: '风险定义&评估' });
   await doAimClick('btn', '风险定义&评估');
   await beat(2400); await waitIdle();
@@ -735,7 +868,7 @@ try {
     if (auditHit) {
       const ok = await doAimClick('btn', '稽查轨迹');
       auditOpened = ok && await gate(P_OVERLAY, 10000);
-      if (auditOpened) { await beat(3000); await dismiss(); }
+      if (auditOpened) { await beat(3000); await closeOverlay(); }
     }
     step('风险问题行·稽查轨迹', auditOpened, expOk ? '' : '行未展开');
     await waitIdle();
@@ -780,7 +913,7 @@ try {
         const hit = await doAimClick('btn', it, { scope: '.el-dropdown-menu__item', exact: true });
         await beat(700);
         const opened = await page.evaluate(() => [...document.querySelectorAll('.el-dialog, .el-drawer')].some(d => d.getBoundingClientRect().height > 0));
-        if (opened) { await beat(2800); await dismiss(); }
+        if (opened) { await beat(2800); await closeOverlay(); }
         step('  风险类别·' + it, !!hit, opened ? '弹窗已展示并取消' : '无弹窗');
         await waitIdle();
       }
@@ -803,7 +936,7 @@ try {
       }).catch(() => {});
       await beat(900);
       const addDlg = await hasDialog();
-      if (addDlg) { await beat(2400); await dismiss(); }
+      if (addDlg) { await beat(2400); await closeOverlay(); }
       step('新建风险分类入口', true, addDlg ? '表单已展示并取消' : '点击未出表单');
     } else {
       step('新建风险分类入口', true, '已发布版本不渲染该入口');
@@ -817,6 +950,7 @@ try {
 
   // ===== 段六：Tab4 风险缓解措施 =====
   act('tab_rm');
+  await assertClean('Tab4');
   await ensureCtx({ seg: 'detail', tab: '风险缓解措施' });
   await doAimClick('btn', '风险缓解措施');
   await beat(2200); await waitIdle();
@@ -841,6 +975,7 @@ try {
 
   // ===== 段七：Tab5 参与者 =====
   act('tab_part');
+  await assertClean('Tab5');
   await ensureCtx({ seg: 'detail', tab: '参与者' });
   await doAimClick('btn', '参与者');
   await beat(2200); await waitIdle();
@@ -870,6 +1005,7 @@ try {
 
   // ===== 收尾：点详情页返回箭头回列表 =====
   act('back_list');
+  await assertClean('返回列表');
   await ensureCtx({ seg: 'list' });
   step('返回模块列表', await ensureList());
   await waitIdle();

@@ -8,7 +8,11 @@ export interface WorkerRequest { operation: string; project: string; [key: strin
 export interface WorkerResponse {
   ok: boolean; action?: string; inspection?: unknown; receipt?: unknown; document?: unknown; metadata?: unknown
   code?: string; reason?: string; stage?: string; retryable?: boolean
-  diagnostics?: { errorType?: unknown; outputsDefined?: unknown; syntax?: string }
+  diagnostics?: { errorType?: unknown; outputsDefined?: unknown; syntax?: string; stage?: string }
+  /** 结构化输入失败清单（path/stage/code/reason，不含业务值）；TS 层 failure()
+   *  必须转发进模型可见消息——2026-10-20 P0 前这两个字段在 Error 重建时丢失。 */
+  environmentHint?: string
+  failures?: Array<{ path?: string; stage?: string; code?: string; reason?: string }>
   containsProtectedValue?: boolean
 }
 

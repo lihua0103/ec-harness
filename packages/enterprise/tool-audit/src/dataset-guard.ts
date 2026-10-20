@@ -6,6 +6,12 @@
  * 宿主关闭数据安全开关时不做任何拦截；服务未装配或读取失败按开启处理。
  */
 import { isAbsolute, relative, resolve } from 'node:path'
+import {
+  DELIVERABLE_PATH_PATTERN,
+  DISCOVERY_TOOLS,
+  PATH_ARGUMENT_KEYS,
+  collectPathArgumentValues,
+} from './egress.ts'
 
 export const DEFAULT_DATASET_EXTENSIONS = ['.sas7bdat', '.xpt', '.csv']
 export const AUXILIARY_EXCEL_EXTENSIONS = ['.xlsx', '.xls', '.xlsm']
@@ -72,16 +78,19 @@ function extensionClass(value: string): ProtectedPathClass | undefined {
 }
 
 /** 只按路径角色分类；doc/ 优先，因此 doc 内同名扩展仍是需求材料。
- *  内容型参数键（write 的 content、edit 的 old/new_string 等）不参与
- *  受保护引用扫描——写文件时提及数据集文件名不构成读取泄露，误拒会
- *  无意义地打断模型正常工作。 */
+ *  内容型参数键（write 的 content、edit 的 old/new_string 等）与路径型
+ *  参数键（file_path/path 等，由 collectPathArgumentValues 原子判定）都
+ *  不参与受保护引用切词扫描——前者写文件时提及数据集文件名不构成读取
+ *  泄露；后者按完整路径判定，切词会把含空格/中文路径切碎（2026-10-20
+ *  P0/T02 误拦修复）。 */
 const CONTENT_ARGUMENT_KEYS = new Set([
   'content', 'new_string', 'old_string', 'text', 'body', 'value', 'prompt',
   'description', 'notes', 'message', 'answer', 'output',
 ])
 
 function collectStrings(
-  value: unknown, seen: WeakSet<object>, output: string[], skipKeys: boolean, depth = 0,
+  value: unknown, seen: WeakSet<object>, output: string[], skipContentKeys: boolean,
+  skipPathKeys: boolean, depth = 0,
 ): boolean {
   if (depth > 24) return false
   if (typeof value === 'string') {
@@ -92,18 +101,24 @@ function collectStrings(
   if (seen.has(value)) return false
   seen.add(value)
   if (Array.isArray(value)) {
-    return value.every(item => collectStrings(item, seen, output, skipKeys, depth + 1))
+    return value.every(item => collectStrings(item, seen, output, skipContentKeys, skipPathKeys, depth + 1))
   }
   return Object.entries(value as Record<string, unknown>)
     .every(([key, item]) => {
-      if (skipKeys && CONTENT_ARGUMENT_KEYS.has(key.toLowerCase())) return true
-      return collectStrings(item, seen, output, skipKeys, depth + 1)
+      const normalizedKey = key.toLowerCase()
+      if (skipContentKeys && CONTENT_ARGUMENT_KEYS.has(normalizedKey)) return true
+      if (skipPathKeys && PATH_ARGUMENT_KEYS.has(normalizedKey)) return true
+      return collectStrings(item, seen, output, skipContentKeys, skipPathKeys, depth + 1)
     })
 }
 
-function candidateReferences(arguments_: unknown): string[] | typeof UNSCANNABLE_ARGUMENTS {
+function candidateReferences(
+  arguments_: unknown, excludePathArgumentKeys: boolean,
+): string[] | typeof UNSCANNABLE_ARGUMENTS {
   const strings: string[] = []
-  if (!collectStrings(arguments_, new WeakSet(), strings, true)) return UNSCANNABLE_ARGUMENTS
+  if (!collectStrings(arguments_, new WeakSet(), strings, true, excludePathArgumentKeys)) {
+    return UNSCANNABLE_ARGUMENTS
+  }
   return strings
     .flatMap(value => value.split(/[\s"'`,;=()[\]{}<>|]+/))
     .map(value => value.trim())
@@ -134,8 +149,8 @@ function projectSegments(reference: string, cwd?: string): string[] | undefined 
  *  交付域补充（2026-09-15，RBQM 实测）：R 车道/RBQM 的交付目录是项目下
  *  Output/04_Out/**（跨项目根的绝对路径，cwd 锚定不到），按「output 段后跟
  *  04_out 段」的路径形态识别为交付物——生成与 QC 读取 listing Excel 不拦，
- *  拦的只是源数据（SAS/辅助 Excel）入上下文。 */
-const DELIVERABLE_PATH_PATTERN = /(^|[\\/])output([\\/])04_out([\\/])/i
+ *  拦的只是源数据（SAS/辅助 Excel）入上下文。形态常量自 2026-10-20 起由
+ *  egress.ts 共享（listing post 只对路径型参数使用，文本豁免已移除）。 */
 
 export function classifyReference(reference: string, cwd?: string): PathClass {
   if (DELIVERABLE_PATH_PATTERN.test(reference)) return 'generated-output'
@@ -158,9 +173,9 @@ export function classifyReference(reference: string, cwd?: string): PathClass {
 }
 
 export function findProtectedReference(
-  arguments_: unknown, cwd?: string,
+  arguments_: unknown, cwd?: string, excludePathArgumentKeys = false,
 ): { reference: string; pathClass: ProtectedPathClass } | typeof UNSCANNABLE_ARGUMENTS | undefined {
-  const references = candidateReferences(arguments_)
+  const references = candidateReferences(arguments_, excludePathArgumentKeys)
   if (references === UNSCANNABLE_ARGUMENTS) return references
   for (const raw of references) {
     const reference = resolveReference(raw, cwd)
@@ -193,19 +208,44 @@ export function interceptionEnabled(context: Pick<GuardContext, 'dataSecuritySer
   }
 }
 
-/** 窄版 pre-execute 拒绝（2026-09-03 恢复，替代此前的恒放行）：
- *  只在参数中正向命中受保护文件引用时拒绝（带改道 listing 车道的指引）；
- *  参数不可解析、内容型参数、doc/与系统输出、enterprise_* 车道一律放行。
- *  拒绝面收敛到"显式要读数据集"这一种高精度形态，其余全交给
- *  listing 宿主的 post-execute 值扫描。 */
+/** 路径型参数的原子判定（P0/T02）：整串按一个引用解析，不经空白切词。
+ *  返回命中的保护引用；参数不可解析返回 UNSCANNABLE；否则 undefined。 */
+export function findProtectedPathArgument(
+  arguments_: unknown, cwd?: string,
+): { reference: string; pathClass: ProtectedPathClass } | typeof UNSCANNABLE_ARGUMENTS | undefined {
+  const values: string[] = []
+  if (collectPathArgumentValues(arguments_, values) === 'unscannable') return UNSCANNABLE_ARGUMENTS
+  for (const raw of values) {
+    const reference = resolveReference(raw, cwd)
+    const pathClass = extensionClass(reference)
+    if (pathClass !== undefined && classifyReference(reference, cwd) === pathClass) {
+      return { reference, pathClass }
+    }
+  }
+  return undefined
+}
+
+/** 窄版 pre-execute 拒绝（2026-09-03 恢复；2026-10-20 P0/T02 按方案收敛）：
+ *  - 发现型工具（glob/ls/stat 等）只做发现合同，不因模式串含受保护后缀拒绝；
+ *    结果文本仍由 listing 宿主 post-execute 值扫描兜底。
+ *  - 路径型参数（file_path/path 等）整串原子判定：含空格/中文/嵌套的
+ *    doc 需求不再被切碎误拦，拒绝引用保留完整路径。
+ *  - 其余字符串参数（命令文本等）保留切词兜底：执行通道引用受保护
+ *    数据集仍拒绝（本地执行自由，但显式读取源数据仍须走 listing 车道）。
+ *  参数不可解析、内容型参数、doc/与系统输出、enterprise_* 车道一律放行。 */
 export function inspectToolExecution(
   execution: Readonly<ToolExecutionLike>,
   dataInterception = true,
 ): GuardDecision | string | undefined {
   if (!dataInterception) return undefined
   if (execution.name.startsWith('enterprise_')) return undefined
+  if (DISCOVERY_TOOLS.has(execution.name.toLowerCase())) return undefined
   const cwd = execution.agent?.session?.header?.cwd
-  const found = findProtectedReference(execution.arguments, cwd)
+  const pathHit = findProtectedPathArgument(execution.arguments, cwd)
+  if (pathHit !== undefined && pathHit !== UNSCANNABLE_ARGUMENTS) {
+    return datasetDenyReason(pathHit.reference)
+  }
+  const found = findProtectedReference(execution.arguments, cwd, true)
   if (found === undefined || found === UNSCANNABLE_ARGUMENTS) return undefined
   return datasetDenyReason(found.reference)
 }

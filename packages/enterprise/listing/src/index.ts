@@ -16,6 +16,7 @@ import { isAbsolute, resolve as resolvePath, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
+import { deliverablePathArgumentHit, egressBlock } from '@dsh-enterprise/tool-audit/egress'
 import { PythonWorker, type WorkerResponse } from './worker.js'
 import { RManualRunner, RPKRunner, R_LANE_DIRS, PK_LANE_DIRS, DEFAULT_PROJECT_ROOT, type RLaneConfig } from './r-runner.js'
 
@@ -77,19 +78,37 @@ const output = {
 
 function failure(result: WorkerResponse, fallback: string): never {
   // 将稳定阶段码带回 Harness，避免把底层异常或临床值暴露出来，也避免模型盲目重算。
+  // P0（2026-10-20）：environmentHint/failures 必须进入模型可见消息——此前
+  // 重新构造 Error 时被丢弃，模型只能盲猜环境与哪个输入失败（方案 §1.2）。
   const stage = typeof result.stage === 'string' ? result.stage : undefined
   const diagnostics = result.diagnostics
   let detail = result.reason || fallback
-  if (diagnostics?.errorType !== undefined || diagnostics?.outputsDefined !== undefined) {
+  if (diagnostics?.errorType !== undefined || diagnostics?.outputsDefined !== undefined || diagnostics?.stage !== undefined) {
     const parts: string[] = []
     if (typeof diagnostics?.errorType === 'string') parts.push(`errorType=${diagnostics.errorType}`)
     if (typeof diagnostics?.outputsDefined === 'boolean') parts.push(`outputsDefined=${diagnostics.outputsDefined}`)
     if (typeof diagnostics?.syntax === 'string') parts.push(`syntax=${diagnostics.syntax}`)
+    if (typeof diagnostics?.stage === 'string') parts.push(`stage=${diagnostics.stage}`)
     if (parts.length > 0) detail = `${detail}（${parts.join('，')}）`
+  }
+  if (typeof result.environmentHint === 'string' && result.environmentHint.trim() !== '') {
+    detail += `；环境提示：${result.environmentHint.trim().slice(0, 500)}`
+  }
+  if (Array.isArray(result.failures) && result.failures.length > 0) {
+    const items = result.failures.slice(0, 20).map(item => {
+      const subject = typeof item?.path === 'string' && item.path !== '' ? item.path
+        : typeof item?.stage === 'string' ? item.stage : '输入'
+      const cause = typeof item?.reason === 'string' && item.reason !== '' ? item.reason
+        : typeof item?.code === 'string' ? item.code : '失败'
+      return `${subject}: ${cause}`
+    })
+    detail += `；输入失败：${items.join('；')}`
   }
   throw Object.assign(new Error(stage ? `${detail}（阶段：${stage}）` : detail), {
     code: result.code || 'LISTING_ERROR', stage, expose: true, retryable: result.retryable,
     diagnostics,
+    environmentHint: result.environmentHint,
+    failures: result.failures,
   })
 }
 
@@ -204,13 +223,18 @@ export function sweepStaleSpillDirs(now = Date.now()): number {
 }
 
 function blockedProtectedResult(): PostDecision {
-  return {
-    kind: 'block',
-    feedback: [{
-      type: 'text',
-      text: '通用工具结果包含受保护临床数据值，已阻止该结果返回模型。请继续使用企业 listing 车道计算和发布。',
-    }],
-  }
+  // 真实命中：结果携带受保护数据值（P0 起这是唯一使用"检测到数据"口径的分支）。
+  const block = egressBlock('PROTECTED_CONTENT_WITHHELD')
+  return { kind: 'block', feedback: block.feedback }
+}
+
+/** 扫描基础设施故障分类回执（P0/T03，方案 §4.4）：预热中/超时/失败/未就绪
+ *  不再与真实命中共用"受保护数据"文案——那曾让模型把初始化状态当泄露，
+ *  陷入无意义重试。 */
+function scanUnavailableResult(code: 'SCAN_WARMING' | 'SCAN_TIMEOUT' | 'SCAN_FAILED' | 'SCAN_UNAVAILABLE',
+  detail?: string): PostDecision {
+  const block = egressBlock(code, detail)
+  return { kind: 'block', feedback: block.feedback }
 }
 
 function stringifyPostValue(value: unknown): string {
@@ -229,11 +253,14 @@ function postResultText(result: PostResult, decision: PostDecision): string {
   const content = Object.prototype.hasOwnProperty.call(decision, 'content')
     ? decision.content
     : result.content
-  // additionalContexts 是宿主可向模型注入的旁路面（审计 P3），一并扫描。
-  const extra = (decision as { additionalContexts?: unknown }).additionalContexts
-    ?? (result as { additionalContexts?: unknown }).additionalContexts
-  return [stringifyPostValue(value), stringifyPostValue(content), stringifyPostValue(extra)]
-    .filter(Boolean).join('\n')
+  // additionalContexts 是宿主可向模型注入的旁路面（审计 P3）。宿主接受结果时
+  // 会把原结果与决策两侧的上下文**拼接**，所以两侧都必须扫描——此前只取
+  // 一侧（??），另一侧存在时原结果上下文漏扫（2026-10-20 P0 修复）。
+  const parts = [value, content]
+  for (const source of [result, decision] as Array<{ additionalContexts?: unknown }>) {
+    if (Array.isArray(source.additionalContexts)) parts.push(source.additionalContexts)
+  }
+  return parts.map(part => stringifyPostValue(part)).filter(Boolean).join('\n')
 }
 
 export function apply(ctx: Context, config: ListingConfig = {}): void {
@@ -334,8 +361,9 @@ export function apply(ctx: Context, config: ListingConfig = {}): void {
 1. enterprise_listing_inspect：获取 doc/ 全量需求清单（requirementDocuments manifest）、doc 外辅助 Excel 结构与 ALS 语义映射、数据集元数据（列名/行数/dtype/null/unique）；大结果不得读取通用工具 spill，改用 enterprise_listing_read_metadata 分页
 2. enterprise_listing_read_document：按 documentId 和 chunkIndex 顺序读取需求分片（从 0 开始，按序拼接解析）。大型模板类需求（如通用 DVP）不必整本读入上下文：未读完的分片不阻塞 run_code——沙箱已注入完整 requirements/spec_documents 对象，可在 run_code 内按 sheet 名或关键字直接提取目标需求表；交付所依赖的需求表必须已确认理解，run_code 回执的 unreadRequirementChunkCount 提示未读覆盖
 3. enterprise_listing_read_metadata：在企业车道分页读取完整数据集元数据和辅助文件结构；只返回结构，不返回数据集行值或辅助 Excel rows。数据集较多时先调用 compact=true（只含 name/path/columns/rowCount，全目录一页读完），再仅对关键数据集用普通分页取详细统计
-4. enterprise_listing_run_code：生成 outputs 字典，每个键是工作表名，每个值是 pandas DataFrame
-5. enterprise_listing_publish：唯一交付路径，生成单个规范化 Multi-Sheet Excel
+4. enterprise_listing_analyze：需要键唯一性、关联覆盖、声明式规则命中、产物比较等**结论**时优先调用——宿主本地计算，只返回计数（不含行值/键值/样例）；只在确需个体值参与计算时才用 run_code
+5. enterprise_listing_run_code：生成 outputs 字典，每个键是工作表名，每个值是 pandas DataFrame
+6. enterprise_listing_publish：唯一交付路径，生成单个规范化 Multi-Sheet Excel
 
 场景选择必须依据完整 doc/ 需求和表单结构，在 publish 时显式传入 manual、medical、rbqm 或 report 之一；禁止根据项目目录名、数据集名称或历史产物推断场景，无法确定时不得发布。
 
@@ -441,6 +469,44 @@ df.attrs["_layout"] = {
       if (!result.ok) failure(result, 'read metadata failed')
       bindProject(exec, project)
       return result.metadata
+    },
+  })
+
+  registerTool(listing, {
+    name: 'enterprise_listing_analyze',
+    description: '受控分析（方案 §6）：对已登记数据集或最近一次 run_code 产物做结构/键唯一性/关联覆盖/声明式规则/产物比较检查，宿主本地计算、只返回计数结论（不含行值、键值或样例）。需要个体值时才用 run_code 本地计算。',
+    parameters: { type: 'object', properties: {
+      project: { type: 'string', description: 'harness 项目绝对路径' },
+      analyzeOperation: { type: 'string', enum: ['schema', 'key_check', 'join_check', 'rule_check', 'compare_artifacts', 'run_status'], description: '分析操作' },
+      inputs: { type: 'array', items: { type: 'string' }, description: 'schema：已登记数据集名列表' },
+      input: { type: 'string', description: 'key_check/rule_check：已登记数据集名' },
+      keys: { type: 'array', items: { type: 'string' }, description: 'key_check：键列名' },
+      left: { type: 'string', description: 'join_check：左输入数据集名' },
+      right: { type: 'string', description: 'join_check：右输入数据集名' },
+      keyPairs: { type: 'array', items: { type: 'object', properties: {
+        leftField: { type: 'string' }, rightField: { type: 'string' },
+      }, required: ['leftField', 'rightField'], additionalProperties: false }, description: 'join_check：键对' },
+      expectedCardinality: { type: 'string', enum: ['1:1', '1:n', 'n:1', 'n:n'], description: 'join_check：期望基数' },
+      nullPolicy: { type: 'string', enum: ['never_match', 'match'], description: 'join_check：键空值策略，默认 never_match（NA 键永不匹配）' },
+      rule: { type: 'object', properties: {
+        op: { type: 'string', enum: ['not_null', 'unique', 'equal_columns', 'non_negative'] },
+        column: { type: 'string' }, columns: { type: 'array', items: { type: 'string' } },
+        left: { type: 'string' }, right: { type: 'string' },
+      }, required: ['op'], additionalProperties: false, description: 'rule_check：声明式规则（首批算子；不接受表达式）' },
+      actualRef: { type: 'string', description: 'compare_artifacts：实际产物名（最近一次成功 run_code 的输出名）' },
+      expectedRef: { type: 'string', description: 'compare_artifacts：期望产物名' },
+      keyColumns: { type: 'array', items: { type: 'string' }, description: 'compare_artifacts：比较键列（须在两侧 schema 中且值唯一）' },
+    }, required: ['project', 'analyzeOperation'], additionalProperties: false },
+    async execute(args, exec) {
+      const project = normalizeProjectPath((args as { project?: unknown }).project)
+      checkProject(exec, project)
+      const { project: _project, ...analyzeArgs } = args as Record<string, unknown>
+      const result = await requestWorker(exec,
+        { operation: 'listing_analyze', project, ...analyzeArgs, ...hostFlags(listing) },
+        HEAVY_TIMEOUT_MS)
+      if (!result.ok) failure(result, 'analyze failed')
+      bindProject(exec, project)
+      return result.receipt
     },
   })
 
@@ -766,26 +832,26 @@ QC 一致性检查只进 note() 运行日志。红线：原始 PK excel 与 EDC 
       //  3) 其余通用工具（read/glob/grep 等）结果若携带源数据值（SAS 行值、
       //     辅助 Excel 业务值）才拦截。
       if (EXECUTION_TOOLS.has(exec.name)) return decision
-      // 交付物域放行：Output/04_Out/** 是项目产出（listing Excel 等），
-      // 生成与 QC 读取都不拦；保护值溯源到源数据为止。
-      {
-        // JSON 序列化会把反斜杠转义成双写（Output\\04_Out），分隔符按 1-2 个匹配。
-        const argsText = stringifyPostValue((exec as { arguments?: unknown }).arguments)
-        const resultText = postResultText(result, decision)
-        if (/Output[/\\]{1,2}04_Out/i.test(argsText) || /Output[/\\]{1,2}04_Out/i.test(resultText)) {
-          return decision
-        }
+      // 交付域放行（P0/T02 收紧 2026-10-20）：只认**路径型参数**命中
+      // Output/04_Out 交付目录形态（读取已生成交付物不受影响）；旧逻辑
+      // 对参数或结果文本任意位置出现该字样整体放行，结果内容自身可触发
+      // 豁免，构成绕过面，已移除（方案 §14）。
+      if (deliverablePathArgumentHit((exec as { arguments?: unknown }).arguments) !== undefined) {
+        return decision
       }
       if (exec.name !== 'enterprise_listing_run_code'
         && (exec.name.startsWith('enterprise_') || isInternalControlTool(exec.name))) return decision
       if (decision.kind === 'block' || !interceptionEnabled(listing)) return decision
 
       // 专用扫描 Worker：受保护值哈希常驻、与主车道计算分进程，扫描不被
-      // 长 run_code 阻塞。项目已绑定但扫描进程未就绪时 fail-closed。
+      // 长 run_code 阻塞。项目已绑定但扫描进程未就绪时按基础设施状态
+      // fail-closed（分类回执，不与真实命中共用文案）。
       const project = activeProjects.get(exec.agent)
       if (project === undefined) return decision
       const scanWorker = scanWorkers.get(exec.agent)
-      if (!scanWorker) return blockedProtectedResult()
+      if (!scanWorker) {
+        return scanUnavailableResult('SCAN_UNAVAILABLE')
+      }
       try {
         // 预热未完成：等待预热（上限 SCAN_WARMUP_WAIT_MS），大项目 inspect 后
         // 紧接着的 ls/git 等普通调用不再被"未就绪"整体拦下。
@@ -794,7 +860,7 @@ QC 一致性检查只进 note() 运行日志。红线：原始 PK excel 与 EDC 
           const ready = await Promise.race([
             warmup, new Promise<boolean>(resolve => setTimeout(() => resolve(false), SCAN_WARMUP_WAIT_MS)),
           ])
-          if (!ready) return blockedProtectedResult()
+          if (!ready) return scanUnavailableResult('SCAN_WARMING')
         }
         const scan = await scanWorker.request({
           operation: 'listing_scan_text',
@@ -802,11 +868,16 @@ QC 一致性检查只进 note() 运行日志。红线：原始 PK excel 与 EDC 
           text: postResultText(result, decision),
           ...hostFlags(listing),
         }, SCAN_TIMEOUT_MS)
-        if (scan.ok !== true || scan.containsProtectedValue !== false) return blockedProtectedResult()
+        if (scan.ok !== true) {
+          return scanUnavailableResult('SCAN_FAILED',
+            typeof scan.code === 'string' ? `扫描错误码 ${scan.code}` : undefined)
+        }
+        if (scan.containsProtectedValue !== false) return blockedProtectedResult()
         return decision
       } catch (error) {
-        listing.logger?.warn?.(`[enterprise-listing] post-execute scan failed: ${String(error)}`)
-        return blockedProtectedResult()
+        const message = error instanceof Error ? error.message : String(error)
+        listing.logger?.warn?.(`[enterprise-listing] post-execute scan failed: ${message}`)
+        return scanUnavailableResult(message === 'Worker超时' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED')
       }
     }))
   }

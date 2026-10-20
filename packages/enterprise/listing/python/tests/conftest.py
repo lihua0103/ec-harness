@@ -17,20 +17,28 @@ def isolated_edc_profiles(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def isolated_worker_session():
-    """每个测试独占会话状态，避免跨测试串扰。"""
+    """每个测试独占会话状态，避免跨测试串扰。
+
+    指纹字段必须一并保存/恢复（2026-10-20 审计补全）：此前
+    _session_data_fingerprint 漏恢复、新增的 _session_scan_fingerprint
+    若漏恢复都会让"同项目换数据必须刷新"的回归在不同测试顺序下假绿。"""
     import worker
     saved = (worker._session_project, worker._session_datasets, worker._session_sources,
              worker._session_documents, worker._session_auxiliary_documents,
              worker._session_document_chunks_read, worker._last_outputs,
              worker._session_failures, worker._session_protected_hashes,
-             worker._session_doc_baseline, worker._session_doc_baseline_project)
+             worker._session_doc_baseline, worker._session_doc_baseline_project,
+             worker._session_data_fingerprint, worker._session_scan_fingerprint,
+             worker._session_snapshot_id, worker._last_outputs_snapshot)
     worker._reset_session()
     yield
     (worker._session_project, worker._session_datasets, worker._session_sources,
      worker._session_documents, worker._session_auxiliary_documents,
      worker._session_document_chunks_read, worker._last_outputs,
      worker._session_failures, worker._session_protected_hashes,
-     worker._session_doc_baseline, worker._session_doc_baseline_project) = saved
+     worker._session_doc_baseline, worker._session_doc_baseline_project,
+     worker._session_data_fingerprint, worker._session_scan_fingerprint,
+     worker._session_snapshot_id, worker._last_outputs_snapshot) = saved
 
 
 @pytest.fixture()

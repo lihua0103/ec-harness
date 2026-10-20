@@ -1,0 +1,88 @@
+{
+  "$comment": "安全回归场景映射（方案 §12.2，T00 起步）。status: covered=有可执行测试且断言场景语义; partial=覆盖场景的一部分,其余需 P1 能力; 每条必须有可执行测试引用,无映射不得标通过。",
+  "cases": [
+    {
+      "id": "S01",
+      "title": "glob/list/stat 含受保护后缀只返回文件信息，不触发读取拒绝",
+      "status": "covered",
+      "tests": ["packages/enterprise/tool-audit/src/dataset-guard.test.ts#发现合同与路径原子化>glob/ls/stat 发现型工具不因模式串或路径参数含受保护后缀拒绝"]
+    },
+    {
+      "id": "S02",
+      "title": "空格/中文/嵌套路径按完整引用判定；拒绝引用不切碎",
+      "status": "covered",
+      "tests": [
+        "packages/enterprise/tool-audit/src/dataset-guard.test.ts#发现合同与路径原子化>含空格/中文的 doc 需求路径按原子引用放行",
+        "packages/enterprise/tool-audit/src/dataset-guard.test.ts#发现合同与路径原子化>含空格数据集路径拒绝时引用保留完整路径"
+      ]
+    },
+    {
+      "id": "S03",
+      "title": "代码文本含数据路径（无读取输出）不因后缀拒绝",
+      "status": "covered",
+      "tests": ["packages/enterprise/tool-audit/src/dataset-guard.test.ts#发现合同与路径原子化>写码场景：路径参数指向代码文件、内容含数据路径不误伤"]
+    },
+    {
+      "id": "S07",
+      "title": "Output 路径/文本字样不改变内容保护属性",
+      "status": "covered",
+      "tests": [
+        "packages/enterprise/listing/src/index.test.ts#交付目录豁免只认路径参数：结果文本含 Output/04_Out 不再整体放行",
+        "packages/enterprise/listing/src/index.test.ts#路径参数命中交付目录仍放行（过渡期读取已生成交付物）"
+      ]
+    },
+    {
+      "id": "S08",
+      "title": "value/content/meta/error/feedback/两侧 additionalContexts 分面控制",
+      "status": "partial",
+      "coveredFacets": ["value", "两侧 additionalContexts"],
+      "pendingFacets": ["meta", "error.message", "feedback"],
+      "tests": ["packages/enterprise/listing/src/index.test.ts#additionalContexts 两侧拼接面都扫描（P0 修复单侧 ?? 漏扫）"],
+      "note": "meta/error.message/feedback 面需 P1 统一出口 DTO（T10）后补齐"
+    },
+    {
+      "id": "S11",
+      "title": "扫描预热/超时/崩溃有准确错误码与有界恢复",
+      "status": "partial",
+      "coveredFacets": ["扫描失败分类回执（SCAN_FAILED 带扫描错误码）", "真实命中与基础设施故障文案分离"],
+      "pendingFacets": ["预热超时（SCAN_WARMING 需可注入时钟）", "请求超时（SCAN_TIMEOUT 需真实 worker）", "重建次数上限"],
+      "tests": ["packages/enterprise/listing/src/index.test.ts#扫描基础设施故障分类回执，不再与真实命中共用\"受保护数据\"文案"]
+    },
+    {
+      "id": "S13",
+      "title": "同项目换数据/同大小同 mtime 变化正确失效",
+      "status": "partial",
+      "coveredFacets": ["扫描索引指纹变化触发重建，新值进入保护索引", "快照语义：会话数据不因磁盘事后变化作废，重 inspect 生成新 snapshotId", "旧快照产物不得隐式 publish（SNAPSHOT_STALE）"],
+      "pendingFacets": ["同大小同 mtime 改写（需内容版本，T04 完整快照）", "需求覆盖账本失效（T11 完整）"],
+      "tests": [
+        "packages/enterprise/listing/python/tests/test_scan_init_refresh.py",
+        "packages/enterprise/listing/python/tests/test_snapshot_binding.py"
+      ]
+    },
+    {
+      "id": "S16",
+      "title": "动态 SyntaxError/自定义类名/编码失败不出域，静态位置可修错",
+      "status": "covered",
+      "tests": ["packages/enterprise/listing/python/tests/test_code_runner_stages.py"]
+    },
+    {
+      "id": "S17",
+      "title": "runner 伪造属性/无效 JSON/重复列不形成可信结果",
+      "status": "covered",
+      "tests": ["packages/enterprise/listing/python/tests/test_snapshot_binding.py#decode_runner_outputs_strict_contract"],
+      "note": "重复列/attrs 白名单/帧数与行数上限/类名归并已覆盖；结果 JSON 被改写的对抗注入仍按 §2.3 非对抗边界"
+    },
+    {
+      "id": "S25",
+      "title": "合法质量计数可用；个体过滤/试探查询不出站",
+      "status": "partial",
+      "coveredFacets": ["key_check/join_check/rule_check/compare_artifacts 只返回计数", "未登记句柄拒绝", "声明式算子白名单（无 eval 兜底）", "键不唯一显式失败不按位置配对"],
+      "pendingFacets": ["跨调用查询累计（lineage 记录，T06 完整）", "ReleasePolicy 版本化登记（当前为代码内 V1 常量）"],
+      "tests": ["packages/enterprise/listing/python/tests/test_controlled_analysis.py"]
+    }
+  ],
+  "notRun": [
+    { "ids": ["S04", "S05", "S06", "S09", "S10", "S12", "S14", "S15", "S18", "S19", "S20", "S21", "S22", "S23", "S24", "S26", "S27", "S28", "S29", "S30"],
+      "reason": "依赖 P1 剩余能力（统一 DTO 票据、角色登记、执行适配、请求门禁、生命周期、独立审查）；在对应任务验收前不标通过" }
+  ]
+}

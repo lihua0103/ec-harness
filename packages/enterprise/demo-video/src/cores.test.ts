@@ -1,36 +1,88 @@
 import { describe, expect, it } from 'vitest'
 import { parseWav, buildWav, mixPlan, wavDurationSeconds } from './wav.js'
-import { buildPlan, buildSrtEntries, toSrt, type NarrationEntry } from './plan.js'
+import { buildPlan, buildSrtEntries, toSrt, longestSrtMidpoint, type NarrationEntry } from './plan.js'
 import { computeAnchors } from './anchors.js'
 import {
-  blipAnchors, flashPairFromScene, parseBlackdetect, parseDurationSeconds, parseSceneTimes, parseVolume, parseYavg,
+  blipAnchors, blipClustersFromYmin, brightnessDarkRanges, flashFromYavg,
+  parseDurationSeconds, parseSignalSeries, parseVolume, parseYavg,
+  type SignalPoint,
 } from './ffmpeg.js'
 
 const mkSegWav = (sec: number) => buildWav(Buffer.alloc(sec * 44100 * 2))
 
+/** 构造等间隔逐帧序列（25fps），v 恒定。 */
+const seriesOf = (pairs: Array<[number, number, number]>): SignalPoint[] => {
+  const out: SignalPoint[] = []
+  for (const [t0, t1, v] of pairs) {
+    for (let t = t0; t < t1 - 1e-9; t += 0.04) out.push({ t: +t.toFixed(3), v })
+  }
+  return out
+}
+
 describe('ffmpeg 输出解析', () => {
-  it('blackdetect 行解析（black_start 而非 picture_black_start）', () => {
-    const stderr = '[blackdetect @ 000] black_start:1.9 black_end:2.01 black_duration:0.11\n' +
-      '[blackdetect @ 000] black_start:2.4 black_end:2.71 black_duration:0.31\n' +
-      '其他行'
-    const evs = parseBlackdetect(stderr)
-    expect(evs).toEqual([
-      { start: 1.9, end: 2.01, dur: 0.11 },
-      { start: 2.4, end: 2.71, dur: 0.31 },
+  it('signalstats 序列解析按 key 过滤（YAVG 不混入 YMIN 等），pts_time 跨行跟踪', () => {
+    const out = [
+      'frame:0 pts:0 pts_time:0.00',
+      'lavfi.signalstats.YAVG=215.03',
+      'lavfi.signalstats.YMIN=16.0',
+      'frame:1 pts:25 pts_time:0.04',
+      'lavfi.signalstats.YAVG=214.88',
+      'lavfi.signalstats.YMIN=15.0',
+      '无关行',
+    ].join('\n')
+    expect(parseSignalSeries(out, 'YAVG')).toEqual([
+      { t: 0, v: 215.03 }, { t: 0.04, v: 214.88 },
     ])
-    // 锚点=black_start；落在闪光窗口 [flashIn-0.15, flashOut+0.15] 的事件排除
-    // （VFR 录像里打点黑条可能被稀疏帧拉长到 >0.2s，时长不可靠，只能按时刻排除闪光）
-    expect(blipAnchors(evs, 2.4, 2.61)).toEqual([1.9])
-    expect(blipAnchors(evs, 10, 11)).toEqual([1.9, 2.4])
+    expect(parseSignalSeries(out, 'YMIN')).toEqual([
+      { t: 0, v: 16 }, { t: 0.04, v: 15 },
+    ])
   })
 
-  it('场景报告解析与闪光配对（掐头=黑出+0.1）', () => {
-    const report = 'frame:12 pts:300 pts_time:1.00\nlavfi.scene_score=1.000000\nframe:32 pts:800 pts_time:1.28\nlavfi.scene_score=1.000000\n'
-    const times = parseSceneTimes(report)
-    expect(times).toEqual([1.0, 1.28])
-    expect(flashPairFromScene(times)).toEqual({ flashStart: 1.0, trim: 1.38 })
-    expect(flashPairFromScene([0.5])).toBeNull()
-    expect(flashPairFromScene([0.5, 5])).toBeNull()
+  it('闪光定位：全帧 YAVG<40 最长连续段（≥0.15s）；黑条被拉长也不会误判为闪光之外', () => {
+    // 1.0-1.24 暗场（7 帧 ≈0.24s），其余白底 215
+    const series = seriesOf([[0, 1.0, 215], [1.0, 1.28, 12], [1.28, 3, 215]])
+    const flash = flashFromYavg(series)
+    expect(flash).toEqual({ flashStart: 1.0, blackEnd: 1.24 })
+    // 暗段太短（<0.15s）不算闪光
+    const short = seriesOf([[0, 1.0, 215], [1.0, 1.08, 12], [1.08, 3, 215]])
+    expect(flashFromYavg(short)).toBeNull()
+    // 不足 0.15s 的暗段被滤掉，取合格段里的最长
+    const two = seriesOf([[0, 1, 215], [1, 1.16, 10], [1.16, 2, 215], [2, 2.28, 10], [2.28, 4, 215]])
+    expect(flashFromYavg(two)).toEqual({ flashStart: 2, blackEnd: 2.24 })
+  })
+
+  it('黑条帧簇：YMIN<15 归并（间隔 ≤0.2s）、只留 0.03–0.35s 簇，锚点=start', () => {
+    // 2.0-2.08 连续 3 帧黑条（110ms 打点）；2.5-2.58 第二条；99.9-100.9 长黑块被时长上限排除
+    const series = [
+      ...seriesOf([[0, 2.0, 200], [2.0, 2.12, 5], [2.12, 2.5, 200], [2.5, 2.62, 5], [2.62, 99.9, 200], [99.9, 100.9, 5], [100.9, 102, 200]]),
+    ]
+    const evs = blipClustersFromYmin(series)
+    expect(evs.map(e => e.start)).toEqual([2.0, 2.5])
+    for (const e of evs) {
+      expect(e.dur).toBeGreaterThanOrEqual(0.03)
+      expect(e.dur).toBeLessThanOrEqual(0.35)
+    }
+    // 单帧命中（≈0.04s < 0.03 阈值边界）会被最短时长过滤
+    const single = seriesOf([[0, 1, 200], [1, 1.04, 5], [1.04, 2, 200]])
+    expect(blipClustersFromYmin(single)).toEqual([])
+    // 闪光窗口按时刻排除（不能按时长：VFR 会把黑条拉长）
+    expect(blipAnchors(evs, 2.4, 2.61)).toEqual([2.0])
+    expect(blipAnchors(evs, 10, 11)).toEqual([2.0, 2.5])
+  })
+
+  it('亮度剖面：5s 桶均值 <60 连续 ≥2 桶 = 遮罩累积区段；孤立暗桶不报', () => {
+    // 10-25s 三桶全暗（遮罩累积）；其余白底
+    const series = seriesOf([[0, 10, 215], [10, 25, 40], [25, 30, 215]])
+    const ranges = brightnessDarkRanges(series, 0)
+    expect(ranges).toEqual([{ start: 10, end: 25, minYavg: 40 }])
+    // 孤立暗桶（5s）不构成持续段
+    const single = seriesOf([[0, 10, 215], [10, 15, 40], [15, 30, 215]])
+    expect(brightnessDarkRanges(single, 0)).toEqual([])
+    // fromT 之前的登录/预热段不参与
+    expect(brightnessDarkRanges(series, 26)).toEqual([])
+    // 非连续暗桶（中间亮桶断开）分两段，各不足 2 桶不报
+    const split = seriesOf([[0, 5, 40], [5, 10, 215], [10, 15, 40], [15, 20, 215]])
+    expect(brightnessDarkRanges(split, 0)).toEqual([])
   })
 
   it('Duration/YAVG/volumedetect 指标解析', () => {
@@ -41,6 +93,12 @@ describe('ffmpeg 输出解析', () => {
     const vol = parseVolume('[Parsed_volumedetect] max_volume: -2.1 dB\nmean_volume: -18.4 dB')
     expect(vol).toEqual({ maxDb: -2.1, meanDb: -18.4 })
     expect(parseVolume('no volume')).toBeNull()
+  })
+
+  it('字幕实证取帧点：最长字幕条的中点', () => {
+    const srt = '1\n00:00:02,850 --> 00:00:04,500\nA\n\n2\n00:00:10,000 --> 00:00:14,000\nB\n'
+    expect(longestSrtMidpoint(srt)).toBe(12)
+    expect(longestSrtMidpoint('no srt here')).toBeNull()
   })
 })
 

@@ -26,6 +26,7 @@ import math
 import os
 import re
 import sys
+import uuid
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -39,6 +40,15 @@ from discovery import DatasetSourceConflict, load_datasets, dataset_payloads, re
 from excel import ListingPublishError, SUPPORTED_SCENARIOS, create_multi_sheet_excel
 from sandbox import ENVIRONMENT_HINT, run_sandbox_code
 from source_registry import SOURCE_ATTR, DataSource
+from controlled_analysis import (
+    ANALYZE_OPERATIONS,
+    AnalyzeRequestError,
+    op_compare_artifacts,
+    op_join_check,
+    op_key_check,
+    op_rule_check,
+    op_schema,
+)
 
 DOCUMENT_CHUNK_CHARS = 256 * 1024
 
@@ -90,17 +100,30 @@ _session_protected_hashes: Optional[set[int]] = None
 # 的行值洗白通道。
 _session_doc_baseline: Optional[dict[str, tuple[int, int]]] = None
 _session_doc_baseline_project: Optional[Path] = None
+# 扫描索引绑定的数据面指纹（P0 2026-10-20）：同项目**换数据必须刷新**——
+# 此前 scan_init 对同 project + 已有哈希直接 ready，不查指纹，主车道重
+# inspect 后扫描进程仍用旧项目数据的保护值索引（方案 §1.2/§5.2）。
+_session_scan_fingerprint: Optional[str] = None
+# 快照绑定（方案 §5.2/§7.4/T04/T11，2026-10-20 P1）：会话数据快照的稳定
+# 标识 + 最近一次成功 run_code 产物所属快照。publish 只认当前快照的产物，
+# 换数据后旧产物不得隐式发布；run_code 前核对数据面指纹，变化即拒绝，
+# 指向重 inspect（复用路径对数据面变化会全量重载）。
+_session_snapshot_id: Optional[str] = None
+_last_outputs_snapshot: Optional[str] = None
 
 
 def _reset_session() -> None:
     global _session_project, _session_datasets, _session_sources, _session_documents, _session_auxiliary_documents
     global _session_document_chunks_read, _last_outputs, _session_failures, _session_protected_hashes
-    global _session_doc_baseline, _session_doc_baseline_project
+    global _session_doc_baseline, _session_doc_baseline_project, _session_scan_fingerprint
+    global _session_snapshot_id, _last_outputs_snapshot
     _session_project, _session_datasets, _session_sources, _session_documents, _session_auxiliary_documents = None, {}, {}, [], []
     _session_failures = []
     _session_document_chunks_read, _last_outputs = set(), None
     _session_protected_hashes = None
     _session_doc_baseline, _session_doc_baseline_project = None, None
+    _session_scan_fingerprint = None
+    _session_snapshot_id, _last_outputs_snapshot = None, None
 
 
 def _write_audit(project: Path, record: dict) -> None:
@@ -207,11 +230,18 @@ def protected_value_hashes(
         for column in frame.columns:
             series = frame[column]
             own = series.dropna().tolist()
+            total_rows = int(len(series))
             if _is_structural_column(column):
                 continue
-            if _is_vocabulary_column(own):
+            if _is_constant_column(own, total_rows, column):
                 continue
-            if len(own) < VOCABULARY_MIN_ROWS and _is_vocabulary_column(pooled[str(column).strip().upper()]):
+            if _is_vocabulary_column(own, total_rows, column):
+                continue
+            # 小表自身无基数证据时借用同名列跨数据集汇总（EDC 导出里同名列
+            # 语义一致：PSTUDYID/SITEID/VISIT 在每张表都出现）。汇总证据同样
+            # 必须过标识列闸门，且用汇总行数作分母。
+            if total_rows < VOCABULARY_MIN_ROWS and _is_vocabulary_column(
+                    pooled[str(column).strip().upper()], None, column):
                 continue
             for value in series.tolist():
                 if not sanctioned_scalar(value):
@@ -229,7 +259,10 @@ def protected_value_hashes(
                 column = [row[index] for row in rows if len(row) > index and row[index] is not None]
                 if index < len(headers) and _is_structural_column(headers[index]):
                     continue   # Site 列等方案结构列（复合"编号 - 中心名"）不保护
-                if _is_vocabulary_column(column):
+                header = headers[index] if index < len(headers) else None
+                if _is_constant_column(column, len(rows), header):
+                    continue   # 辅助表里的全表常量列同为导出元数据
+                if _is_vocabulary_column(column, len(rows), header):
                     continue
                 for value in column:
                     if not sanctioned_scalar(value):
@@ -237,20 +270,97 @@ def protected_value_hashes(
     return hashes
 
 
-#: 列基数判定：非空值 ≥ 该数才有统计意义（小表一律按数据保护）
+#: 列基数判定：整列行数 ≥ 该数才有统计证据（小表一律按数据保护）
 VOCABULARY_MIN_ROWS = 20
 #: 去重后不超过该数且占比不超过 VOCABULARY_MAX_RATIO 的列是"词表列"
 VOCABULARY_MAX_UNIQUE = 30
 VOCABULARY_MAX_RATIO = 0.2
 
 
-def _is_vocabulary_column(values: list[Any]) -> bool:
-    """列的值域是否小到只能是方案词表（码表/访视/表单/状态），而非逐行数据。"""
+def _is_vocabulary_column(
+    values: list[Any], total_rows: Optional[int] = None, column_name: Optional[str] = None,
+) -> bool:
+    """列的值域是否小到只能是方案词表（码表/访视/表单/状态），而非逐行数据。
+
+    2026-10-20 实测修复（RT01）：
+    1. 判定基数用**整列行数**作分母，不能只用非空值个数。稀疏列（AEREL
+       69 行里仅 4 个非空、2 个唯一值）此前因 `len(texts) < 20` 直接判
+       False → 落进 fail-closed 数据保护 → 码表值被写进保护索引，模型把
+       需求摘要写盘再读回就整体被拦（实测 5 次 PROTECTED_CONTENT_WITHHELD）。
+       稀疏是 EDC 导出的常态（未发生的事件字段全空），非空数少 ≠ 样本不足。
+    2. 证据门槛仍按**整列行数**：单行/极少行的列（如 1 行的 `SUBJID=1007`）
+       不能断言"这是重复出现的词表值"，继续按数据保护（红线）。
+    3. 标识类列名（SUBJID/SITEID/DOB 等）一律不豁免，即便基数很低。
+    """
     texts = [text for value in values for text in _protected_representations(value)]
-    if len(texts) < VOCABULARY_MIN_ROWS:
+    if not texts:
+        return False
+    rows = total_rows if total_rows is not None and total_rows > 0 else len(texts)
+    if rows < VOCABULARY_MIN_ROWS:
+        return False
+    if column_name is not None and _is_identifier_column(column_name):
         return False
     unique = len(set(texts))
-    return unique <= VOCABULARY_MAX_UNIQUE and unique / len(texts) <= VOCABULARY_MAX_RATIO
+    return unique <= VOCABULARY_MAX_UNIQUE and unique / rows <= VOCABULARY_MAX_RATIO
+
+
+#: 标识类列名片段：这些列即便唯一值很少也承载**个体**标识，不做词表豁免。
+#: 只收受试者/患者级标识——方案号（PSTUDYID/STUDYID）是整项目常量、
+#: 中心号（SITEID）是中心级，都不属于个体标识，不在此列（按名字长相
+#: 扩大豁免面会误拦方案结构词，实测 GQ1005-301 因此被灌回索引）。
+_IDENTIFIER_COLUMN_TOKENS = (
+    "USUBJID", "SUBJID", "SUBJECT", "PATIENT", "SUBJIDN",
+    "RANDNO", "RANDOM", "SCRNO", "SCREENNO", "BIRTH", "DOB",
+    "INITIAL", "EMAIL", "PHONE", "ADDR",
+)
+
+
+def _is_identifier_column(column: Any) -> bool:
+    """列名是否属于受试者/中心标识类（大小写无关）。"""
+    name = str(column).strip().upper()
+    return any(token in name for token in _IDENTIFIER_COLUMN_TOKENS)
+
+
+def _is_constant_column(
+    values: list[Any], total_rows: Optional[int] = None, column_name: Optional[str] = None,
+) -> bool:
+    """整列只有一个去重值 = 常量列（EDC 元数据），不是逐行数据。
+
+    实测（RT01，2026-10-20）：EDC 导出每张表都带 project /
+    environmentName / SiteGroup / Folder / FolderName / DataPageName 等
+    全表同值列——它们是导出环境的常量，与受试者行值无关；把它们的值收进
+    保护索引后，模型把需求摘要（含这类元数据）写盘再读回就被整体拦下。
+
+    证据门槛（红线）：必须**整列行数 ≥ VOCABULARY_MIN_ROWS** 才断言"常量"。
+    单行/极少行的唯一值不是常量证据（`SUBJID: ["1007"]` 曾因此被豁免，
+    受试者号失去保护——已由回归测试锁死）。标识类列名一律不豁免。
+    """
+    if column_name is not None and _is_identifier_column(column_name):
+        return False
+    texts = [text for value in values for text in _protected_representations(value)]
+    if not texts or len(set(texts)) != 1:
+        return False
+    rows = total_rows if total_rows is not None and total_rows > 0 else len(texts)
+    # EDC 导出元数据列名（DataPageName/Folder/InstanceName/...）本身就是
+    # 结构语义，其值无论表多小都不可能是受试者数据；小表（15/19 行）此前
+    # 因行数门槛未被豁免，把页面名灌回索引（RT01 实测仍误拦）。
+    if column_name is not None and _is_edc_metadata_column(column_name):
+        return True
+    return rows >= VOCABULARY_MIN_ROWS
+
+
+#: EDC 导出元数据列：整表同值的环境/页面/文件夹信息，属方案结构而非受试者
+#: 数据。仅用于"单值列"豁免——它们不承载个体信息，不受表大小限制。
+_EDC_METADATA_COLUMN_TOKENS = (
+    "DATAPAGENAME", "FOLDERNAME", "FOLDER", "INSTANCENAME",
+    "ENVIRONMENTNAME", "SITEGROUP", "PROJECT",
+)
+
+
+def _is_edc_metadata_column(column: Any) -> bool:
+    """列名是否为 EDC 导出元数据列（整表同值的结构信息）。"""
+    name = str(column).strip().upper()
+    return any(token in name for token in _EDC_METADATA_COLUMN_TOKENS)
 
 
 def _disclosed_design_values(
@@ -466,15 +576,22 @@ def operation_scan_init(request: dict) -> dict:
     project = Path(request["project"]).resolve()
     data_interception = _host_data_interception(request)
     global _session_datasets, _session_documents, _session_auxiliary_documents
-    global _session_project, _session_protected_hashes
-    if _session_project == project and _session_protected_hashes is not None:
-        return {"ok": True, "action": "listing-scan-init", "ready": True}
+    global _session_project, _session_protected_hashes, _session_scan_fingerprint
     fingerprint = _scan_cache_fingerprint(project)
+    if _session_project == project and _session_protected_hashes is not None:
+        if fingerprint == _session_scan_fingerprint:
+            return {"ok": True, "action": "listing-scan-init", "ready": True}
+        # 数据面变化（换批次/补数据）：失效旧索引并重建（P0"同项目更新
+        # 不刷新"修复）。注意首轮 init 后会话数据集已被清空（scan worker
+        # 只留哈希），而 _ensure_session 对同项目短路复用——不先整会话
+        # 重置就会拿空数据集"重建"出空索引。
+        _reset_session()
     cached = _load_scan_cache(project, fingerprint)
     if cached is not None:
         # 重启/新进程秒级恢复：不重载 3GB 数据，消除"未就绪"fail-closed 风暴。
         _session_project = project
         _session_protected_hashes = cached
+        _session_scan_fingerprint = fingerprint
         return {"ok": True, "action": "listing-scan-init", "ready": True, "cached": True}
     error = _ensure_session(
         project, request.get("credential"), include_errors=not data_interception)
@@ -482,6 +599,7 @@ def operation_scan_init(request: dict) -> dict:
         return {**error, "retryable": True}
     _session_protected_hashes = protected_value_hashes(
         _session_datasets, _session_auxiliary_documents, project)
+    _session_scan_fingerprint = fingerprint
     _save_scan_cache(project, fingerprint, _session_protected_hashes)
     _session_datasets = {}
     _session_documents = []
@@ -605,8 +723,9 @@ def operation_inspect(request: dict) -> dict:
     global _session_project, _session_datasets, _session_sources, _session_documents, _session_auxiliary_documents
     global _session_document_chunks_read, _last_outputs, _session_failures, _session_protected_hashes
     global _session_doc_baseline, _session_doc_baseline_project
-    global _session_data_fingerprint
+    global _session_data_fingerprint, _session_snapshot_id
     _session_data_fingerprint = _scan_cache_fingerprint(project)
+    _session_snapshot_id = uuid.uuid4().hex[:16]
     _session_project, _session_datasets, _session_sources, _session_documents, _session_auxiliary_documents = project, datasets, sources, documents, aux_documents
     _session_document_chunks_read, _last_outputs = set(), None
     cached_hashes = _load_scan_cache(project, _session_data_fingerprint)
@@ -722,10 +841,22 @@ def _decode_runner_value(value: Any) -> Any:
     return value
 
 
+#: runner 结果属不可信输入（方案 §7.3）：只做**资源**防护，不做业务限制。
+#: 2026-10-20 修正：此前按"帧数 ≤ 50 / 单帧 ≤ 20 万行"设限，直接挡住了
+#: 真实 Manual Listing（RT01 需 51 张表，模型被迫反复试探 50/51/52 的边界，
+#: 纯属护栏制造的无效调用）。工作表数量由需求决定，不是资源风险——正常
+#: 交付 100+ 张表也合法，因此**不限制帧数**；只按总单元格数兜底防 OOM，
+#: 阈值取足以覆盖大型 listing 的量级。attrs 白名单与重复列检查是正确性
+#: 校验（防伪造/防静默改形），与业务规模无关，保留。
+MAX_RUNNER_TOTAL_CELLS = 50_000_000
+RUNNER_ATTR_KEYS = frozenset({"labels", "report_metadata", "_layout", "_skip_default_template"})
+
+
 def decode_runner_outputs(value: Any) -> dict[str, pd.DataFrame]:
     if not isinstance(value, list) or not value:
         raise ValueError("outputs must be a non-empty list")
     decoded: dict[str, pd.DataFrame] = {}
+    total_cells = 0
     for item in value:
         if not isinstance(item, dict):
             raise ValueError("invalid output structure")
@@ -737,10 +868,20 @@ def decode_runner_outputs(value: Any) -> dict[str, pd.DataFrame]:
             raise ValueError("invalid output name")
         if not isinstance(columns, list) or not all(isinstance(column, str) for column in columns):
             raise ValueError("invalid output columns")
+        if len(set(columns)) != len(columns):
+            raise ValueError("duplicate column names in output frame")
         if not isinstance(records, list) or any(not isinstance(row, list) or len(row) != len(columns) for row in records):
             raise ValueError("invalid output records")
+        total_cells += len(records) * len(columns)
+        if total_cells > MAX_RUNNER_TOTAL_CELLS:
+            raise ValueError(
+                f"runner outputs exceed resource guard ({MAX_RUNNER_TOTAL_CELLS} cells total); "
+                "this is a memory guard, not a sheet-count rule")
         if not isinstance(attrs, dict):
             raise ValueError("invalid output attributes")
+        unknown_attrs = {str(key) for key in attrs} - RUNNER_ATTR_KEYS
+        if unknown_attrs:
+            raise ValueError("output attributes contain unregistered keys")
         frame = pd.DataFrame([[_decode_runner_value(cell) for cell in row] for row in records], columns=columns)
         frame.attrs = _decode_runner_value(attrs)
         decoded[name] = frame
@@ -761,6 +902,7 @@ def _ensure_session(
     global _session_project, _session_datasets, _session_sources, _session_documents, _session_auxiliary_documents
     global _session_document_chunks_read, _last_outputs, _session_failures, _session_protected_hashes
     global _session_doc_baseline, _session_doc_baseline_project
+    global _session_data_fingerprint, _session_snapshot_id, _last_outputs_snapshot
     if _session_project == project:
         return None
     try:
@@ -780,9 +922,12 @@ def _ensure_session(
         return {**_error("DATASET_LOAD_FAILED", retryable=True),
                 "failures": failures}
     enrich_design_semantics(datasets, auxiliary_documents)
+    _session_data_fingerprint = _scan_cache_fingerprint(project)
+    _session_snapshot_id = uuid.uuid4().hex[:16]
     _session_project, _session_datasets, _session_sources, _session_documents = project, datasets, sources, documents
     _session_auxiliary_documents = auxiliary_documents
     _session_document_chunks_read, _last_outputs = set(), None
+    _last_outputs_snapshot = None
     _session_protected_hashes = protected_value_hashes(datasets, auxiliary_documents, project)
     if _session_project != _session_doc_baseline_project:
         _session_doc_baseline, _session_doc_baseline_project = None, None
@@ -846,6 +991,10 @@ def operation_run_code(request: dict) -> dict:
     snapshot_error = _snapshot_failure(_session_failures)
     if snapshot_error is not None:
         return snapshot_error
+    # 快照语义（方案 §5.2）：inspect 全量入会话后，会话数据集即不可变快照
+    # 内容，run_code 只消费会话内存——磁盘文件事后变化不作废当前快照；
+    # 数据更新经重 inspect 生成新 snapshotId（复用路径对数据面变化自动
+    # 全量重载）。过期防护落在 publish（旧快照产物不得隐式发布）。
     # 未读完需求分片不再硬拦 run_code：doc/ 常见 22MB 通用 DVP 模板，
     # 强制全部读入模型上下文不可行；沙箱本就注入完整 requirements/
     # spec_documents，模型可在代码内按 sheet 提取目标需求。覆盖情况
@@ -860,10 +1009,13 @@ def operation_run_code(request: dict) -> dict:
         diagnostics = {
             "errorType": str(result.get("errorType", "ExecutionError")),
             "outputsDefined": bool(result.get("outputsDefined", False)),
+            "stage": str(result.get("stage", "execute")),
         }
-        # SyntaxError 的消息由 code_runner 白名单生成（编译期、只含模型
-        # 自己的源码行），可安全进入诊断；其余 error 文本保持进程内。
-        if diagnostics["errorType"] == "SyntaxError" and result.get("error"):
+        # SyntaxError 文本仅在**编译阶段**放行（编译发生在任何模型代码执行
+        # 之前，文本只含模型自己的源码行）；运行期 raise 的 SyntaxError 文本
+        # 可能嵌数据值，code_runner 侧已置空，这里再按 stage 双重把关。
+        if (diagnostics["errorType"] == "SyntaxError"
+                and diagnostics["stage"] == "compile" and result.get("error")):
             diagnostics["syntax"] = str(result["error"])[:2000]
         if data_interception:
             return {**_error("CODE_EXECUTION_ERROR", retryable=True),
@@ -887,8 +1039,9 @@ def operation_run_code(request: dict) -> dict:
         return {"ok": False, "code": "INVALID_OUTPUTS", "reason": str(exc),
                 "retryable": True, "environmentHint": ENVIRONMENT_HINT, **stream_payload}
 
-    global _last_outputs
+    global _last_outputs, _last_outputs_snapshot
     _last_outputs = outputs
+    _last_outputs_snapshot = _session_snapshot_id
     if data_interception:
         metadata = [{
             "rowCount": len(frame), "columnCount": int(frame.shape[1]),
@@ -904,6 +1057,7 @@ def operation_run_code(request: dict) -> dict:
         } for name, frame in outputs.items()]
     return {"ok": True, "action": "listing-run-code", "receipt": {
         "outputCount": len(outputs),
+        "snapshotId": _session_snapshot_id,
         "outputs": metadata,
         "publishReady": True,
         "requirementsFullyRead": _unread_requirement_chunk_count() == 0,
@@ -969,6 +1123,11 @@ def operation_read_metadata(request: dict) -> dict:
 def operation_publish(request: dict) -> dict:
     if _last_outputs is None:
         return {"ok": False, "code": "NO_SUCCESSFUL_RUN", "reason": "publish 前必须成功执行 run_code"}
+    # 产物快照绑定（T11，方案 §7.4/§8）：只发布当前数据快照的产物。上次成功
+    # 运行后数据若已更换（重 inspect 生成新 snapshotId），旧产物不得隐式发布。
+    if _last_outputs_snapshot != _session_snapshot_id:
+        return {"ok": False, "code": "SNAPSHOT_STALE", "retryable": False,
+                "reason": "最近一次成功 run_code 的产物属于旧数据快照（数据已更新）；请基于当前数据重跑 run_code 后再 publish"}
     project = Path(request["project"]).resolve()
     if _session_project != project:
         return {"ok": False, "code": "PROJECT_SESSION_MISMATCH",
@@ -993,7 +1152,8 @@ def operation_publish(request: dict) -> dict:
         receipt = {
             "outputFile": output.relative_to(project).as_posix(),
             "scenario": scenario, "dataClass": "REAL",
-            "format": "single-workbook-multi-sheet-xlsx", "outputCount": len(_last_outputs)}
+            "format": "single-workbook-multi-sheet-xlsx", "outputCount": len(_last_outputs),
+            "snapshotId": _session_snapshot_id}
         if not data_interception:
             receipt["sheetNames"] = list(_last_outputs.keys())
         return {"ok": True, "action": "listing-publish", "receipt": receipt}
@@ -1005,6 +1165,56 @@ def operation_publish(request: dict) -> dict:
             return _error("PUBLISH_ERROR", retryable=True)
         return {"ok": False, "code": "PUBLISH_ERROR",
                 "reason": f"发布失败: {exc}", "retryable": True}
+
+
+# ---------------------------------------------------------------------------
+# listing_analyze：受控分析（方案 §6，T06）——固定操作、只释放计数
+# ---------------------------------------------------------------------------
+
+def operation_analyze(request: dict) -> dict:
+    """受控分析入口：输入句柄只能是已登记数据集名 / 最近一次成功 run_code
+    的产物名；参数不满足操作合同时返回固定码，绝不执行模型提供的代码。"""
+    project = Path(request["project"]).resolve()
+    if _session_project != project:
+        return {"ok": False, "code": "PROJECT_SESSION_NOT_INITIALIZED",
+                "reason": "必须先调用 enterprise_listing_inspect 初始化项目会话"}
+    operation = request.get("analyzeOperation")
+    if operation not in ANALYZE_OPERATIONS:
+        return {"ok": False, "code": "INVALID_ANALYZE_REQUEST",
+                "reason": f"analyzeOperation 必须是 {'、'.join(ANALYZE_OPERATIONS)} 之一"}
+    try:
+        if operation == "schema":
+            result = op_schema(_session_datasets, request.get("inputs"))
+        elif operation == "key_check":
+            result = op_key_check(_session_datasets, request.get("input"), request.get("keys"))
+        elif operation == "join_check":
+            result = op_join_check(
+                _session_datasets, request.get("left"), request.get("right"),
+                request.get("keyPairs"), request.get("expectedCardinality"),
+                request.get("nullPolicy", "never_match"))
+        elif operation == "rule_check":
+            result = op_rule_check(_session_datasets, request.get("input"), request.get("rule"))
+        elif operation == "compare_artifacts":
+            if _last_outputs is None:
+                return {"ok": False, "code": "NO_SUCCESSFUL_RUN",
+                        "reason": "compare_artifacts 需要一次成功的 run_code 产物"}
+            result = op_compare_artifacts(
+                _last_outputs, request.get("actualRef"), request.get("expectedRef"),
+                request.get("keyColumns"))
+        else:  # run_status
+            result = {
+                "hasSuccessfulRun": _last_outputs is not None,
+                "outputCount": 0 if _last_outputs is None else len(_last_outputs),
+                "unreadRequirementChunkCount": _unread_requirement_chunk_count(),
+                "datasetFailureCount": sum(1 for failure in _session_failures
+                                           if failure.get("stage") in {"extract-archive", "read-dataset"}),
+                "snapshotId": _session_snapshot_id,
+            }
+    except AnalyzeRequestError as exc:
+        return {"ok": False, "code": "INVALID_ANALYZE_REQUEST", "reason": str(exc)}
+    return {"ok": True, "action": "listing-analyze",
+            "receipt": {"analyzeOperation": operation,
+                        "snapshotId": _session_snapshot_id, **result}}
 
 
 # ---------------------------------------------------------------------------
@@ -1020,6 +1230,8 @@ def dispatch(request: dict) -> dict:
         response = operation_read_document(request)
     elif operation == "listing_read_metadata":
         response = operation_read_metadata(request)
+    elif operation == "listing_analyze":
+        response = operation_analyze(request)
     elif operation == "listing_run_code":
         response = operation_run_code(request)
     elif operation == "listing_publish":

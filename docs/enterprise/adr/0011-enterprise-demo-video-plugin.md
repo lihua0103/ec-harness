@@ -1,6 +1,6 @@
 # ADR-0011: 企业演示视频插件（enterprise-demo-video）
 
-- 状态：已接受
+- 状态：已接受（2026-09-22 修订，见文末）
 - 日期：2026-09-21
 - 负责人：Ding_jinghua
 - 影响范围：新增 `packages/enterprise/demo-video`；`profiles/enterprise/package.json`（bundles+dependencies）；根 `tsconfig.json` references；`.oxlintrc.json`（walk 脚本规则豁免）；`docs/enterprise/CHANGELOG.md`
@@ -80,3 +80,31 @@ walk 脚本与 cursor 的 `__dmv*` 页面全局契约如有变化，必须两侧
 - 装配：architecture checks passed（5 插件 7 Bundle 层）、secret scan passed、
   profile verify passed（5 企业 Bundle）、typecheck passed。
 - 启动：`pnpm start` 3080 WebUI boot 日志确认插件挂载。
+
+## 修订（2026-09-22）：S0 调研落地 + S2 逐帧亮度法 + 验收门加密
+
+第一个真实交付项目（模块演示视频全家桶）跑完后，项目内 skill 沉淀出 23 条实测坑
+（原插件吸收 18 条），本轮把剩余增量全部移植回企业插件：
+
+1. **S0 调研成为正式阶段**（新增 `enterprise_demo_survey` 工具 + 随包
+   `scripts/menu-tree-probe.mjs`）：递归展开侧边栏产出菜单树（覆盖清单）+ 可见菜单
+   标签中文计数（语言门禁）。只读零写入，与录制共用会话互斥。中文数据的处置优先级
+   （造英文演示数据须批准且先确认删除入口 → 换数据源 → 保留标注例外）进 KB。
+2. **S2 探测算法整体换为逐帧 signalstats**：blackdetect 与场景分值在三个实测场景失效
+   （VFR 帧稀疏拉长 black_end、闪光帧被虚拟光标压住像素、黑条落深色侧边栏 luma 临界）。
+   现行口径：闪光=全帧 YAVG<40 最长连续段（≥0.15s），掐头=黑出+0.1s；黑条=顶边条带
+   YMIN<20 帧簇（0.03–0.35s，间隔 ≤0.2s 归并；20 而非 15——limited-range 纯黑 Y=16、
+   full-range 是 0，阈值须同时容纳），按时刻窗口排除闪光。解析按 key 过滤。
+3. **亮度剖面门**（S2，与闪光扫描同一路全帧 YAVG）：闪光后 5s 桶均值 <60 连续 ≥2 桶 =
+   弹层遮罩累积 → 成片作废重录，不带病进 S3。
+4. **S1 弹层卫生三件套进模板**：closeOverlay 三段式（before-close 确认框只点关闭确认
+   主按钮，破坏性词消息框走取消——数据红线的脚本化）+ purgeStrayPoppers（幽灵下拉）
+   + assertClean（段前卫生门）；scrollSteps 长页逐屏滚动 + 预热全页滚（懒渲染）；
+   登录被拒不循环重试（换账号或请用户释放）；record 回执新增 recoverCount/warnings。
+5. **S4 验收门加密**：字幕实证（源视频同一帧带/不带字幕 YAVG 差 ≥0.4，字幕真实烧录
+   的程序化证明）；尾留白不足自动 tpad 克隆末帧补齐（fps=25 必须在链头——tpad 对
+   VFR webm 不生效）。
+6. 知识库 pitfalls 18 → 34 条；语言体检助手 `cjk()`（可见性过滤中文计数，不回流内容）
+   进 walk 模板。
+
+工具面 6 → 7；S2/S4 纯函数全部重写并保持值级单测覆盖。

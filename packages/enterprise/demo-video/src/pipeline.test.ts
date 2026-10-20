@@ -69,6 +69,7 @@ d('S2 锚点（真实 ffmpeg）', () => {
     expect(receipt.blipCount).toBe(2)
     expect(receipt.orphanBlips).toBe(0)
     expect(receipt.inferredKeys).toEqual([])
+    expect(receipt.brightness.ok).toBe(true)
     expect(receipt.matches.find(m => m.key === 'a')?.videoT).toBeGreaterThan(1.9)
     expect(receipt.matches.find(m => m.key === 'a')?.videoT).toBeLessThan(2.2)
     expect(receipt.matches.find(m => m.key === 'b')?.videoT).toBeGreaterThan(2.4)
@@ -105,12 +106,14 @@ d('S4 合成（真实 ffmpeg）', () => {
     writeFileSync(join(workDir, 'narration-meta.json'), JSON.stringify({ narrationEnd: mixed.result.narrationEnd, totalSec }))
 
     const receipt = await runComposeStage(tools, { workDir, module: 't' })
-    expect(receipt.gates).toEqual({ whiteFirstFrame: true, audibleNarration: true, tailOk: true })
+    expect(receipt.gates).toEqual({ whiteFirstFrame: true, audibleNarration: true, tailOk: true, captionBurned: true })
     expect(receipt.pass).toBe(true)
     expect(receipt.yavg).toBeGreaterThan(150)
     expect(receipt.maxVolumeDb).toBeGreaterThan(-20)
     expect(receipt.durationSec).toBeGreaterThan(10)
     expect(receipt.tailSec).toBeGreaterThan(2.5)
+    // 字幕实证：同一源帧带字幕应更暗（白底夹具上差值显著）
+    expect(receipt.captionProbe?.diff ?? -1).toBeGreaterThanOrEqual(0.4)
     expect(receipt.versionLabel).toBe('t.mp4')
     // 重复合成 → 版本自动递增（旧版保留）
     const again = await runComposeStage(tools, { workDir, module: 't' })

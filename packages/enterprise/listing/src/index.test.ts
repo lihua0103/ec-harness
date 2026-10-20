@@ -44,10 +44,27 @@ vi.mock('./worker.js', () => ({ PythonWorker: class {
         diagnostics: { errorType: 'KeyError', outputsDefined: false },
       }
     }
+    if (req.operation === 'listing_run_code' && req.code === 'hint') {
+      return {
+        ok: false,
+        code: 'CODE_EXECUTION_ERROR',
+        reason: '代码执行失败；详细诊断保留在 Worker 进程内',
+        retryable: true,
+        diagnostics: { errorType: 'NameError', outputsDefined: false, stage: 'execute' },
+        environmentHint: '命名空间: datasets, pd, np, outputs(须自行定义)',
+        failures: [{ path: 'aux/bad.xlsx', stage: 'read-aux', code: 'PARSE_FAILED' }],
+      }
+    }
     if (req.operation === 'listing_run_code') return { ok: true, receipt: { outputCount: 2, publishReady: true } }
+    if (req.operation === 'listing_analyze') {
+      const receipt = req.analyzeOperation === 'run_status'
+        ? { analyzeOperation: 'run_status', hasSuccessfulRun: false, outputCount: 0, snapshotId: 'snap-test' }
+        : { analyzeOperation: req.analyzeOperation, totalRowCount: 2, uniqueConclusion: 'unique', snapshotId: 'snap-test' }
+      return { ok: true, receipt }
+    }
     if (req.operation === 'listing_publish') return { ok: true, receipt: { format: 'single-workbook-multi-sheet-xlsx' } }
     if (req.operation === 'listing_scan_text') {
-      if (String(req.text).includes('FAIL_SCAN')) return { ok: false, code: 'SCAN_FAILED' }
+      if (String(req.text).includes('FORBIDDEN_VALUE')) return { ok: false, code: 'SCAN_ENGINE_ERROR' }
       return { ok: true, containsProtectedValue: String(req.text).includes('SUBJ-777') }
     }
     return { ok: false, reason: 'Unknown operation' }
@@ -101,11 +118,12 @@ describe('enterprise-listing plugin', () => {
     apply(made.ctx)
   })
 
-  it('声明正式 JSON Schema 并注册八个模型工具（含场景知识库 / r_manual / r_pk 车道）', () => {
+  it('声明正式 JSON Schema 并注册九个模型工具（含受控分析 / 场景知识库 / r_manual / r_pk 车道）', () => {
     expect(inject).toEqual(['tools', 'systemPrompt', 'credentials'])
     expect([...tools.keys()]).toEqual([
       'enterprise_listing_inspect',
       'enterprise_listing_read_metadata',
+      'enterprise_listing_analyze',
       'enterprise_listing_read_document',
       'enterprise_listing_run_code',
       'enterprise_listing_publish',
@@ -114,6 +132,20 @@ describe('enterprise-listing plugin', () => {
       'enterprise_listing_run_pk',
     ])
     for (const tool of tools.values()) expect(tool.output?.schema).toMatchObject({ type: 'object' })
+  })
+
+  it('analyze 工具按受控合同透传结构化参数并返回计数回执（T06）', async () => {
+    const exec = { agent: {}, signal: new AbortController().signal }
+    const receipt = await tools.get('enterprise_listing_analyze')?.execute({
+      project: STUDY, analyzeOperation: 'key_check', input: 'AE', keys: ['USUBJID'],
+    }, exec) as Record<string, unknown>
+    expect(receipt).toMatchObject({ analyzeOperation: 'key_check', uniqueConclusion: 'unique' })
+    expect(requests.at(-1)).toMatchObject({
+      operation: 'listing_analyze', analyzeOperation: 'key_check', input: 'AE',
+    })
+    await expect(tools.get('enterprise_listing_analyze')?.execute({
+      project: STUDY, analyzeOperation: 'run_status',
+    }, exec)).resolves.toMatchObject({ hasSuccessfulRun: expect.anything() })
   })
 
   it('注册场景知识库工具与五场景路由 section（order 116）', async () => {
@@ -302,6 +334,19 @@ describe('enterprise-listing plugin', () => {
     })
   })
 
+  it('失败回执透传 environmentHint 与 failures 到模型可见消息（P0/T03）', async () => {
+    await expect(tools.get('enterprise_listing_run_code')?.execute({ project: STUDY, code: 'hint' }, {
+      agent: {}, signal: new AbortController().signal,
+    })).rejects.toSatisfy((error: Error) => {
+      expect(error.message).toContain('stage=execute')
+      expect(error.message).toContain('环境提示：命名空间: datasets')
+      expect(error.message).toContain('输入失败：')
+      expect(error.message).toContain('aux/bad.xlsx: PARSE_FAILED')
+      expect((error as unknown as { failures?: unknown[] }).failures).toHaveLength(1)
+      return true
+    })
+  })
+
   it('通用工具结果命中受保护数据值时 fail-closed 阻断', async () => {
     const agent = {}
     await tools.get('enterprise_listing_inspect')?.execute({ project: STUDY }, {
@@ -331,11 +376,90 @@ describe('enterprise-listing plugin', () => {
 
     const failed = await postListeners[0]?.(
       { name: 'read', agent },
-      { isError: false, value: 'FAIL_SCAN', content: [] },
-      async () => ({ kind: 'accept', value: 'FAIL_SCAN' }),
+      { isError: false, value: 'FORBIDDEN_VALUE', content: [] },
+      async () => ({ kind: 'accept', value: 'FORBIDDEN_VALUE' }),
     )
     expect(failed).toMatchObject({ kind: 'block' })
-    expect(JSON.stringify(failed)).not.toContain('FAIL_SCAN')
+    expect(JSON.stringify(failed)).not.toContain('FORBIDDEN_VALUE')
+  })
+
+  it('扫描基础设施故障分类回执，不再与真实命中共用"受保护数据"文案（P0/T03）', async () => {
+    const agent = {}
+    await tools.get('enterprise_listing_inspect')?.execute({ project: STUDY }, {
+      agent, signal: new AbortController().signal,
+    })
+    const failed = await postListeners[0]?.(
+      { name: 'read', agent },
+      { isError: false, value: 'FORBIDDEN_VALUE', content: [] },
+      async () => ({ kind: 'accept' }),
+    )
+    expect(failed).toMatchObject({ kind: 'block' })
+    const text = JSON.stringify(failed)
+    expect(text).toContain('SCAN_FAILED')
+    expect(text).toContain('基础设施故障')
+    expect(text).toContain('不是检测到数据')
+    expect(text).not.toContain('受保护临床数据值')
+  })
+
+  it('真实命中仍使用"受保护数据"口径并保持扣留', async () => {
+    const agent = {}
+    await tools.get('enterprise_listing_inspect')?.execute({ project: STUDY }, {
+      agent, signal: new AbortController().signal,
+    })
+    const hit = await postListeners[0]?.(
+      { name: 'read', agent },
+      { isError: false, value: 'SUBJ-777', content: [] },
+      async () => ({ kind: 'accept' }),
+    )
+    expect(hit).toMatchObject({ kind: 'block' })
+    expect(JSON.stringify(hit)).toContain('受保护临床数据值')
+  })
+
+  it('交付目录豁免只认路径参数：结果文本含 Output/04_Out 不再整体放行（P0/T02）', async () => {
+    const agent = {}
+    await tools.get('enterprise_listing_inspect')?.execute({ project: STUDY }, {
+      agent, signal: new AbortController().signal,
+    })
+    // 旧逻辑：结果文本任意位置出现 Output\04_Out 即整体放行（绕过面）。
+    const blocked = await postListeners[0]?.(
+      { name: 'read', agent },
+      { isError: false, value: 'report copied from Output\\04_Out for SUBJ-777', content: [] },
+      async () => ({ kind: 'accept' }),
+    )
+    expect(blocked).toMatchObject({ kind: 'block' })
+  })
+
+  it('路径参数命中交付目录仍放行（过渡期读取已生成交付物）', async () => {
+    const agent = {}
+    await tools.get('enterprise_listing_inspect')?.execute({ project: STUDY }, {
+      agent, signal: new AbortController().signal,
+    })
+    const accepted = await postListeners[0]?.(
+      { name: 'read', agent, arguments: { file_path: 'D:/study/Output/04_Out/report.xlsx' } },
+      { isError: false, value: 'SUBJ-777', content: [] },
+      async () => ({ kind: 'accept', value: 'SUBJ-777' }),
+    )
+    expect(accepted).toMatchObject({ kind: 'accept', value: 'SUBJ-777' })
+  })
+
+  it('additionalContexts 两侧拼接面都扫描（P0 修复单侧 ?? 漏扫）', async () => {
+    const agent = {}
+    await tools.get('enterprise_listing_inspect')?.execute({ project: STUDY }, {
+      agent, signal: new AbortController().signal,
+    })
+    // 决策侧上下文干净、原结果侧上下文携带受保护值：旧逻辑 ?? 只取决策侧 → 漏扫放行。
+    const blocked = await postListeners[0]?.(
+      { name: 'read', agent },
+      {
+        isError: false, value: 'clean', content: [],
+        additionalContexts: [{ type: 'text', text: 'hidden ctx SUBJ-777' }],
+      },
+      async () => ({
+        kind: 'accept',
+        additionalContexts: [{ type: 'text', text: 'clean decision ctx' }],
+      }),
+    )
+    expect(blocked).toMatchObject({ kind: 'block' })
   })
 
   it('宿主关闭开关后通用工具结果不做扫描或拦截', async () => {

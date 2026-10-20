@@ -11,7 +11,7 @@
 |---|---|---|---|---|
 | **manual** | DVP/数据核查计划（Manual Review sheet）/Manual Review 核查 EDC 数据，交付单文件 R 程序 | `enterprise_listing_run_r`（r_manual） | `manual/` | 已实证（真实项目 84/84 哈希） |
 | **pk-mapping** | PK/PD Mapping Spec（如 "Non-Compartmental Model" sheet）、PK 浓度×EDC 合并、双盲掩码 | `enterprise_listing_run_pk`（r_pk） | `pk-mapping/` | 已实证（224/224 哈希） |
-| **medical** | 医学核查/review 类 listing（医学差异清单、医学审核数据集） | `enterprise_listing_publish(scenario="medical")` | `medical/` | 骨架（待首个项目收官沉淀） |
+| **medical** | 医学核查/review 类 listing（医学差异清单、医学审核数据集） | `enterprise_listing_publish(scenario="medical")` | `medical/` | 已实施（首轮修改轮 ZCode 单文件交付，2026-09-23 沉淀 L2/L3/L4/L5；dsh publish 车道与 golden eval 待补） |
 | **rbqm** | 风险质量管理指标类（KRI/QTL/风险仪表盘数据） | `enterprise_listing_publish(scenario="rbqm")`；R 单文件交付=会话按库内终案独立实现+Rterm/Rscript 执行 | `rbqm/` | 已实施（首项目 RBQM_test：L2 终案+L5 档案） |
 | **report** | 报表/汇总类交付（非核查、非映射） | `enterprise_listing_publish(scenario="report")` | `report/` | 骨架 |
 

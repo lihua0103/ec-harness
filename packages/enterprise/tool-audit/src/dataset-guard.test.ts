@@ -220,3 +220,61 @@ describe("交付域（2026-09-15，RBQM 实测）", () => {
     expect(classifyReference(source, "D:\\project\\company\\epro\\Project")).toBe("dataset")
   })
 })
+
+describe("发现合同与路径原子化（2026-10-20 P0/T02）", () => {
+  it("glob/ls/stat 发现型工具不因模式串或路径参数含受保护后缀拒绝（S01）", async () => {
+    const root = await makeProject('protected')
+    expect(inspectToolExecution(toolExec('glob', { pattern: '**/*.{csv,xlsx,zip}' }, root))).toBeUndefined()
+    expect(inspectToolExecution(toolExec('glob', { pattern: 'raw/**/*.sas7bdat', path: root }, root))).toBeUndefined()
+    expect(inspectToolExecution(toolExec('ls', { path: 'raw' }, root))).toBeUndefined()
+    expect(inspectToolExecution(toolExec('stat', { path: 'AE.csv' }, root))).toBeUndefined()
+  })
+
+  it("含空格/中文的 doc 需求路径按原子引用放行（S02）", async () => {
+    const root = await makeProject('protected')
+    expect(inspectToolExecution(
+      toolExec('read', { file_path: join(root, 'doc', '需求 说明.xlsx') }, root),
+    )).toBeUndefined()
+    expect(inspectToolExecution(
+      toolExec('read', { file_path: join(root, 'doc', 'DVP 分册 v2.csv') }, root),
+    )).toBeUndefined()
+  })
+
+  it("含空格数据集路径拒绝时引用保留完整路径，不再是切碎后的错误路径（S02）", async () => {
+    const root = await makeProject('protected')
+    const denied = inspectToolExecution(
+      toolExec('read', { file_path: join(root, 'raw data', 'AE.csv') }, root),
+    )
+    expect(typeof denied).toBe('string')
+    expect(denied as string).toContain(join('raw data', 'AE.csv'))
+  })
+
+  it("执行命令显式引用受保护数据集仍拒绝（保护面不回退）", async () => {
+    const root = await makeProject('protected')
+    expect(typeof inspectToolExecution(
+      toolExec('bash', { command: 'cat "raw data/AE.csv"' }, root),
+    )).toBe('string')
+    expect(typeof inspectToolExecution(
+      toolExec('bash', { command: 'python read raw/dm.sas7bdat' }, root),
+    )).toBe('string')
+  })
+
+  it("写码场景：路径参数指向代码文件、内容含数据路径不误伤（S03）", async () => {
+    const root = await makeProject('protected')
+    expect(inspectToolExecution(toolExec('write', {
+      file_path: join(root, 'run.R'),
+      content: 'df <- read.csv("raw/AE.csv")\n',
+    }, root))).toBeUndefined()
+    expect(inspectToolExecution(toolExec('edit', {
+      file_path: 'analysis py script.py', old_string: 'x', new_string: "x = 'raw/AE.csv'",
+    }, root))).toBeUndefined()
+  })
+
+  it("路径参数检查失败（环引用）不放大拒绝面：交由切词兜底与既有口径", async () => {
+    const cyclic: { file_path: string; self?: unknown } = { file_path: 'AE.csv' }
+    cyclic.self = cyclic
+    // 原子判定 unscannable → 兜底切词（跳过路径键）无命中 → 放行；
+    // 与旧口径一致：不可解析参数不拒绝（误拒会无意义打断模型）。
+    expect(inspectToolExecution(toolExec('read', cyclic, '/study'))).toBeUndefined()
+  })
+})

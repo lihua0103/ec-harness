@@ -1,5 +1,173 @@
 # 更新日志
 
+## [2026-10-20 真实项目实测] RT01 真链路验证：修掉三类真实误拦，红线完好
+
+在 `CGB3002-RT01`（66 个 SAS 数据集 + DMP 需求 + 加密归档 + 上一版交付物）
+上跑真实 AI 会话（WebUI→AI→企业工具→本地 Python→交付），两轮共约 90 分钟、
+108 次工具调用。**这是方案 §12.3 要求的真实用户路径验收，T13 部分完成。**
+
+### 实测发现的误拦（全部已修，均用合成数据固化为回归）
+
+1. **稀疏列码表值**（`AEREL` 69 行仅 4 个非空、2 个唯一值）：`_is_vocabulary_column`
+   用**非空值个数**做基数分母与证据门槛，稀疏列因此被判"样本不足"→ 落进
+   fail-closed 数据保护 → 码表值（RELATED 类）进索引 → 模型把需求摘要写盘
+   再读回被整体拦。修复：分母与证据门槛改用**整列行数**。
+2. **小表 EDC 元数据常量列**（15/19 行表的 `DataPageName`/`Folder` 等）：
+   行数 < 20 未达词表门槛，整列同值的导出元数据被当数据保护。修复：
+   `_is_constant_column` 对已确认的 EDC 元数据列名（DataPageName/Folder/
+   FolderName/InstanceName/environmentName/SiteGroup/project）不受行数限制。
+3. **列名/值长相扩大豁免面**：`_is_identifier_column` 初版含 `STUDYID`，
+   把方案号 `PSTUDYID`（整项目常量）误判为个体标识、灌回索引，导致
+   GQ1005-301 类方案号被拦。修复：标识词只收受试者/患者级
+   （USUBJID/SUBJID/PATIENT/DOB 等），方案号与中心号不在其列。
+
+### 红线校验（每次改动后都重跑，全部通过）
+
+- 237 个高基数列**全部仍受保护**；受试者号抽样 19/19 在索引中。
+- 单行/极少行唯一值**不**因"常量"豁免（`SUBJID=["1007"]` 仍保护）。
+- 标识类列名即便整列同值也不豁免。
+- 模型把数据行导出到 `.dsh/work/*.json` 再 `read` 回读 → **被正确拦截**
+  （实测 `mr_rows.ndjson`/`build5_pretty.json`/`focus_dump.json` 确含保护值）。
+  这不是误拦，是红线在阻止"写盘洗白"。
+
+### 结果
+
+- 第二轮真实会话：54 次工具结果、4 次拦截（**全部为含真实行值的自建中间
+  文件，属正确拦截**）、4 次业务代码错误（IndexError/SyntaxError，模型自行
+  修错成功——修错闭环已工作）、0 次基础设施故障。
+- 交付物 `RT01_MANUAL_LISTINGS.xlsx` 生成 51 张表，与基线 52 张共享 51 张；
+  差 1 张 `LISTING_NVI_01`（源表仅 3 行），属需求理解范围，非安全拦截导致。
+- 回归：pytest 240 全绿（新增 `test_real_project_false_positives.py` 6 例，
+  误拦与红线断言成对）、tool-audit 25、listing vitest 58、typecheck、架构检查全通过。
+
+### 同时修掉我自己引入的两个业务上限（用户指出）
+
+- `decode_runner_outputs` 曾加 **50 张表上限**，真实 Manual Listing 需 51 张，
+  模型被迫反复试探 50/51/52 边界。已删除帧数与单帧行数上限，只保留总单元格
+  资源兜底（50M，防 OOM）。**工作表数量由需求决定，护栏不设业务上限。**
+- `controlled_analysis` 的 `MAX_REQUEST_ITEMS=64` 会挡住 RT01 的 66 个数据集，
+  已提到 2000（纯滥用兜底）。
+- 两个上限的移除各有专项回归（`test_sheet_count_is_not_capped` 等）。
+
+### 尚未收口（如实记录）
+
+- T05（语义分页/稳定文档 ID）、T08（R 车道暂存发布）、T09（请求门禁/会话继承）、
+  T10（成组收紧宽豁免）仍未实施；三项宽豁免（shell 结果、enterprise 前缀、
+  未绑定项目）仍在，**红线未严格成立**。
+- 上一版交付物（项目根 xlsx）仍按辅助业务数据处理并受保护：模型读它会被拦，
+  这是正确行为；若需要模型做新旧对比，应走 `enterprise_listing_analyze` 的
+  compare_artifacts，而不是放开读取。
+- 交付完整性（`LISTING_NVI_01` 差异）需按 DVP 逐表核对，属需求理解验收，
+  本轮未做。
+
+## [2026-10-20 第二轮] 数据安全 P1 部分：受控分析落地 + 快照绑定 + runner 输出严格校验（T06/T07/T04/T11/T12 轻量面）
+
+- **受控分析（T06，方案 §6）**：新增 `controlled_analysis.py`（独立于任意
+  代码 runner 的可信模块）+ `enterprise_listing_analyze` 工具（工具总数
+  8→9）。首批操作：schema / key_check / join_check / rule_check /
+  compare_artifacts / run_status——输入句柄只能是已登记数据集名或最近一次
+  成功 run_code 的产物名（模型不能传文件路径/表达式/SQL，声明式算子白名单
+  拒绝 eval 兜底）；宿主本地计算、只返回有限非负整数计数，不含行值/键值/
+  样例。join_check 冻结 nullPolicy（默认 never_match）与期望基数、冲突键
+  计数；compare 键不唯一显式失败，绝不按位置配对（修复实现中被测试抓出的
+  行号交集错误——正确语义是键值交集）。
+- **runner 输出严格校验（T07 残项，§7.3）**：decode_runner_outputs 把子进程
+  JSON 当不可信输入——重复列名显式拒绝（此前静默改形，按列取统计会炸）、
+  帧数/单帧行数/总单元格上限、attrs 键白名单（模型可伪造任意 attrs，未登记
+  键不得进入下游投影）。
+- **快照绑定与发布防护（T04/T11 轻量面，§5.2/§7.4）**：会话快照 ID
+  （_ensure_session 与 inspect 全量路径生成）写入 run_code/publish/analyze
+  回执；publish 校验产物所属快照，旧快照产物返回 SNAPSHOT_STALE 不得隐式
+  发布。**快照语义定案**：inspect 全量入会话 = 不可变快照，run_code 只消费
+  会话内存，磁盘文件事后变化不作废当前快照（保住"免二次读取"既有契约与
+  回归）；数据更新经重 inspect 换新快照。conftest 补齐全部会话全局
+  （含两个指纹与快照字段）的保存/恢复。
+- **T12 轻量面**：系统提示工作流接入 analyze（第 4 步：需要结论优先
+  analyze，只在确需个体值时 run_code）。
+- **测试**：新增 `test_controlled_analysis.py`（11 用例：计数口径/基数冲突/
+  空值策略双语义/算子拒绝/句柄守卫/键唯一性）、`test_snapshot_binding.py`
+  （快照绑定/发布防护/decoder 严格合同）；TS 端 analyze 工具注册与参数
+  透传测试。
+- **验证**：tool-audit 25/25、listing 58/58、pytest 白名单 97/97、全仓
+  typecheck、check-architecture 通过（`node scripts/safety-tests.mjs` 一键）。
+- **边界如实声明**：T05/T08/T09/T10/T11 完整/T13 未实施——T10（成组收紧
+  shell/enterprise 前缀/输出目录宽豁免）按方案依赖图必须等 T05–T09 全部
+  就绪，**严禁提前单独收紧**；三项宽豁免仍在，红线未严格成立。T13 真实
+  路径验收需授权环境，NOT RUN。
+
+## [2026-10-20] 数据安全 P0 落地：误拦修复 + 扫描故障分类 + 诊断贯通（T00–T03）
+
+按 `DATA_SAFETY_EXECUTION_REDESIGN_PLAN.md` 完成第一阶段。剩余边界
+（shell/enterprise 前缀宽豁免仍在、红线未严格成立）见文末风险声明，
+P1/T04 起继续。
+
+- **公共出口合同**：tool-audit 新增无副作用子路径
+  `@dsh-enterprise/tool-audit/egress`——固定错误码（PROTECTED_CONTENT_WITHHELD /
+  SCAN_WARMING / SCAN_TIMEOUT / SCAN_FAILED / SCAN_UNAVAILABLE）、路径型
+  参数键表、发现型工具集、交付目录形态常量；listing 经 workspace 依赖消费，
+  判定原语不再各处各写。
+- **误拦修复（pre-execute）**：路径型参数（file_path/path 等）按完整引用
+  原子判定——含空格/中文的 doc 需求不再被空白切词切碎误拦，拒绝引用保留
+  完整路径；glob/ls/stat 等发现型工具只做发现合同，不因模式串含
+  .xlsx/.csv/.zip 拒绝。执行命令显式引用数据集仍拒绝（保护面不回退）。
+- **绕过面关闭（post-execute）**：移除"参数或结果文本任意位置出现
+  Output/04_Out 即整体放行"的文本豁免，改只认路径型参数命中交付目录；
+  additionalContexts 两侧拼接面全部扫描（此前 `??` 单侧取值漏扫原结果上下文）。
+- **故障分类回执**：扫描未就绪/预热超时/请求超时/扫描失败不再与真实命中
+  共用"检测到受保护数据"文案——基础设施故障明示 errorCode、说明"不是检测
+  到数据"并给出恢复动作；只有真实命中保留扣留口径。模型不再把初始化状态
+  当泄露陷入重试循环。
+- **诊断贯通（Python→TS→模型）**：`failure()` 补转 environmentHint 与
+  failures 失败清单（此前在 Error 重建时丢弃，模型盲猜环境与失败输入）。
+- **code_runner 编译/执行分离**：编译期 SyntaxError 带 stage=compile 与
+  行号（数据未进执行，安全）；运行期异常类名过显式内置白名单（自定义类名
+  归并 ExecutionError——exec 环境无 `__name__` 时 `__module__` 判定不可靠，
+  实测踩坑）；运行期 raise 的 SyntaxError 文本不再借编译期口径回流；
+  outputsDefined 成为成功/异常双路径的如实观察值。
+- **scan_init 数据面指纹核对**：同项目换数据（指纹变化）必须整会话重置并
+  全量重建保护值索引——此前同 project 直接短路 ready，扫描进程拿旧项目数据
+  的哈希当当前项目用（首轮 init 清空会话数据集后短路复用会"重建"出空索引，
+  双向风险：真实命中漏判 + 旧值误判）。
+- **测试与工具**：新增 `test_code_runner_stages.py`（9 用例）、
+  `test_scan_init_refresh.py`（3 用例）；conftest 补全两个指纹字段的
+  会话状态恢复；`tests/safety/cases.json` 建立 S01–S30 场景→测试映射
+  （P0 面 covered/partial，其余标 notRun 不假通过）；新增
+  `scripts/safety-tests.mjs` 一键合成回归（vitest + pytest 白名单，
+  Windows 经 cmd.exe 中转 .cmd）。
+- **验证**：tool-audit 25/25、listing 57/57（含真实 Python worker 的
+  risk-regression/data-guard）、pytest 白名单 52/52、全仓 typecheck 通过、
+  check-architecture 通过。
+- **风险声明（P0 不是安全收官）**：shell 执行工具结果整体放行、
+  `enterprise_` 前缀放行、未绑定项目不拦——三项宽豁免仍在（方案 §1.2
+  已登记），红线未严格成立；P1（T04–T10）补齐可信分析/快照/请求门禁后
+  成组替换。
+
+## [2026-09-22] demo-video 插件按首个交付项目 skill 增量升级：S0 调研 + 逐帧亮度锚点 + 验收门加密
+
+- **S0 调研落地**（工具 6→7）：新增 `enterprise_demo_survey` + 随包
+  `scripts/menu-tree-probe.mjs`——递归展开侧边栏产出菜单树（定覆盖清单）+ 可见菜单
+  标签中文计数（语言门禁：含中文的页面录制时只高亮不打开）。只读零写入，与录制共用
+  会话互斥；中文数据处置优先级（造英文演示数据须批准+先确认删除入口/换数据源/标注例外）入 KB。
+- **S2 锚点算法整体换为逐帧 signalstats**（blackdetect/场景分值弃用）：三个实测失效
+  场景（VFR 帧稀疏拉长 black_end、闪光帧被虚拟光标压住像素、黑条落深色侧边栏 luma
+  临界）。新口径：闪光=全帧 YAVG<40 最长连续段（≥0.15s）掐头=黑出+0.1s；黑条=顶边
+  条带 YMIN<20 帧簇（0.03–0.35s，间隔 ≤0.2s 归并；limited-range 纯黑 Y=16、full-range
+  是 0，阈值取 20 兼容两种编码）按时刻窗口排除闪光；序列解析按 key 过滤。**亮度剖面门**同路产出：闪光后 5s 桶均值 <60 连续 ≥2 桶=弹层遮罩累积，
+  S2 即拦截重录不带病进 S3。
+- **S1 弹层卫生三件套进 walk 模板**：closeOverlay 三段式（Escape blur → Cancel/X →
+  before-close 确认框点主按钮 → 可见 .el-overlay 数归零；**只点关闭确认主按钮，删除/
+  发布等破坏性词消息框走取消**——数据红线脚本化）+ purgeStrayPoppers（幽灵下拉）+
+  assertClean（段前卫生门）；scrollSteps 长页逐屏滚动 + 预热全页滚（懒渲染）；
+  登录被拒（账号被占）不循环重试；record 回执新增 recoverCount/warnings。
+- **S4 验收门加密**：字幕实证门（源视频同一帧带/不带字幕 YAVG 差 ≥0.4；探针必须
+  `-copyts`，否则 -ss 归零时间戳后字幕滤镜永远命不中事件——本轮实测新坑）；尾留白不足
+  自动 tpad 克隆末帧补齐（fps=25 必须在链头，tpad 对 VFR webm 不生效）。
+- **语言体检助手 `cjk()` 进模板**（可见性过滤中文计数，只回计数不回流内容）；
+  知识库 pitfalls 18 → 34 条（新增死按钮探测/evaluate 传参丢失/预览 --outDir/
+  FINDER 大小写/首句 t 与掐头耦合/findstr 假失败等）；AGENTS/README/ADR-0011 修订同步。
+- 验证：包内单测（纯核值级+装卸+schema+红线）与真实 ffmpeg 集成/E2E 全量适配新
+  契约（gates 含 captionBurned、anchors 含 brightness）。
+
 ## [2026-09-21] 新增企业插件 demo-video：系统模块操作演示视频四阶段流水线
 
 - 第五个企业插件 `@dsh-enterprise/demo-video`（row id `enterprise-demo-video`，

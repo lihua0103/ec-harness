@@ -127,3 +127,25 @@ function fmtTs(sec: number): string {
 export function toSrt(entries: SrtEntry[]): string {
   return entries.map((e, i) => `${i + 1}\n${fmtTs(e.start)} --> ${fmtTs(e.end)}\n${e.text}\n`).join('\n')
 }
+
+function parseSrtTs(s: string): number {
+  const m = /(\d+):(\d+):(\d+),(\d+)/.exec(s)
+  if (!m) return NaN
+  return +m[1] * 3600 + +m[2] * 60 + +m[3] + +m[4] / 1000
+}
+
+/**
+ * 字幕实证门的取帧点：最长一条字幕的中点秒（成片内时间轴）。
+ * 取最长条是为了让字幕黑盒面积最大、带/不带字幕的帧亮度差最可测。
+ */
+export function longestSrtMidpoint(srt: string): number | null {
+  let best: { start: number; end: number } | null = null
+  for (const m of srt.matchAll(/(\d+:\d{2}:\d{2},\d{3}) --> (\d+:\d{2}:\d{2},\d{3})/g)) {
+    const start = parseSrtTs(m[1] ?? '')
+    const end = parseSrtTs(m[2] ?? '')
+    if (Number.isNaN(start) || Number.isNaN(end) || end <= start) continue
+    if (!best || end - start > best.end - best.start) best = { start, end }
+  }
+  if (!best) return null
+  return +((best.start + best.end) / 2).toFixed(2)
+}

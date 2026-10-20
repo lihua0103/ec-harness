@@ -32,6 +32,10 @@ export interface RecordReceipt {
   actionCount: number
   navigations: number | null
   flashWall: number | null
+  /** 被踢自愈次数（stdout [recover] 行数）；>0 时成片可能含废镜头，须人工定位是否在成片范围内。 */
+  recoverCount: number
+  /** 非阻断提醒（recover 废镜头风险等）；阻断性缺陷走 reasons。 */
+  warnings: string[]
   logTail: string
   reasons: string[]
 }
@@ -114,6 +118,13 @@ export async function runRecordStage(
   if (!video) reasons.push('视频文件缺失（录制未产生 webm）')
   if (!(timings.actions?.length)) reasons.push('动作打点为 0：S3 旁白无法同步；检查主流程是否调用 act()')
 
+  // 被踢自愈不阻断（自愈后录制继续），但成片可能夹废镜头——回执点名让人工定位。
+  const recoverCount = (childResult.stdout.match(/\[recover\]/g) ?? []).length
+  const warnings: string[] = []
+  if (recoverCount > 0) {
+    warnings.push(`检测到 ${recoverCount} 次被踢自愈（[recover]）：确认其是否落在成片范围（flashWall 之后），是则该段为废镜头需重录`)
+  }
+
   return {
     pass: reasons.length === 0,
     module,
@@ -126,6 +137,8 @@ export async function runRecordStage(
     actionCount: timings.actions?.length ?? 0,
     navigations: timings.navigations ?? null,
     flashWall: typeof timings.flashWall === 'number' ? timings.flashWall : null,
+    recoverCount,
+    warnings,
     logTail: tailLines(maskHosts(scrubSecrets(childResult.stdout, [args.password])), 80),
     reasons,
   }

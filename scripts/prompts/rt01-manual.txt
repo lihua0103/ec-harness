@@ -1,0 +1,9 @@
+请为当前项目（cwd 即项目根）生成 Manual Listing 交付物。
+
+要求：
+1. 先调用 enterprise_listing_inspect 读取需求与数据结构；按强制工作流用 enterprise_listing_read_document 读完 doc/ 需求（DVP 的 Manual Review 表）与 ALS 设计文件。
+2. 严格按 DVP 的 Visits Applied To × Related Fields 范围与 Column Heading 列实现，不要读 Cover Page 类 sheet，不要实现 DVP 未要求的列。
+3. 数据源为项目根下的加密归档；密码按既有约定自动推导（省略 credentialRef）。
+4. 用 enterprise_listing_run_code 生成 outputs（每个键是一张工作表），必要时先用 enterprise_listing_analyze 做键唯一性/关联覆盖校验。
+5. 最后调用 enterprise_listing_publish（scenario=manual）生成交付 Excel。
+6. 如果遇到任何数据安全拦截提示，请如实记录错误码，不要反复重试同一条命令；完成后汇报：读取了哪些需求、生成了多少张表、是否遇到拦截及其错误码。
