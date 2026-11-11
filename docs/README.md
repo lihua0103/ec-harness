@@ -20,6 +20,9 @@ DSH profile/SDK，默认未配置，配置后可通过 SDK client 执行并登�
 
 [EMERALD 多插件架构设计](ENTERPRISE-MULTI-PLUGIN-ARCHITECTURE.md)已按七项评审修订为设计 0.2，面向几十至上百插件。Listing 员工业务类型仅 Manual、Medical、PK、Report；各合同均尚未实现/运行验收。
 
+- [企业身份与数据入口契约](ENTERPRISE-IDENTITY-AND-DATA-CONTRACT.md)：Principal 派生、项目数据授权、撤权语义与 I01–I05 验收；待 IT/API 对接。
+- 代码托管：外层工作区已建立 Git 基线；`.github/workflows/verify.yml` 守卫通道随 push/PR 执行规范检查，完整构建/测试通道需托管后手动验证。
+
 - [应用发布与执行合同](PLATFORM-APPLICATION-RELEASE-CONTRACT.md)：AppRegistration/AppExecutor、确定性能力映射、不可变运行基线和 home 隔离。
 - [工作与运行生命周期合同](PLATFORM-RUN-LIFECYCLE-CONTRACT.md)：取消竞争、追加消息来源、完成屏障和同 Run 恢复/新 Run 重试。
 - [跨进程知识验证合同](PLATFORM-KNOWLEDGE-VALIDATION-CONTRACT.md)：中心状态、固定验证执行器与回执条件激活。
