@@ -1,0 +1,3 @@
+- insert:
+    - id: ec-platform-control
+      name: '@ec-clinical/platform-control/cordis'

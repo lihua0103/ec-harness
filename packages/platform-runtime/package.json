@@ -1,0 +1,19 @@
+{
+  "name": "@ec-clinical/platform-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic execution-plan resolution and the run lifecycle kernel; no worker or UI dependency.",
+  "exports": { ".": "./src/index.ts" },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "tsx": "4.23.13",
+    "typescript": "6.0.3"
+  },
+  "engines": { "node": ">=24.9.0" },
+  "scripts": {
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && npm run test"
+  }
+}

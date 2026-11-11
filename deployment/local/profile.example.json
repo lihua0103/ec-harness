@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "deploymentId": "local-clinical-candidate",
+  "aiVmName": "DSH-AI-Development",
+  "executionVmName": "DSH-Protected-Execution",
+  "modelFeedback": "WITHHELD_REQUIRES_BROKER_REVIEW",
+  "productionDataEnabled": false,
+  "notice": "Names are placeholders, not existing provisioned virtual machines. No real paths or keys belong in this profile."
+}

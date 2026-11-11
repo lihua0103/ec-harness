@@ -1,0 +1,32 @@
+{
+  "name": "@ec-clinical/platform-knowledge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis": "./lib/cordis.js",
+    "./src/*": "./src/*"
+  },
+  "files": ["lib", "cordis.patch.yml", "README.md"],
+  "description": "Shared persistent experience service and its Cordis bundle; no business-plugin or model-provider dependency.",
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "engines": { "node": ">=24.9.0" },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && npm run build"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "link:../../upstream/deepseek-harness-git/vendor/cordis",
+    "@deepseek-ai/dsh-tools": "link:../../upstream/deepseek-harness-git/packages/core/tools",
+    "@types/node": "22.20.1",
+    "esbuild": "0.28.2",
+    "typescript": "6.0.3"
+  }
+}

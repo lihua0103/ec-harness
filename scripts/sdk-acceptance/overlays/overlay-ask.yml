@@ -1,0 +1,46 @@
+# SDK 验收套件问答 overlay：overlay-basic + 原生问答链路两个插件。
+# sdk-minimal 不含问答能力（真实基线缺口）；ask_user_question 工具
+# （tool-ask-user）依赖 userQuestions 服务（user-questions），须成对插入。
+- insert:
+    - id: llm-pi-ai
+      name: '@deepseek-ai/dsh-llm-pi-ai'
+      config:
+        providers:
+          zai-coding-cn:
+            api: anthropic-messages
+            baseURL: https://open.bigmodel.cn/api/anthropic
+            apiKeyEnv: ZAI_CODING_CN_API_KEY
+            models:
+              - id: glm-5.3-flash
+                name: GLM-5.3-Flash
+                contextWindow: 1000000
+                maxTokens: 1024
+                input: [text]
+    - id: agent-default-model
+      name: '@deepseek-ai/dsh-agent-default-model'
+      config:
+        provider: zai-coding-cn
+        model: glm-5.3-flash
+    - id: tool-plugin-manager
+      disabled: true
+    - id: tool-schedule
+      disabled: true
+    - id: workspace-dependencies
+      disabled: true
+    - id: tool-bash-persistent
+      disabled: true
+    - id: tool-pwsh-persistent
+      disabled: true
+    - id: tool-fs
+      name: '@deepseek-ai/dsh-tool-fs'
+      config:
+        read: false
+        readImage: false
+        write: false
+        edit: false
+    - id: tool-working-directory
+      disabled: true
+    - id: user-questions
+      name: '@deepseek-ai/dsh-user-questions'
+    - id: tool-ask-user
+      name: '@deepseek-ai/dsh-tool-ask-user'

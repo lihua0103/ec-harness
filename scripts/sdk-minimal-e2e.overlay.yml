@@ -1,0 +1,41 @@
+# SDK-minimal 专用 provider route overlay：集成 smoke test 使用。
+# 仅在一次性 DSH_HOME 的调用层 patch 使用，不安装进持久 profile。
+- insert:
+    - id: llm-pi-ai
+      name: '@deepseek-ai/dsh-llm-pi-ai'
+      config:
+        providers:
+          zai-coding-cn:
+            api: anthropic-messages
+            baseURL: https://open.bigmodel.cn/api/anthropic
+            apiKeyEnv: ZAI_CODING_CN_API_KEY
+            models:
+              - id: glm-5.3-flash
+                name: GLM-5.3-Flash
+                contextWindow: 1000000
+                maxTokens: 1024
+                input: [text]
+    - id: agent-default-model
+      name: '@deepseek-ai/dsh-agent-default-model'
+      config:
+        provider: zai-coding-cn
+        model: glm-5.3-flash
+    - id: tool-plugin-manager
+      disabled: true
+    - id: tool-schedule
+      disabled: true
+    - id: workspace-dependencies
+      disabled: true
+    - id: tool-bash-persistent
+      disabled: true
+    - id: tool-pwsh-persistent
+      disabled: true
+    - id: tool-fs
+      name: '@deepseek-ai/dsh-tool-fs'
+      config:
+        read: false
+        readImage: false
+        write: false
+        edit: false
+    - id: tool-working-directory
+      disabled: true

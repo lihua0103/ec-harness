@@ -1,0 +1,3 @@
+- insert:
+    - id: ec-clinical-dm-listing
+      name: '@ec-clinical/dsh-dm-listing'

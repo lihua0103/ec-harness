@@ -1,0 +1,17 @@
+# Dependencies and build outputs (rebuilt from source by each package's build script)
+node_modules/
+lib/
+
+# Local runtime evidence, caches and downloaded artifacts
+.runtime/
+.playwright-mcp/
+.tools/
+
+# Personal / machine-local tooling configuration
+.claude/settings.local.json
+.claude/launch.json
+
+# Pinned upstream DSH checkout: never committed. Fetch the commit recorded in
+# docs/UPSTREAM-BASELINE.md and pre-install it before running package verification;
+# CI does this explicitly instead of trusting a vendored tree.
+upstream/

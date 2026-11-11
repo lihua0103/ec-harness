@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/standard-check.cjs",
+            "timeout": 30,
+            "statusMessage": "检查插件边界规范…"
+          }
+        ]
+      }
+    ]
+  }
+}
