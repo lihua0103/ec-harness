@@ -49,9 +49,11 @@ interface DataAccessGrant {
 
 ## 4. 平台侧接入点（当前代码事实）
 
-- `packages/platform-control/src/policy.ts`：`PlatformPolicy.authorize(principal, action, resource)` 是替换点；`LocalOperatorPolicy` 仅用于本机单操作者，企业部署替换为身份与项目授权服务。
+- `packages/platform-identity`：已实现断言校验、Principal 派生（含 orgId）、Run 级 service Principal、项目成员与数据授权解析（非成员/跨组织/无授权/过期/撤销一律拒绝）。`InMemoryAccessDirectory` 是 IT/API 数据源的可测试替身，真实部署须提供由 SSO 与项目 API 支撑的目录实现。7 项包级测试覆盖 I01–I05 语义。
+- `packages/platform-control/src/service.ts`：`setPolicy(policy)` 是部署接缝，企业身份/项目授权插件用它替换 `LocalOperatorPolicy`。
+- `packages/platform-control/src/policy.ts`：`PlatformPolicy.authorize(principal, action, resource)` 是替换点；`LocalOperatorPolicy` 仅用于本机单操作者。
 - `packages/platform-control/src/cordis.ts`：operator Principal 从 DSH 会话派生（`session:<id>`），不接受工具参数提供 actor——保留这一约束。
-- Principal 目前不含 orgId/断言摘要；接入时扩展 Principal 与断言校验，并保证审计记录 actor/orgId/断言摘要。
+- 控制面自身的 Principal 仍为本机形态（无 orgId/断言摘要）；接入时由适配器把 platform-identity 的 Principal 映射进去，并在审计记录 actor/orgId/断言摘要。
 
 ## 5. 验收（I 系列，均未执行）
 
@@ -65,4 +67,4 @@ interface DataAccessGrant {
 
 ## 6. 明确未做
 
-真实 SSO/OIDC 接入、项目成员 API、数据位置 API、撤权事件通道、多租户隔离测试均未实现。在这些完成前，插件继续使用本机获准目录与操作者 R 配置，不得宣称满足企业数据安全验收。
+真实 SSO/OIDC 接入、项目成员 API、数据位置 API、撤权事件通道、多租户隔离测试均未实现；`platform-identity` 提供的是解析规则与替身目录，不是这些服务的接入。I01–I05 目前只有包级语义测试，企业级验收（真实断言与撤权通道）未执行。在这些完成前，插件继续使用本机获准目录与操作者 R 配置，不得宣称满足企业数据安全验收。

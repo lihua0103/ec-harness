@@ -1,0 +1,19 @@
+{
+  "name": "@ec-clinical/platform-identity",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Identity assertion validation and project data-access resolution for enterprise deployments; no DSH or UI dependency.",
+  "exports": { ".": "./src/index.ts" },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "tsx": "4.23.13",
+    "typescript": "6.0.3"
+  },
+  "engines": { "node": ">=24.9.0" },
+  "scripts": {
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && npm run test"
+  }
+}
