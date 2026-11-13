@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseChangeMark, parseBool, splitList, validateCrossFieldRule, withLogicParse,
-  parseRulesJson, coerceRuleInput, RulesInputError,
-  type CrossFieldRule,
+  parseRulesJson, coerceRuleInput, RulesInputError, validateDynamic, DYNAMIC_TYPES,
+  type CrossFieldRule, type DynamicSpec,
 } from '../src/rules.js';
 
 const baseRule = (): CrossFieldRule => ({
@@ -82,4 +82,21 @@ test('parseRulesJson：数组与 {crossField} 两种形态，垃圾输入显式�
   assert.throws(() => parseRulesJson('{"x":1}'), (error: unknown) => error instanceof RulesInputError && error.code === 'RULES_SHAPE_UNSUPPORTED');
   assert.throws(() => parseRulesJson('not json'), (error: unknown) => error instanceof RulesInputError && error.code === 'INVALID_RULES_JSON');
   assert.throws(() => parseRulesJson('"' + 'x'.repeat(1_000_001) + '"'), (error: unknown) => error instanceof RulesInputError && error.code === 'RULES_PAYLOAD_TOO_LARGE');
+});
+
+const baseDynamic = (): DynamicSpec => ({
+  id: 'DY-001', changeMark: null, formName: 'VS', fieldName: 'VSPOS', type: 'Dynamic Field',
+  visits: 'All', discrepancyText: '', condition: '', issues: [],
+});
+
+test('validateDynamic：8 枚举全通过，越枚举/缺项记诊断不硬拒', () => {
+  for (const type of DYNAMIC_TYPES) {
+    assert.deepEqual(validateDynamic({ ...baseDynamic(), type }), [], `合法枚举 ${type} 不应带诊断`);
+  }
+  assert.ok(validateDynamic({ ...baseDynamic(), type: 'Require' }).includes('DYNAMIC_TYPE_UNRECOGNIZED:Require'));
+  assert.ok(validateDynamic({ ...baseDynamic(), type: 'Show' }).includes('DYNAMIC_TYPE_UNRECOGNIZED:Show'));
+  assert.ok(validateDynamic({ ...baseDynamic(), type: '' }).includes('MISSING_TYPE'));
+  assert.ok(validateDynamic({ ...baseDynamic(), id: '' }).includes('MISSING_UNIQUE_ID'));
+  // 大小写/拼写漂移不静默归一，如实上报（与 Query Type 对称）。
+  assert.ok(validateDynamic({ ...baseDynamic(), type: 'dynamic field' }).includes('DYNAMIC_TYPE_UNRECOGNIZED:dynamic field'));
 });

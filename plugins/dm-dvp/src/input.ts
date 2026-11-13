@@ -2,7 +2,7 @@
  *  与 parse 端共享 rules.ts 语义；写出生成物一律 CANDIDATE。 */
 import {
   coerceChangeMark, coerceRuleInput, parseBool,
-  validateCrossFieldRule, validateFieldLevel,
+  validateCrossFieldRule, validateDynamic, validateFieldLevel,
   type CrossFieldRule, type DynamicSpec, type FieldLevelSpec, type ManualReviewRule, type VersionRow,
 } from './rules.js';
 
@@ -88,8 +88,7 @@ export function coerceDynamic(value: unknown): DynamicSpec {
     visits: asString(rec.visits), discrepancyText: asString(rec.discrepancyText), condition: asString(rec.condition),
     issues: [],
   };
-  if (!spec.id) spec.issues.push('MISSING_UNIQUE_ID');
-  if (!spec.type) spec.issues.push('MISSING_TYPE');
+  spec.issues = validateDynamic(spec);
   return spec;
 }
 

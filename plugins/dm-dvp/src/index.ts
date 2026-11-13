@@ -51,6 +51,9 @@ AND/OR 混合嵌套与复合 NOT 显式标记人工确认项，不代做语义�
 ## Query Type 四枚举
 Date | Custom | Missing | Range——超出枚举记 QUERY_TYPE_UNRECOGNIZED 诊断，不猜。
 
+## Dynamic Type 8 枚举
+Dynamic Field | Dynamic Search list | Dynamic Page | Derivation | Dynamic Visit | Participant Status | Dynamic Option | Add Event——超出枚举记 DYNAMIC_TYPE_UNRECOGNIZED 诊断，不猜。此表是系统既有配置的登记，生成时按目标系统实际配置核对，不假定其他系统同构。
+
 ## 方法知识（KnowledgeService）
 dm_dvp_methods 检索 DVP 方法种子（template/firewhen/protocol/uat/cases）；历史种子为 CANDIDATE，未复现验证不称 ACTIVE。
 已核实的纠错方法经 dm_dvp_knowledge_capture 沉淀（前提/反例/来源必填，claims 只写可复现断言），dm_dvp_knowledge_validate 跑已安装验证器；
@@ -407,7 +410,7 @@ export function apply(ctx: Context): void {
             'crossField 行：{id, formName, targetField, relatedFields?, queryType, discrepancyText, logic, visits?, changeMark?}；',
             'fieldLevel 行：{formOid, formName, fieldOid, preText?, controlType?, dataFormat?, isLog, isRequired, queryFutureDate, queryNonConformance, changeMark?}（布尔接受 true/false）；',
             'manualReview / manualReviewProgramming 行：{id, formName, reportDescription, discrepancyText?, logic?, visits?, relatedFields?, programming?:{assign?, columnHeading?}}（TEST CASE/DM/DBD 三列恒空）；',
-            'dynamic 行：{id, formName, fieldName, type, visits?, discrepancyText?, condition?}；',
+            'dynamic 行：{id, formName, fieldName, type, visits?, discrepancyText?, condition?}，type 限 8 枚举 Dynamic Field/Dynamic Search list/Dynamic Page/Derivation/Dynamic Visit/Participant Status/Dynamic Option/Add Event，越枚举记 DYNAMIC_TYPE_UNRECOGNIZED 诊断；',
             'versionHistory 行：{version, date, modifiedBy?, comments?}；',
             'project：{studyCode?, studyTitle?, protocolNumber?, sponsor?, dvpVersion?, dvpDate?, createdBy?}。',
             '宽容别名：form→formName、fields→targetField(首)+relatedFields(余)、message→discrepancyText、targetedField→targetField、crfPageDomain→formName（dynamic）、author/by→modifiedBy、change/description→comments、code→studyCode、name/title→studyTitle、protocolNo/registry→protocolNumber、version→dvpVersion、date→dvpDate。',

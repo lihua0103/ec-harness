@@ -165,3 +165,23 @@ test('同输入字节可复现（固定 mtime）', () => {
     rmSync(dirB, { recursive: true, force: true });
   }
 });
+
+test('Dynamic Type 枚举：越枚举计入 issues.dynamic 不静默，合法枚举零诊断', () => {
+  const dir = withTempDir();
+  try {
+    // 合法枚举（DOCUMENT 夹具用 Dynamic Field）：dynamic 不带诊断。
+    const ok = writeDvpWorkbook(dir, 'ok.xlsx', DOCUMENT);
+    assert.equal(ok.issues.dynamic ?? 0, 0, '合法 Dynamic Type 不应带诊断');
+    // 越枚举（Require/Show）：写出仍成功（不硬拒），但 issues.dynamic 如实计数。
+    const bad = JSON.stringify({
+      dynamic: [
+        { id: 'DY-B01', formName: 'VS', fieldName: 'VSPOS', type: 'Require' },
+        { id: 'DY-B02', formName: 'VS', fieldName: 'VSPOS2', type: 'Show' },
+        { id: 'DY-B03', formName: 'VS', fieldName: 'VSPOS3', type: 'Derivation' },
+      ],
+    });
+    const result = writeDvpWorkbook(dir, 'bad.xlsx', bad);
+    assert.equal(result.issues.dynamic, 2, '两条越枚举应计入 issues.dynamic');
+    assert.equal(result.sheets.find((s) => s.name === 'Dynamic')?.rows, 3, '越枚举不硬拒，仍写出供核对');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

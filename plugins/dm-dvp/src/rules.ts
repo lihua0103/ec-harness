@@ -6,6 +6,11 @@ import {parseLogic} from './firewhen.js';
 export type QueryType = 'Date' | 'Custom' | 'Missing' | 'Range';
 export const QUERY_TYPES: readonly QueryType[] = ['Date', 'Custom', 'Missing', 'Range'];
 
+/** Dynamic Type 8 枚举：对齐公司模板（docs/DVP-TEMPLATE-SCHEMA.md §5，拼写逐字一致）。
+ *  此表是系统既有配置的登记；越枚举不硬拒、记 DYNAMIC_TYPE_UNRECOGNIZED 诊断，交项目团队按目标系统核对。 */
+export type DynamicType = 'Dynamic Field' | 'Dynamic Search list' | 'Dynamic Page' | 'Derivation' | 'Dynamic Visit' | 'Participant Status' | 'Dynamic Option' | 'Add Event';
+export const DYNAMIC_TYPES: readonly DynamicType[] = ['Dynamic Field', 'Dynamic Search list', 'Dynamic Page', 'Derivation', 'Dynamic Visit', 'Participant Status', 'Dynamic Option', 'Add Event'];
+
 export interface ChangeMark { action: 'Add' | 'Update' | 'Delete'; version: string; }
 
 export interface CrossFieldRule {
@@ -118,6 +123,16 @@ export function validateFieldLevel(spec: FieldLevelSpec): string[] {
   for (const [key, value] of [['isLog', spec.isLog], ['isRequired', spec.isRequired], ['queryFutureDate', spec.queryFutureDate], ['queryNonConformance', spec.queryNonConformance]] as const) {
     if (value === null) issues.push(`BOOL_UNPARSEABLE:${key}`);
   }
+  return issues;
+}
+
+/** Dynamic 行校验：与 Query Type 对称——必填项 + Type 8 枚举，越枚举记诊断不硬拒（不识别即上报）。 */
+export function validateDynamic(spec: DynamicSpec): string[] {
+  const issues: string[] = [];
+  if (!spec.id) issues.push('MISSING_UNIQUE_ID');
+  else if (spec.id.length > ID_CAP) issues.push('ID_TOO_LONG');
+  if (!spec.type) issues.push('MISSING_TYPE');
+  else if (!DYNAMIC_TYPES.includes(spec.type as DynamicType)) issues.push(`DYNAMIC_TYPE_UNRECOGNIZED:${spec.type}`);
   return issues;
 }
 
