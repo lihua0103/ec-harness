@@ -1,0 +1,26 @@
+{
+  "at": "2026-11-12T07:55:22.571Z",
+  "checks": [
+    {
+      "name": "both tabs attempted to send",
+      "ok": true,
+      "detail": "clicked | clicked"
+    },
+    {
+      "name": "each concurrent message appears once in each view",
+      "ok": true,
+      "detail": "1/1 · 1/1"
+    },
+    {
+      "name": "a concurrent-writer conflict is surfaced, or both writes serialized",
+      "ok": true,
+      "detail": "serialized: true/true"
+    },
+    {
+      "name": "no unexpected page errors in either tab",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "errors": []
+}

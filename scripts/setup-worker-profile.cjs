@@ -1,7 +1,7 @@
 // Create an isolated DSH worker profile for platform-control's DshProfileExecutor.
 // The worker home is separate from the control/UI home; model credentials stay in the deployment's
 // environment and are not written here.
-const { mkdirSync, writeFileSync } = require('node:fs');
+const { mkdirSync, writeFileSync, existsSync } = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
@@ -15,6 +15,9 @@ const home = path.resolve(option('--home', path.join(root, '.runtime', 'worker-h
 const profile = path.join(home, 'profiles', 'worker');
 const link = (target) => `link:${target.replaceAll('\\', '/')}`;
 
+if (existsSync(profile)) {
+  throw new Error(`Profile already exists; refusing to overwrite configuration: ${profile}. Choose a new --home.`);
+}
 mkdirSync(profile, { recursive: true });
 const manifest = {
   name: 'dsh-profile-worker',

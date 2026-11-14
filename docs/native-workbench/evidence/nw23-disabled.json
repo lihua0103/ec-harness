@@ -1,0 +1,32 @@
+{
+  "at": "2026-11-12T07:56:38.178Z",
+  "mode": "disabled",
+  "checks": [
+    {
+      "name": "disabled: the 工作台 navigation entry is gone",
+      "ok": true,
+      "detail": "0"
+    },
+    {
+      "name": "disabled: no workbench page node remains",
+      "ok": true,
+      "detail": "0"
+    },
+    {
+      "name": "disabled: the injected style tag was removed",
+      "ok": true,
+      "detail": "0"
+    },
+    {
+      "name": "disabled: the brand slot no longer shows EMERALD",
+      "ok": true,
+      "detail": "0"
+    },
+    {
+      "name": "disabled: no page errors from the removed plugin",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "errors": []
+}

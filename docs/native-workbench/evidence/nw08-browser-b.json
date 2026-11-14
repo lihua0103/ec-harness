@@ -1,0 +1,35 @@
+{
+  "at": "2026-11-12T07:53:51.730Z",
+  "checks": [
+    {
+      "name": "the interrupted prompt is still in the history",
+      "ok": true,
+      "detail": "进行中\nRESTART-T12：请逐行输出 1 到 120\n刚刚"
+    },
+    {
+      "name": "the interrupted prompt appears exactly once",
+      "ok": true,
+      "detail": "1"
+    },
+    {
+      "name": "no turn is reported as still running after the restart",
+      "ok": true,
+      "detail": "0"
+    },
+    {
+      "name": "the same session accepts a follow-up turn after the restart",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "the follow-up did not duplicate the original prompt",
+      "ok": true,
+      "detail": "1"
+    },
+    {
+      "name": "no unexpected page errors after the restart",
+      "ok": true,
+      "detail": ""
+    }
+  ]
+}

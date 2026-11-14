@@ -1,0 +1,193 @@
+{
+ "total": 10,
+ "failed": 0,
+ "results": [
+  {
+   "name": "home shows the pending question, not the empty state",
+   "ok": true,
+   "detail": {
+    "navCount": "1",
+    "alert": "true",
+    "pendingRows": 1,
+    "pendingText": "等待答复的工作（合成演示）2 个问题 · 2026/11/14 09:19:59回答 ›",
+    "emptyState": false,
+    "badgeTone": "warn"
+   }
+  },
+  {
+   "name": "待我处理 lists the question with its count",
+   "ok": true,
+   "detail": {
+    "heading": "待我处理",
+    "rows": 1,
+    "text": "等待答复的工作（合成演示）2 个问题 · 2026/11/14 09:19:59回答 ›"
+   }
+  },
+  {
+   "name": "question card renders both single and multi select chips",
+   "ok": true,
+   "detail": {
+    "title": "需要你的答复",
+    "legends": [
+     "3 例受试者的知情同意签署日期缺失，清单中如何标记？",
+     "本次核对需要覆盖哪些批次？"
+    ],
+    "radios": 3,
+    "checkboxes": 3,
+    "chipLabels": [
+     "按缺失保留",
+     "标记待补",
+     "稍后处理",
+     "基线批次",
+     "随访批次",
+     "安全性批次"
+    ],
+    "customInputs": 2,
+    "background": "rgb(255, 250, 243)",
+    "submit": "提交答复",
+    "overflowX": 0
+   }
+  },
+  {
+   "name": "question card is readable in both themes",
+   "ok": true,
+   "detail": {
+    "low": [],
+    "light": [
+     {
+      "name": "card title",
+      "color": "rgb(124, 90, 42)",
+      "background": "rgb(255, 250, 243)",
+      "contrast": 6.03
+     },
+     {
+      "name": "legend",
+      "color": "rgb(124, 90, 42)",
+      "background": "rgb(255, 250, 243)",
+      "contrast": 6.03
+     },
+     {
+      "name": "option chip",
+      "color": "rgb(113, 88, 58)",
+      "background": "rgb(255, 255, 255)",
+      "contrast": 6.65
+     },
+     {
+      "name": "custom input",
+      "color": "rgb(44, 74, 82)",
+      "background": "rgb(255, 255, 255)",
+      "contrast": 9.51
+     },
+     {
+      "name": "submit",
+      "color": "rgb(255, 255, 255)",
+      "background": "rgb(8, 123, 107)",
+      "contrast": 5.18
+     },
+     {
+      "name": "panel heading",
+      "color": "rgb(28, 72, 82)",
+      "background": "rgb(255, 255, 255)",
+      "contrast": 10.01
+     },
+     {
+      "name": "pending badge",
+      "color": "rgb(138, 95, 34)",
+      "background": "rgb(255, 244, 227)",
+      "contrast": 5.16
+     }
+    ],
+    "dark": [
+     {
+      "name": "card title",
+      "color": "rgb(224, 176, 112)",
+      "background": "rgb(38, 32, 21)",
+      "contrast": 8.17
+     },
+     {
+      "name": "legend",
+      "color": "rgb(224, 176, 112)",
+      "background": "rgb(38, 32, 21)",
+      "contrast": 8.17
+     },
+     {
+      "name": "option chip",
+      "color": "rgb(224, 176, 112)",
+      "background": "rgb(31, 27, 19)",
+      "contrast": 8.67
+     },
+     {
+      "name": "custom input",
+      "color": "rgb(228, 234, 236)",
+      "background": "rgb(26, 32, 36)",
+      "contrast": 13.54
+     },
+     {
+      "name": "submit",
+      "color": "rgb(8, 34, 29)",
+      "background": "rgb(79, 191, 164)",
+      "contrast": 7.42
+     },
+     {
+      "name": "panel heading",
+      "color": "rgb(228, 234, 236)",
+      "background": "rgb(26, 32, 36)",
+      "contrast": 13.54
+     },
+     {
+      "name": "pending badge",
+      "color": "rgb(224, 176, 112)",
+      "background": "rgb(51, 40, 15)",
+      "contrast": 7.31
+     }
+    ]
+   }
+  },
+  {
+   "name": "chips select live and show the chosen state",
+   "ok": true,
+   "detail": {
+    "checked": 3,
+    "chipTone": "rgb(253, 243, 224)"
+   }
+  },
+  {
+   "name": "the chosen chip stays readable",
+   "ok": true,
+   "detail": {
+    "name": "checked chip",
+    "color": "rgb(107, 79, 34)",
+    "background": "rgb(253, 243, 224)",
+    "contrast": 6.89
+   }
+  },
+  {
+   "name": "submitting answers the question and clears the card",
+   "ok": true,
+   "detail": {
+    "cards": 0,
+    "empty": true,
+    "badge": "0 项待处理"
+   }
+  },
+  {
+   "name": "pending counters return to zero after the answer",
+   "ok": true,
+   "detail": {
+    "navCount": "0",
+    "alert": "false",
+    "emptyState": true
+   }
+  },
+  {
+   "name": "no runtime errors",
+   "ok": true,
+   "detail": []
+  },
+  {
+   "name": "no failed requests",
+   "ok": true,
+   "detail": []
+  }
+ ]
+}

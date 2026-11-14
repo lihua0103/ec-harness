@@ -1,0 +1,71 @@
+{
+  "dryRun": true,
+  "generatedAt": "2026-11-12T05:54:30.159Z",
+  "controlStore": {
+    "status": "OK",
+    "counts": {
+      "projects": 1,
+      "project_workspaces": 1,
+      "works": 2,
+      "runs": 1,
+      "run_inputs": 13,
+      "run_artifacts": 12,
+      "run_events": 4,
+      "run_interactions": 0,
+      "audit_events": 49,
+      "work_drafts": 0,
+      "work_session_bindings": 1,
+      "submissions": 0,
+      "execution_domains": 1,
+      "input_baselines": 12,
+      "app_releases": 1,
+      "model_catalog": 0
+    },
+    "works": [
+      {
+        "workId": "8f5ad708-074d-45ab-9283-9b7e044ac088",
+        "title": "尚未执行的工作（空状态）",
+        "appId": "ec.synthetic.reports",
+        "appVersion": "1.0.0",
+        "state": "ACTIVE",
+        "projectId": "e05db50d-d5df-476c-a97c-4d41c9e9391a",
+        "sessionId": null,
+        "domainId": null,
+        "runs": 0,
+        "artifacts": 0
+      },
+      {
+        "workId": "aa2ca905-39c8-4270-a658-173f4cf660a0",
+        "title": "季度方案整理（合成演示）",
+        "appId": "ec.synthetic.reports",
+        "appVersion": "1.0.0",
+        "state": "ACTIVE",
+        "projectId": "e05db50d-d5df-476c-a97c-4d41c9e9391a",
+        "sessionId": "session-t07-demo",
+        "domainId": "458b938b-47fd-4a44-af6a-926b973fc560",
+        "runs": 1,
+        "artifacts": 12
+      }
+    ],
+    "unboundWorks": 1,
+    "digest": "f83d5796c522c09d3b24f6c14efd6a3baabf893a8760e153124f478aabadefe7"
+  },
+  "browserStorage": {
+    "kind": "v4",
+    "projects": 1,
+    "works": 2,
+    "inputs": 3,
+    "messages": 1,
+    "drafts": 1,
+    "readOnlyWorks": 1,
+    "recovery": 0,
+    "earliest": "2026-10-01T08:00:00.000Z",
+    "latest": "2026-10-02T09:00:00.000Z"
+  },
+  "notes": [
+    "dry-run：未创建、更新或删除任何记录。",
+    "旧 Work 没有原生 Session 关联时只能只读展示；必须由用户确认后才创建带来源的新 Session。",
+    "内存中的活动记录不在运行正文中，迁移不补造历史事件。",
+    "1 个旧 Work 尚未绑定原生会话，迁移时需只读展示。"
+  ]
+}

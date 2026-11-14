@@ -1,0 +1,37 @@
+{
+  "name": "@ec-clinical/dsh-dm-viz",
+  "version": "0.1.0",
+  "description": "临床图表设计与交付：设计稿→图表规格与布局→系统图表页→逐图验收证据。输出为配置候选，需业务验收。",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json",
+    "./application.json": "./application.json"
+  },
+  "files": ["lib", "application.json", "cordis.patch.yml", "README.md"],
+  "engines": { "node": ">=24.9.0", "dsh": "0.2.2-rc.1" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "verify": "npm run typecheck && npm run test && npm run build"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-skill": "0.2.2-rc.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "link:../../upstream/deepseek-harness-git/vendor/cordis",
+    "@deepseek-ai/dsh-tools": "link:../../upstream/deepseek-harness-git/packages/core/tools",
+    "@deepseek-ai/dsh-skill": "link:../../upstream/deepseek-harness-git/packages/skill/skill",
+    "@types/node": "22.20.1",
+    "esbuild": "0.28.2",
+    "typescript": "6.0.3",
+    "tsx": "4.23.13"
+  },
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@11.28.5"
+}

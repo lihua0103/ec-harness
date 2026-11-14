@@ -1,0 +1,56 @@
+{
+  "at": "2026-11-12T06:06:24.545Z",
+  "checks": [
+    {
+      "id": "NW04.stream-continues-while-typing",
+      "ok": false,
+      "detail": "591 -> 193"
+    },
+    {
+      "id": "NW04.draft-and-focus-preserved",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "NW06.stop-settles-with-partial-content",
+      "ok": true,
+      "detail": "stopped=true, partial=19"
+    },
+    {
+      "id": "NW06.same-session-continues",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "NW05.queue-indicator",
+      "ok": true,
+      "detail": "queue UI visible"
+    },
+    {
+      "id": "NW05.queued-turn-runs-after-current",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "NW07.refresh-restores-session",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "NW07.no-duplicate-messages",
+      "ok": true,
+      "detail": "userBubbles=1"
+    },
+    {
+      "id": "NW21.native-shell-intact",
+      "ok": true,
+      "detail": "71 labelled buttons"
+    },
+    {
+      "id": "NW21.no-console-errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "errors": []
+}

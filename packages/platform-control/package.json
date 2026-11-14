@@ -6,7 +6,8 @@
   "main": "./lib/index.js",
   "exports": {
     ".": "./lib/index.js",
-    "./cordis": "./lib/cordis.js"
+    "./cordis": "./lib/cordis.js",
+    "./http": "./lib/http.js"
   },
   "files": ["lib", "cordis.patch.yml", "README.md"],
   "description": "应用发布注册、确定性执行计划绑定、持久运行与审计的平台控制面 bundle；不执行应用代码。",
@@ -14,6 +15,7 @@
   "engines": { "node": ">=24.9.0" },
   "scripts": {
     "build": "node build.mjs",
+    "serve:workbench": "tsx src/api-cli.ts",
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run test && npm run build"
@@ -27,6 +29,7 @@
     "@deepseek-ai/dsh-sdk-client": { "optional": true }
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-sdk-client": "link:../../upstream/deepseek-harness-git/packages/sdk/client",
     "@deepseek-ai/cordis": "link:../../upstream/deepseek-harness-git/vendor/cordis",
     "@deepseek-ai/dsh-tools": "link:../../upstream/deepseek-harness-git/packages/core/tools",
     "@deepseek-ai/dsh-system-prompt": "link:../../upstream/deepseek-harness-git/packages/core/system-prompt",

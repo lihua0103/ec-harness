@@ -1,0 +1,22 @@
+{
+  "at": "2026-11-12T07:57:32.390Z",
+  "mode": "enabled",
+  "checks": [
+    {
+      "name": "enabled: the 工作台 navigation entry exists",
+      "ok": true,
+      "detail": "1"
+    },
+    {
+      "name": "enabled: the EMERALD brand mark is present",
+      "ok": true,
+      "detail": "1"
+    },
+    {
+      "name": "enabled: the full page renders with its own scoped styles",
+      "ok": true,
+      "detail": "{\"pageScope\":1,\"styleTags\":1}"
+    }
+  ],
+  "errors": []
+}

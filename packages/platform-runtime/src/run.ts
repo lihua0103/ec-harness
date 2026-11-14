@@ -1,6 +1,6 @@
 /** Minimal run lifecycle kernel: CAS transitions, persistent cancel intent, fencing token,
  *  completion barrier. It is pure state; process supervision and worker startup live outside. */
-export type RunState = 'QUEUED' | 'STARTING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+export type RunState = 'QUEUED' | 'STARTING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'UNKNOWN';
 export interface CompletionBarrier {
   inputsSettled: boolean;
   descendantsDone: boolean;
@@ -24,15 +24,16 @@ export type RunEvent =
   | { type: 'barrier'; barrier: CompletionBarrier }
   | { type: 'finish' }
   | { type: 'fail'; reason: string }
+  | { type: 'unknown'; reason: string }
   | { type: 'cancel-settled' };
 export class RunError extends Error {
   constructor(readonly code: string, message?: string) {
     super(message ?? code);
   }
 }
-const states: readonly RunState[] = ['QUEUED', 'STARTING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED'];
+const states: readonly RunState[] = ['QUEUED', 'STARTING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'UNKNOWN'];
 const terminal = (state: RunState): boolean =>
-  state === 'SUCCEEDED' || state === 'FAILED' || state === 'CANCELLED';
+  state === 'SUCCEEDED' || state === 'FAILED' || state === 'CANCELLED' || state === 'UNKNOWN';
 const emptyBarrier = (): CompletionBarrier => ({
   inputsSettled: false,
   descendantsDone: false,
@@ -102,6 +103,11 @@ export function transition(current: RunSnapshot, event: RunEvent): RunSnapshot {
     case 'fail':
       if (!event.reason.trim()) throw new RunError('RUN_FAILURE_REASON_REQUIRED');
       next.state = 'FAILED';
+      next.reason = event.reason;
+      break;
+    case 'unknown':
+      if (!event.reason.trim()) throw new RunError('RUN_UNKNOWN_REASON_REQUIRED');
+      next.state = 'UNKNOWN';
       next.reason = event.reason;
       break;
     case 'cancel-settled':

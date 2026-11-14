@@ -32,10 +32,12 @@ const validateWorker = (value: unknown): WorkerConfig => {
         'patches',
         'provider',
         'model',
+        'adapter',
         'maxTokens',
         'timeoutMs',
         'initializeTimeoutMs',
         'shutdownTimeoutMs',
+        'runtimeBundleDigest',
       ].includes(key)
     ) {
       throw new PlatformError('PLATFORM_CONFIG_INVALID', `worker.${key}`);
@@ -50,6 +52,9 @@ const validateWorker = (value: unknown): WorkerConfig => {
   if (typeof worker.workspace !== 'string' || !isAbsolute(worker.workspace)) {
     throw new PlatformError('PLATFORM_CONFIG_INVALID', 'worker.workspace');
   }
+  if (typeof worker.runtimeBundleDigest !== 'string' || !/^[a-f0-9]{64}$/.test(worker.runtimeBundleDigest)) {
+    throw new PlatformError('PLATFORM_CONFIG_INVALID', 'worker.runtimeBundleDigest');
+  }
   let patches: string[] | undefined;
   if (worker.patches !== undefined) {
     if (
@@ -61,7 +66,7 @@ const validateWorker = (value: unknown): WorkerConfig => {
     }
     patches = worker.patches.map((patch) => String(patch).trim());
   }
-  for (const key of ['provider', 'model'] as const) {
+  for (const key of ['provider', 'model', 'adapter'] as const) {
     if (
       worker[key] !== undefined &&
       (typeof worker[key] !== 'string' || !worker[key].trim() || worker[key].length > 200)
@@ -78,9 +83,11 @@ const validateWorker = (value: unknown): WorkerConfig => {
     profile: worker.profile,
     dshHome: worker.dshHome,
     workspace: worker.workspace,
+    runtimeBundleDigest: worker.runtimeBundleDigest,
     ...(patches !== undefined ? { patches } : {}),
     ...(worker.provider !== undefined ? { provider: String(worker.provider) } : {}),
     ...(worker.model !== undefined ? { model: String(worker.model) } : {}),
+    ...(worker.adapter !== undefined ? { adapter: String(worker.adapter) } : {}),
     ...(worker.maxTokens !== undefined ? { maxTokens: Number(worker.maxTokens) } : {}),
     ...(worker.timeoutMs !== undefined ? { timeoutMs: Number(worker.timeoutMs) } : {}),
     ...(worker.initializeTimeoutMs !== undefined ? { initializeTimeoutMs: Number(worker.initializeTimeoutMs) } : {}),

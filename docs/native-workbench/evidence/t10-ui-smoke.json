@@ -1,0 +1,101 @@
+{
+  "at": "2026-11-12T08:08:45.359Z",
+  "checks": [
+    {
+      "name": "workbench panel opens",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "seeded works are listed",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "pending question is discoverable",
+      "ok": true,
+      "detail": "待处理（1）"
+    },
+    {
+      "name": "model default section is present",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "new-work entry is present",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "new-work form offers real projects/spaces/apps",
+      "ok": true,
+      "detail": "1/2/2"
+    },
+    {
+      "name": "created work opens its detail page",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "unbound work explains the missing session",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "draft saves with a revision",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "draft reloads from the control plane",
+      "ok": true,
+      "detail": "草稿文本-T12：先整理方案，再核对批次。"
+    },
+    {
+      "name": "draft can seed the run target",
+      "ok": true,
+      "detail": "草稿文本-T12：先整理方案，再核对批次"
+    },
+    {
+      "name": "run launcher offers catalog models",
+      "ok": true,
+      "detail": "model.synthetic-a,model.synthetic-b"
+    },
+    {
+      "name": "run is recorded in run history",
+      "ok": true,
+      "detail": "运行历史（1）"
+    },
+    {
+      "name": "new run is not claimed to be running",
+      "ok": true,
+      "detail": "已排队"
+    },
+    {
+      "name": "two runs and two batches remain readable",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "older run artifacts are still listed",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "pending question is answered once",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "pending count drops after the answer",
+      "ok": true,
+      "detail": "待处理（0）"
+    },
+    {
+      "name": "no unexpected page errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "errors": []
+}

@@ -1,0 +1,60 @@
+{
+  "title": "AI 工作区 · EMERALD DSH AI 平台",
+  "nav": [
+    "AI 工作区",
+    "项目空间",
+    "工作记录",
+    "应用中心",
+    "成果文件",
+    "平台设置"
+  ],
+  "h1": [
+    "今天，需要 AI 协助什么工作？"
+  ],
+  "recent": [],
+  "roots": {
+    "ink": "#173f4b",
+    "muted": "#657b83",
+    "primary": "#004b61",
+    "green": "#087b60",
+    "paper": "#f4f7f8",
+    "line": "#dfe8eb",
+    "soft": "#edf5f4",
+    "amber": "#895b17",
+    "danger": "#a6424b",
+    "font": "\"Segoe UI\", \"Microsoft YaHei\", DengXian, sans-serif",
+    "fontSize": "14px",
+    "lineHeight": "23.1px"
+  },
+  "sidebar": {
+    "width": "232px",
+    "padding": "28px 17px 0px",
+    "background": "rgb(255, 255, 255)",
+    "border": "1px solid rgb(223, 232, 235)"
+  },
+  "topbar": {
+    "height": "65px",
+    "padding": "0px 30px",
+    "background": "rgb(255, 255, 255)",
+    "border": "1px solid rgb(223, 232, 235)"
+  },
+  "h1style": {
+    "size": "29px",
+    "lineHeight": "40.6px",
+    "spacing": "-0.4px",
+    "color": "rgb(23, 63, 75)"
+  },
+  "navItem": {
+    "padding": "11px 13px",
+    "radius": "7px",
+    "fontSize": "13px",
+    "color": "rgb(0, 75, 97)"
+  },
+  "newTask": {
+    "height": "43px",
+    "radius": "8px",
+    "background": "rgb(248, 252, 251)",
+    "border": "1px solid rgb(191, 215, 216)",
+    "fontWeight": "600"
+  }
+}

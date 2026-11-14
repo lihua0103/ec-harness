@@ -1,0 +1,88 @@
+{
+  "at": "2026-11-12T08:07:39.144Z",
+  "workId": "04c6157e-3cda-4eb5-aa3d-08b930a210c9",
+  "sessionId": "session-ebc48efa-27b6-4162-a937-928cec9c5ae1",
+  "checks": [
+    {
+      "name": "a real native session is addressed",
+      "ok": true,
+      "detail": "session-ebc48efa-27b6-4162-a937-928cec9c5ae1（复用当前会话）"
+    },
+    {
+      "name": "bootstrap gives project/space/app/domain",
+      "ok": true,
+      "detail": "true/true/true/true"
+    },
+    {
+      "name": "work is created through the same-origin proxy",
+      "ok": true,
+      "detail": "201"
+    },
+    {
+      "name": "native session binds to the work",
+      "ok": true,
+      "detail": "201"
+    },
+    {
+      "name": "opening the work returns to the bound native session",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "the post-binding native prompt produced an enterprise submission",
+      "ok": true,
+      "detail": "1"
+    },
+    {
+      "name": "pre-binding history is not backfilled as enterprise submissions",
+      "ok": true,
+      "detail": "1"
+    },
+    {
+      "name": "every submission is consumed, not merely recorded",
+      "ok": true,
+      "detail": "CONSUMED"
+    },
+    {
+      "name": "submissions carry distinct native request ids",
+      "ok": true,
+      "detail": "c20948cd"
+    },
+    {
+      "name": "submissions address the bound session",
+      "ok": true,
+      "detail": "session-ebc48efa-27b6-4162-a937-928cec9c5ae1"
+    },
+    {
+      "name": "submitter is the authenticated principal",
+      "ok": true,
+      "detail": "session:local-workbench"
+    },
+    {
+      "name": "correlation observed at least the post-binding prompt",
+      "ok": true,
+      "detail": "session-event:24:user/message"
+    },
+    {
+      "name": "no unexpected page errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "errors": [],
+  "consoleLog": [
+    "info: [platform-workbench] watch requested for 04c6157e-3cda-4eb5-aa3d-08b930a210c9/session-ebc48efa-27b6-4162-a937-928cec9c5ae1",
+    "info: [platform-workbench] observing submissions for session-ebc48efa-27b6-4162-a937-928cec9c5ae1",
+    "info: [platform-workbench] submission c20948cd-1929-4107-a218-7c1a4d02e67d: consumed"
+  ],
+  "submissions": [
+    {
+      "submissionId": "aa1272d6-8c28-4a5c-931e-08553b59ab08",
+      "requestId": "c20948cd-1929-4107-a218-7c1a4d02e67d",
+      "state": "CONSUMED",
+      "admission": "session-event:24:user/message",
+      "submittedBy": "session:local-workbench",
+      "sessionId": "session-ebc48efa-27b6-4162-a937-928cec9c5ae1"
+    }
+  ]
+}

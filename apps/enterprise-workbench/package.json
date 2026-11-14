@@ -1,0 +1,15 @@
+{
+  "name": "@ec-clinical/enterprise-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/state.mjs",
+  "exports": {
+    "./state": "./src/state.mjs"
+  },
+  "description": "EMERALD 企业工作台正式前端：工作、运行、模型目录与成果的最小纵向切片。",
+  "engines": { "node": ">=24.9.0" },
+  "scripts": {
+    "verify": "node verify.mjs"
+  }
+}

@@ -231,7 +231,7 @@ export function apply(ctx: Context): void {
     defineTool({
       name: 'dm_listing_describe_dataset',
       description:
-        '用本机R读取CSV/RDS/RData/sas7bdat/xpt，或加密zip数据包：按已交付程序的候选顺序自动推导密码（显式→项目目录分词→zip旁sidecar txt→zip文件名分词→文档名→无密码；ZipCrypto进程内解密，AES需本机7z），返回对象名、行列、列类型与样本，失败返回真实R诊断。需要操作者R配置。',
+        '用本机R读取CSV/RDS/RData/sas7bdat/xpt，或加密zip数据包：按已交付程序的候选顺序自动推导密码（显式→项目目录分词→zip旁sidecar txt→zip文件名分词→文档名→无密码；ZipCrypto进程内解密，AES需本机7z），返回对象名、行列、列类型、样本及列级统计（每列NA计数、字符列空串计数、可数值化列的min/max/mean，均由R对实际数据计算），失败返回真实R诊断。需要操作者R配置。',
       parameters: {
         path: { ...string_type, required: true },
         maxRows: { type: 'number' },

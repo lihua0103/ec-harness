@@ -1,0 +1,141 @@
+{
+  "dryRun": true,
+  "generatedAt": "2026-11-12T09:10:40.546Z",
+  "controlStore": {
+    "status": "OK",
+    "counts": {
+      "projects": 1,
+      "project_workspaces": 1,
+      "works": 7,
+      "runs": 0,
+      "run_inputs": 0,
+      "run_artifacts": 0,
+      "run_events": 0,
+      "run_interactions": 0,
+      "audit_events": 19,
+      "work_drafts": 0,
+      "work_session_bindings": 7,
+      "submissions": 0,
+      "execution_domains": 1,
+      "input_baselines": 0,
+      "app_releases": 1,
+      "model_catalog": 1
+    },
+    "works": [
+      {
+        "workId": "0b6377d3-9bb2-4ea5-9a2f-9d044849b3a0",
+        "title": "A 方案返回工作台 722444",
+        "appId": "ec.synthetic.probe",
+        "appVersion": "1.0.0",
+        "state": "ACTIVE",
+        "projectId": "472a8939-afa0-4c37-b4ce-6486b4b43182",
+        "sessionId": "session-adb80e5b-a185-4fed-aa32-d872e888c6bb",
+        "domainId": "f0500292-2b06-4c3e-b3b0-4c4bdebbf965",
+        "runs": 0,
+        "artifacts": 0,
+        "decision": "verified-session"
+      },
+      {
+        "workId": "32622f1b-0b0d-45c9-b0f9-a10448515cc7",
+        "title": "A 方案返回工作台 685224",
+        "appId": "ec.synthetic.probe",
+        "appVersion": "1.0.0",
+        "state": "ACTIVE",
+        "projectId": "472a8939-afa0-4c37-b4ce-6486b4b43182",
+        "sessionId": "session-9acd3665-51c1-44e2-a084-a866e4a5c8ef",
+        "domainId": "f0500292-2b06-4c3e-b3b0-4c4bdebbf965",
+        "runs": 0,
+        "artifacts": 0,
+        "decision": "verified-session"
+      },
+      {
+        "workId": "893697d1-5064-4e09-b777-3fb1fb9244d9",
+        "title": "A 方案返回工作台 658024",
+        "appId": "ec.synthetic.probe",
+        "appVersion": "1.0.0",
+        "state": "ACTIVE",
+        "projectId": "472a8939-afa0-4c37-b4ce-6486b4b43182",
+        "sessionId": "session-011a236c-7bfd-4ee5-af99-49ffc93206c6",
+        "domainId": "f0500292-2b06-4c3e-b3b0-4c4bdebbf965",
+        "runs": 0,
+        "artifacts": 0,
+        "decision": "verified-session"
+      },
+      {
+        "workId": "9152c6a2-f553-4a1f-9784-ffb87d411509",
+        "title": "A 方案返回工作台 862356",
+        "appId": "ec.synthetic.probe",
+        "appVersion": "1.0.0",
+        "state": "ACTIVE",
+        "projectId": "472a8939-afa0-4c37-b4ce-6486b4b43182",
+        "sessionId": "session-297c5d3b-55bd-429d-acec-62978ec78a43",
+        "domainId": "f0500292-2b06-4c3e-b3b0-4c4bdebbf965",
+        "runs": 0,
+        "artifacts": 0,
+        "decision": "verified-session"
+      },
+      {
+        "workId": "a99a5477-b65b-4eff-a21d-3125ac9404d8",
+        "title": "A 方案返回工作台 785824",
+        "appId": "ec.synthetic.probe",
+        "appVersion": "1.0.0",
+        "state": "ACTIVE",
+        "projectId": "472a8939-afa0-4c37-b4ce-6486b4b43182",
+        "sessionId": "session-a28e82de-c89e-45a4-86a3-3d1425a661c8",
+        "domainId": "f0500292-2b06-4c3e-b3b0-4c4bdebbf965",
+        "runs": 0,
+        "artifacts": 0,
+        "decision": "verified-session"
+      },
+      {
+        "workId": "cfda6c3f-2ba7-49f0-a2cd-9a2960b61c35",
+        "title": "A 方案返回工作台 829485",
+        "appId": "ec.synthetic.probe",
+        "appVersion": "1.0.0",
+        "state": "ACTIVE",
+        "projectId": "472a8939-afa0-4c37-b4ce-6486b4b43182",
+        "sessionId": "session-f00275d3-224f-456b-94bc-9f0b0b0bd1e3",
+        "domainId": "f0500292-2b06-4c3e-b3b0-4c4bdebbf965",
+        "runs": 0,
+        "artifacts": 0,
+        "decision": "verified-session"
+      },
+      {
+        "workId": "f194a2cb-97c3-4772-858c-1ceecd072e29",
+        "title": "A 方案返回工作台 597663",
+        "appId": "ec.synthetic.probe",
+        "appVersion": "1.0.0",
+        "state": "ACTIVE",
+        "projectId": "472a8939-afa0-4c37-b4ce-6486b4b43182",
+        "sessionId": "session-99080b38-115b-481b-83e8-a51ab032266a",
+        "domainId": "f0500292-2b06-4c3e-b3b0-4c4bdebbf965",
+        "runs": 0,
+        "artifacts": 0,
+        "decision": "verified-session"
+      }
+    ],
+    "unboundWorks": 0,
+    "decisions": {
+      "verifiedSession": 7,
+      "readOnly": 0,
+      "unknownSession": 0
+    },
+    "digest": "a50557a5c093471b85833676149a5cf75351d0867d7ea2b7175c426884560a4c"
+  },
+  "browserStorage": {
+    "kind": "none",
+    "projects": 0,
+    "works": 0,
+    "inputs": 0,
+    "messages": 0,
+    "drafts": 0,
+    "readOnlyWorks": 0,
+    "recovery": 0
+  },
+  "notes": [
+    "dry-run：未创建、更新或删除任何记录。",
+    "旧 Work 没有原生 Session 关联时只能只读展示；必须由用户确认后才创建带来源的新 Session。",
+    "内存中的活动记录不在运行正文中，迁移不补造历史事件。",
+    "迁移判定：可验证 Session 7 个；无 Session 只读保留 0 个；Session 未知 0 个。"
+  ]
+}

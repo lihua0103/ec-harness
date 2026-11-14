@@ -1,0 +1,10 @@
+{
+  "at": "2026-11-12T07:53:00.828Z",
+  "checks": [
+    {
+      "name": "phase b completed",
+      "ok": false,
+      "detail": "page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at http://127.0.0.1:3095/?token=\nCall log:\n\u001b[2m  - navigating to \"http://127.0.0.1:3095/?token=\", waiting until \"domcontentloaded\"\u001b[22m\n"
+    }
+  ]
+}

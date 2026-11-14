@@ -1,0 +1,145 @@
+{
+ "total": 18,
+ "failed": 0,
+ "results": [
+  {
+   "name": "synthetic catalogue already present",
+   "ok": true,
+   "detail": {
+    "existing": 42
+   }
+  },
+  {
+   "name": "queue toolbar renders search plus state and sort selects",
+   "ok": "排序方式",
+   "detail": {
+    "search": true,
+    "selects": [
+     "按状态筛选",
+     "排序方式"
+    ]
+   }
+  },
+  {
+   "name": "a partial catalogue is labelled and offers a full load",
+   "ok": true,
+   "detail": {
+    "partialBefore": "42 项工作 · 已加载 50/56加载全部 56 项后再搜索"
+   }
+  },
+  {
+   "name": "explicit load pulls every page and drops the partial label",
+   "ok": true,
+   "detail": {
+    "rows": 56,
+    "foot": "筛选出 56 项运行记录由平台持续更新"
+   }
+  },
+  {
+   "name": "search finds a Work by title and reports the filtered count",
+   "ok": true,
+   "detail": {
+    "titles": [
+     "季度方案整理（合成演示）"
+    ],
+    "foot": "筛选出 1 项运行记录由平台持续更新",
+    "clear": true
+   }
+  },
+  {
+   "name": "search also matches the application name",
+   "ok": true
+  },
+  {
+   "name": "search also matches the project name",
+   "ok": true
+  },
+  {
+   "name": "a dead-end search over the full set explains itself and offers a reset",
+   "ok": true,
+   "detail": {
+    "text": "没有匹配的工作。换个关键词，或放宽状态筛选。清除筛选查看已归档 10 项",
+    "actions": [
+     "清除筛选",
+     "查看已归档 10 项"
+    ]
+   }
+  },
+  {
+   "name": "clearing the filter restores the queue",
+   "ok": true
+  },
+  {
+   "name": "title order is applied live",
+   "ok": true,
+   "detail": {
+    "sample": [
+     "等待答复的工作（合成演示）",
+     "季度方案整理（合成演示）",
+     "DVP 修订（合成演示）"
+    ]
+   }
+  },
+  {
+   "name": "project order is applied without losing rows",
+   "ok": true,
+   "detail": {
+    "rows": 46
+   }
+  },
+  {
+   "name": "archived filter shows the archived work",
+   "ok": true,
+   "detail": {
+    "archivedRows": 10,
+    "archivedStates": [
+     "已归档",
+     "已归档",
+     "已归档",
+     "已归档"
+    ]
+   }
+  },
+  {
+   "name": "all-state filter is a superset of the archived view",
+   "ok": true,
+   "detail": {
+    "allRows": 56,
+    "archivedRows": 10
+   }
+  },
+  {
+   "name": "a reload returns to the labelled partial list",
+   "ok": true,
+   "detail": {
+    "partialAfterReload": "42 项工作 · 已加载 50/56加载全部 56 项后再搜索"
+   }
+  },
+  {
+   "name": "the first search loads the rest, so a match beyond page one is never missed",
+   "ok": true,
+   "detail": {
+    "autoFoot": "筛选出 1 项运行记录由平台持续更新"
+   }
+  },
+  {
+   "name": "toolbar stays usable at 390px without overflow",
+   "ok": true,
+   "detail": {
+    "overflowX": 0,
+    "searchWidth": 336,
+    "toolsWrap": "wrap"
+   }
+  },
+  {
+   "name": "no runtime errors",
+   "ok": true,
+   "detail": []
+  },
+  {
+   "name": "no failed requests",
+   "ok": true,
+   "detail": []
+  }
+ ]
+}

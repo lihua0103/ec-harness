@@ -1,0 +1,22 @@
+{
+  "at": "2026-11-12T08:08:56.978Z",
+  "scope": "enterprise run model snapshot + per-user default preference; native model menu has one routed model",
+  "runId": "e59bf35a-8d08-446a-bef5-22b44174658d",
+  "before": {
+    "selectionId": "model.synthetic-a",
+    "provider": "synthetic-provider",
+    "model": "model-a",
+    "source": "explicit"
+  },
+  "preference": {
+    "selectionId": "model.synthetic-b",
+    "state": "available"
+  },
+  "after": {
+    "selectionId": "model.synthetic-a",
+    "provider": "synthetic-provider",
+    "model": "model-a",
+    "source": "explicit"
+  },
+  "frozen": true
+}

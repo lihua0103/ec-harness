@@ -1,0 +1,46 @@
+{
+  "at": "2026-11-12T09:50:03.584Z",
+  "checks": [
+    {
+      "name": "platform page starts at x=0",
+      "ok": true,
+      "detail": "{\"x\":0,\"width\":1440}"
+    },
+    {
+      "name": "native sidebar is hidden on platform page",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "opening a work shows the native conversation",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "conversation header offers 返回工作台",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "native sidebar is restored in conversation mode",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "返回工作台 restores the full platform page",
+      "ok": true,
+      "detail": "{\"x\":0,\"width\":1440}"
+    },
+    {
+      "name": "native sidebar is hidden again",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "no unexpected page errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "errors": []
+}

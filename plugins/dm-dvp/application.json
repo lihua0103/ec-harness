@@ -1,0 +1,8 @@
+{
+  "appId": "ec.dvp",
+  "displayName": "DVP 数据核查计划",
+  "description": "根据方案和公司模板形成或修订数据核查规则、问题清单与测试用例候选。输出需业务复核，不代表已在 EDC 实施或通过 UAT。",
+  "materialRoles": ["研究方案", "DVP 模板", "数据库结构（如有）", "已有规则（可选）"],
+  "resultTypes": ["DVP 候选工作簿", "规则诊断", "用例候选"],
+  "capabilityId": "ec.dvp.develop"
+}

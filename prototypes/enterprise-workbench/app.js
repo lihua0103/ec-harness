@@ -2,11 +2,15 @@ import { applications as catalog, defaults, findApplication, searchApplications,
 import {
   MAX_FILES, activeInput, addFiles, appendMessage, archiveWork, continueWork, createWork, editable,
   freshState, getDraft, previewMarkdown, previewResults, removeFile, saveProject, selectContext,
-  setDraftPrompt, setReply, toggleFavorite,
+  setDefaultModel, setDraftModel, setDraftPrompt, setReply, setWorkModel, toggleFavorite,
 } from './model.mjs';
 import {
   KEY, downloadBackup, loadFrom, matchesWork, storedRevision, writeNow,
 } from './storage.mjs';
+import {
+  findModel, formatContext, groupedModels, modalityLabel, modelAvailability, modelLabel, models as modelCatalog,
+  reasoningLabel, verificationLabel,
+} from './models.mjs';
 
 const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -26,6 +30,8 @@ const icons = {
   star: '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/>',
   close: '<path d="m6 6 12 12M6 18 18 6"/>',
+  spark: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8"/>',
+  chevron: '<path d="m6 9 6 6 6-6"/>',
 };
 const icon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.file}</svg>`;
 const NAV = [['workspace', 'AI 工作区'], ['projects', '项目空间'], ['tasks', '工作记录'], ['applications', '应用中心'], ['results', '成果文件'], ['settings', '平台设置']];
@@ -155,35 +161,52 @@ function composer(thread = false) {
   }
   const value = work ? work.replyDraft : currentDraft().prompt;
   const options = work ? activeInput(work).options : currentDraft().options;
+  const modelId = work ? activeInput(work).modelId : currentDraft().modelId;
+  const modelState = modelAvailability(modelId);
+  const modelAttention = modelState.state !== 'available';
   return `<form id="work-form" class="${thread ? 'thread-composer' : ''}">${thread ? '' :
     `<div class="context-app"><div><span class="scope-label">当前应用</span><strong>${escapeHtml(app.displayName)}</strong><small>${escapeHtml(app.description)}</small></div><button type="button" class="button" data-action="pick-app">更换应用</button></div>${renderOptions(app, options)}`}
-  <div class="composer"><textarea id="prompt" aria-label="${thread ? '补充工作要求' : '描述工作要求'}" maxlength="10000" placeholder="${escapeHtml(thread ? '补充要求、说明修改意见，或向 AI 提问…' : app.placeholder)}">${escapeHtml(value)}</textarea><div id="prompt-error" class="inline-error" role="alert" hidden></div><div class="composer-footer"><div class="composer-tools"><button type="button" class="attach-button" data-action="attach">${icon('attach')} 添加资料</button><button type="button" class="text-button" data-action="samples">使用示例资料</button></div><button type="submit" class="button primary">${thread ? '保存补充' : '保存工作草稿'} ${icon('check')}</button></div></div>
-  <p class="composer-hint">${thread ? '补充要求保存在本项工作，形成新的输入修订。' : '资料可以稍后补充；保存后会出现在工作记录中。'} 当前 DSH 未接入，只保存草稿，不调用模型或执行工具。</p></form>`;
+  <div class="composer"><textarea id="prompt" aria-label="${thread ? '补充工作要求' : '描述工作要求'}" maxlength="10000" placeholder="${escapeHtml(thread ? '补充要求、说明修改意见，或向 AI 提问…' : app.placeholder)}">${escapeHtml(value)}</textarea><div id="prompt-error" class="inline-error" role="alert" hidden></div><div class="composer-footer"><div class="composer-tools"><button type="button" class="model-button ${modelAttention ? 'needs-attention' : ''}" data-action="pick-model" aria-haspopup="dialog" aria-label="选择模型，当前 ${escapeHtml(modelLabel(modelId))}">${icon('spark')}<span>${escapeHtml(modelLabel(modelId))}</span>${icon('chevron')}</button><button type="button" class="attach-button" data-action="attach">${icon('attach')} 添加资料</button><button type="button" class="text-button" data-action="samples">使用示例资料</button></div><button type="submit" class="button primary">${thread ? '保存补充' : '保存工作草稿'} ${icon('check')}</button></div></div>
+  <p class="model-status ${modelState.state}" role="${modelAttention ? 'alert' : 'note'}">${icon('info')}<span>${escapeHtml(modelState.label)}${modelAttention ? ' — ' + escapeHtml(modelState.reason) : ''}</span></p>
+  <p class="composer-hint">${thread ? '补充要求保存在本项工作，形成新的输入修订。' : '资料可以稍后补充；保存后会出现在工作记录中。'} 切换模型只影响新的输入修订和下一次执行；当前 DSH 未接入，只保存草稿，不调用模型或执行工具。</p></form>`;
 }
 function resourcePanel(target = selectionTarget()) {
   const app = appOf(target); const input = inputOf(target); const project = projectOf(target); const work = currentWork();
   const canEdit = !work || editable(work, catalog);
   const previews = work?.resultPreviews || [];
+  const modelState = modelAvailability(input.modelId);
   return `<aside class="resource-panel" aria-label="资料与成果"><div class="resource-head"><h2>工作资料 <span class="muted">${input.files.length || ''}</span></h2>${canEdit ? '<button class="text-button" data-action="attach">添加</button>' : ''}</div><p class="resource-intro">${escapeHtml(app.materialRoles.join('、'))}。本原型只记录文件名，不读取内容。</p>${input.files.length ? input.files.map((file, i) => `<div class="file-row">${icon('file')}<div class="file-copy"><div class="file-name">${escapeHtml(file.name)}</div><small>${escapeHtml(file.role)} · ${file.source === 'sample' ? '示例' : '仅文件名'}</small></div>${canEdit ? `<button class="remove-file" data-remove="${i}" aria-label="移除 ${escapeHtml(file.name)}">×</button>` : ''}</div>`).join('') : `<div class="resource-empty">${icon('file')}尚未添加工作资料<br>${canEdit ? '<button class="text-button" data-action="samples">载入示例资料</button>' : '历史资料未记录'}</div>`}
   <div class="resource-section"><div class="resource-head"><h3>项目上下文</h3><button class="text-button" data-action="project-settings">查看</button></div>${project ? `<dl class="project-details"><dt>项目</dt><dd>${escapeHtml(project.name || '未记录')} / ${escapeHtml(project.code || '未记录')}</dd><dt>目录</dt><dd>${escapeHtml(project.directory || '未设置')}</dd>${app.options.some(o => o.key === 'listingType') ? `<dt>批次</dt><dd>${escapeHtml(project.batch || '未设置')}</dd>` : ''}</dl>${target?.inputs && target.contextOrigin === 'legacy-project' ? '<p class="context-note">旧版记录只关联了项目，未保存创建时快照；此处显示当前项目配置，不代表当时配置。</p>' : ''}` : '<p class="context-note">这项旧记录没有保存项目快照，当前上下文未知。</p>'}</div>
+  <div class="resource-section"><div class="resource-head"><h3>执行模型</h3>${canEdit ? '<button class="text-button" data-action="pick-model">切换</button>' : ''}</div><p class="model-line"><strong>${escapeHtml(modelLabel(input.modelId))}</strong></p><p class="model-line-note ${modelState.state}">${escapeHtml(modelState.label)}${modelState.state === 'available' ? '' : ' · ' + escapeHtml(modelState.reason)}</p><p class="model-line-note">切换只影响新的输入修订和下一次执行；已记录的结果保留原模型。</p></div>
   <div class="resource-section"><h3>${previews.length ? '结果与依据' : '预期成果'}</h3><div class="output-types">${app.resultTypes.map(x => `<span>${escapeHtml(x)}</span>`).join('')}</div>${previews.length ? previews.slice().reverse().map(p => `<div class="preview-link"><span>输入修订 ${p.inputRevision}${p.legacy ? ' · 旧版记录' : ''}</span><button class="text-button" data-download="${escapeHtml(p.id)}">下载原型说明</button></div>`).join('') : '<p>结果样式尚未记录。当前没有真实生成业务文件。</p>'}</div>
   <div class="engine-disclaimer">${icon('info')}<span>原型环境<br>不上传文件，不调用模型；示例结果不是业务交付。</span></div></aside>`;
 }
 function planCard(work) {
   const app = work.appSnapshot; const canEdit = editable(work, catalog);
   const preview = work.resultPreviews.find(p => p.inputRevision === activeInput(work).revision);
-  return `<div class="plan-card"><h2>工作方案</h2><p>原型预设方案，尚未由 DSH 分析或执行。</p><div class="plan-list">${app.plan.map(step => `<div class="plan-row">${icon('check')}<div>${escapeHtml(step)}</div></div>`).join('')}</div><div class="plan-actions">${canEdit && !preview ? `<button class="button primary" data-preview="${escapeHtml(work.id)}">查看结果样式</button><small>不启动真实任务，仅记录界面预览</small>` : preview ? `<button class="button" data-download="${escapeHtml(preview.id)}">下载原型说明</button><small>仅说明原型交互，不是业务文件</small>` : '<small>归档记录不可新增结果预览。</small>'}</div></div>`;
+  const nextModel = modelAvailability(activeInput(work).modelId);
+  return `<div class="plan-card"><h2>工作方案</h2><p>原型预设方案，尚未由 DSH 分析或执行。下一次执行将使用 ${escapeHtml(modelLabel(activeInput(work).modelId))}${nextModel.state === 'available' ? '' : `（${escapeHtml(nextModel.label)}）`}。</p><div class="plan-list">${app.plan.map(step => `<div class="plan-row">${icon('check')}<div>${escapeHtml(step)}</div></div>`).join('')}</div><div class="plan-actions">${canEdit && !preview ? `<button class="button primary" data-preview="${escapeHtml(work.id)}">查看结果样式</button><small>不启动真实任务，仅记录界面预览</small>` : preview ? `<button class="button" data-download="${escapeHtml(preview.id)}">下载原型说明</button><small>仅说明原型交互，不是业务文件</small>` : '<small>归档记录不可新增结果预览。</small>'}</div></div>`;
 }
 function previewCards(work) {
   if (!work.resultPreviews.length) return '';
-  return work.resultPreviews.slice().reverse().map(preview => `<div class="plan-card"><h2>结果样式 · 输入修订 ${preview.inputRevision}</h2><p>这一区域将承载实际工作成果。以下是合成示意，不存在可执行程序或工作簿文件。</p>${preview.types.map(title => `<div class="result-item">${icon('file')}<div><h3>${escapeHtml(title)}</h3><small>待真实生成</small></div><span class="status-badge">未生成</span></div>`).join('')}<div class="inline-note">${escapeHtml(work.appSnapshot.limitation)}</div></div>`).join('');
+  return work.resultPreviews.slice().reverse().map(preview => {
+    const input = work.inputs.find(i => i.revision === preview.inputRevision);
+    return `<div class="plan-card"><h2>结果样式 · 输入修订 ${preview.inputRevision}</h2><p class="preview-model">执行快照模型：${escapeHtml(modelLabel(input?.modelId))}。之后切换模型不会改写这条记录。</p><p>这一区域将承载实际工作成果。以下是合成示意，不存在可执行程序或工作簿文件。</p>${preview.types.map(title => `<div class="result-item">${icon('file')}<div><h3>${escapeHtml(title)}</h3><small>待真实生成</small></div><span class="status-badge">未生成</span></div>`).join('')}<div class="inline-note">${escapeHtml(work.appSnapshot.limitation)}</div></div>`;
+  }).join('');
 }
 function workspace() {
   const work = currentWork();
   if (work) {
     const input = activeInput(work); const app = work.appSnapshot;
     const options = app.options.map(o => `${o.label}：${input.options[o.key] ?? '未记录'}`).join(' / ');
-    return `<div class="workspace"><section class="conversation" aria-label="AI 工作区"><div class="context-bar"><div class="context-project">${icon('projects')}<span>${escapeHtml(work.projectSnapshot?.name || '项目上下文未记录')}</span></div><span class="context-tag">${work.archivedAt ? '归档记录 · 只读' : work.readOnlyReason ? '历史记录 · 只读' : '工作上下文已保存'}</span></div><div class="thread-heading"><h1>${escapeHtml(work.title)}</h1><p>${escapeHtml(app.displayName)} · ${escapeHtml(work.appVersion)} · ${escapeHtml(work.id)}${options ? ' · ' + escapeHtml(options) : ''}</p><div class="thread-tools">${statusBadge(work)}${work.archivedAt || work.readOnlyReason ? '<button class="text-button" data-action="continue-work">基于此工作新建</button>' : ''}<button class="text-button" data-action="new-task">新建工作</button>${editable(work, catalog) ? `<button class="text-button" data-archive="${escapeHtml(work.id)}">归档</button>` : ''}</div></div><div class="thread">${work.messages.map(message => `<article class="message ${message.role}"><span class="message-avatar">${message.role === 'user' ? '我' : 'AI'}</span><div class="message-body"><div class="message-meta"><strong>${message.role === 'user' ? '你' : 'DSH 助手'}</strong>${message.role === 'assistant' ? '原型预设内容' : `输入修订 ${message.inputRevision ?? 1}`}</div><div class="message-content">${escapeHtml(message.text)}</div></div></article>`).join('')}${planCard(work)}${previewCards(work)}</div>${composer(true)}</section>${resourcePanel(work)}</div>`;
+    const modelState = modelAvailability(input.modelId);
+    return `<div class="workspace"><section class="conversation" aria-label="AI 工作区"><div class="context-bar"><div class="context-project">${icon('projects')}<span>${escapeHtml(work.projectSnapshot?.name || '项目上下文未记录')}</span></div><span class="context-tag">${work.archivedAt ? '归档记录 · 只读' : work.readOnlyReason ? '历史记录 · 只读' : '工作上下文已保存'}</span></div><div class="thread-heading"><h1>${escapeHtml(work.title)}</h1><p>${escapeHtml(app.displayName)} · ${escapeHtml(work.appVersion)} · ${escapeHtml(work.id)}${options ? ' · ' + escapeHtml(options) : ''} · 模型 ${escapeHtml(modelLabel(input.modelId))}${modelState.state === 'available' ? '' : `（${escapeHtml(modelState.label)}）`}</p><div class="thread-tools">${statusBadge(work)}${work.archivedAt || work.readOnlyReason ? '<button class="text-button" data-action="continue-work">基于此工作新建</button>' : ''}<button class="text-button" data-action="new-task">新建工作</button>${editable(work, catalog) ? `<button class="text-button" data-archive="${escapeHtml(work.id)}">归档</button>` : ''}</div></div><div class="thread">${work.messages.map(message => {
+      const revisionInput = work.inputs.find(i => i.revision === (message.inputRevision ?? 1));
+      const meta = message.role === 'assistant'
+        ? '原型预设内容'
+        : `输入修订 ${escapeHtml(String(message.inputRevision ?? 1))}${revisionInput ? ' · ' + escapeHtml(modelLabel(revisionInput.modelId)) : ''}`;
+      return `<article class="message ${message.role}"><span class="message-avatar">${message.role === 'user' ? '我' : 'AI'}</span><div class="message-body"><div class="message-meta"><strong>${message.role === 'user' ? '你' : 'DSH 助手'}</strong>${meta}</div><div class="message-content">${escapeHtml(message.text)}</div></div></article>`;
+    }).join('')}${planCard(work)}${previewCards(work)}</div>${composer(true)}</section>${resourcePanel(work)}</div>`;
   }
   const app = currentApp(); const draft = currentDraft(); const project = currentProject();
   return `<div class="workspace"><section class="conversation" aria-label="AI 工作区"><div class="context-bar"><div class="context-project">${icon('projects')}<label><span class="skip-link">当前项目</span><select id="project-select" aria-label="当前项目">${state.projects.map(p => `<option value="${escapeHtml(p.id)}" ${project.id === p.id ? 'selected' : ''}>${escapeHtml(p.name)} / ${escapeHtml(p.code)}</option>`).join('')}</select></label></div><span class="context-tag">项目配置只影响新建工作</span></div><div class="welcome"><h1>今天，需要 AI 协助什么工作？</h1><p>在项目中开展业务工作。资料、沟通和成果留在同一个工作空间，不必记住插件或工具名称。</p></div>${composer()}<div class="suggestions">${app.suggestions.map((s, i) => `<button class="suggestion" data-suggestion="${i}"><span>${escapeHtml(s.title)}</span>${escapeHtml(s.text)}</button>`).join('')}</div><p class="workspace-footnote">${draft.sourceWorkId ? '当前草稿关联了一项历史工作；保存后会保留来源。' : '草稿按项目和应用分别保存，切换后可以继续。'}</p></section>${resourcePanel(draft)}</div>`;
@@ -212,8 +235,16 @@ function resultsPage() {
   const rows = state.works.flatMap(work => work.resultPreviews.map(preview => ({ work, preview }))).sort((a, b) => Date.parse(b.preview.createdAt) - Date.parse(a.preview.createdAt));
   return `<div class="view-page">${pageHeader('成果文件', '每份结果关联项目、工作和输入修订；生成、检查与审核不合并为同一状态。')}<div class="inline-note snapshot-note">原型环境：这里只能下载交互说明。尚未生成真实 R 程序、DVP 工作簿或 QC 报告。</div><div class="table-wrap"><table><thead><tr><th>关联工作</th><th>应用</th><th>输入修订</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows.map(({ work, preview }) => `<tr><td>${escapeHtml(work.title)}<small>${escapeHtml(work.projectSnapshot?.name || '项目未记录')}</small></td><td>${escapeHtml(work.appSnapshot.displayName)}</td><td>${preview.inputRevision}${preview.legacy ? '<small>旧版记录</small>' : ''}</td><td><span class="status-badge">示意内容 · 未实际生成</span></td><td><button class="text-button" data-download="${escapeHtml(preview.id)}">下载原型说明</button></td></tr>`).join('')}</tbody></table>${!rows.length ? '<div class="empty">还没有结果样式记录。<br>可先在工作区预览结果呈现方式。</div>' : ''}</div></div>`;
 }
+function modelSettingsPanel() {
+  const groups = groupedModels(modelCatalog);
+  const preferred = state.preferences.defaultModelId;
+  const preferredState = modelAvailability(preferred);
+  const unknownOption = !findModel(preferred)
+    ? `<option value="${escapeHtml(preferred)}" selected>不可用：${escapeHtml(preferred)}</option>` : '';
+  return `<section class="settings-panel"><h2>内置模型</h2><p>平台模型目录只列出经部署登记并接入的模型。员工可按工作选择，选择随输入修订保存并在执行时固定；默认模型只影响新建草稿，不覆盖已有工作的选择。当前 DSH 未接入，选择不会调用模型。新增提供方由平台目录贡献，不在页面写死。</p><div class="settings-row"><div>默认模型<p>新建工作草稿默认使用的模型，可在每项工作中单独更换。${preferredState.state === 'available' ? '' : `当前选择${escapeHtml(preferredState.label)}：${escapeHtml(preferredState.reason)}`}</p></div><select class="filter-select" id="default-model" aria-label="默认模型">${unknownOption}${modelCatalog.map(m => `<option value="${escapeHtml(m.id)}" ${preferred === m.id ? 'selected' : ''} ${m.availability === 'available' ? '' : 'disabled'}>${escapeHtml(m.name)}${m.availability === 'available' ? '' : '（不可用）'}</option>`).join('')}</select></div><div class="model-catalog">${groups.map(group => `<div class="model-group"><div class="model-group-head">${escapeHtml(group.provider.name)}<small>${escapeHtml(group.provider.note)}</small></div>${group.models.map(m => `<div class="model-card"><div class="model-card-head"><strong>${escapeHtml(m.name)}</strong>${m.badge ? `<span class="status-badge result">${escapeHtml(m.badge)}</span>` : ''}<span class="status-badge ${m.availability === 'available' ? 'attention' : 'stopped'}">${m.availability === 'available' ? '目录可用 · 执行未接入' : '不可用'}</span></div><p>${escapeHtml(m.description)}</p><div class="model-meta"><span>${escapeHtml(formatContext(m.contextWindow))}</span><span>${escapeHtml(modalityLabel(m.modalities))}</span><span>${escapeHtml(reasoningLabel(m))}</span><span>${escapeHtml(m.recommendedFor)}</span></div><p class="model-source">${escapeHtml(verificationLabel(m))} · ${escapeHtml(m.source)}${m.availability === 'available' ? '' : ` · ${escapeHtml(m.unavailableReason || '当前不可用')}`}</p></div>`).join('')}</div>`).join('')}</div></section>`;
+}
 function settingsPage() {
-  return `<div class="view-page">${pageHeader('平台设置', '业务平台独立维护，执行引擎通过版本化适配层接入。')}<section class="settings-panel"><h2>执行引擎</h2><div class="settings-row"><div>DeepSeek Harness<p>当前未连接，不调用模型、不执行工具。</p></div><span class="status-badge attention">未接入</span></div><div class="settings-row"><div>接入方式<p>平台 → 版本化适配器 → 固定版本 DSH。升级先做兼容测试。</p></div><span class="status-badge">目标架构</span></div><p>连接参数、凭据和后端适配尚未实现。本原型不提供看似已保存、实际无效的连接开关。</p></section><section class="settings-panel"><h2>演示记录</h2><div class="settings-row"><div>保存位置<p>${saveStatus.kind === 'saved' ? '此浏览器专属缓存' : saveStatus.kind === 'memory' ? '当前页内存，刷新可能丢失' : saveStatus.kind === 'conflict' ? '检测到其他标签页更新，本页停止写入' : '原始记录未载入'}，不是企业服务端任务库，不支持多人协同。</p></div><span class="status-badge">${escapeHtml(saveStatus.kind === 'saved' ? '已保存' : '需处理')}</span></div><div class="settings-row"><div>恢复记录<p>${state.recovery.length} 条异常记录已隔离保留；下载备份可人工检查。</p></div><button class="button" data-action="download-recovery" ${state.recovery.length ? '' : 'disabled'}>下载恢复记录</button></div><div class="settings-row"><div>重置原型<p>只清理这版原型的浏览器记录，不影响旧版缓存、真实插件或其他应用。</p></div><button class="button" data-action="reset">重置原型</button></div></section><section class="settings-panel"><h2>品牌</h2><p>沿用 EMERALD CLINICAL TRIALS。当前 Logo 为依据提供图片重绘的矢量原型，正式使用需替换为批准的原始资产。</p></section></div>`;
+  return `<div class="view-page">${pageHeader('平台设置', '业务平台独立维护，执行引擎通过版本化适配层接入。')}<section class="settings-panel"><h2>执行引擎</h2><div class="settings-row"><div>DeepSeek Harness<p>当前未连接，不调用模型、不执行工具。</p></div><span class="status-badge attention">未接入</span></div><div class="settings-row"><div>接入方式<p>平台 → 版本化适配器 → 固定版本 DSH。升级先做兼容测试。</p></div><span class="status-badge">目标架构</span></div><p>连接参数、凭据和后端适配尚未实现。本原型不提供看似已保存、实际无效的连接开关。</p></section>${modelSettingsPanel()}<section class="settings-panel"><h2>演示记录</h2><div class="settings-row"><div>保存位置<p>${saveStatus.kind === 'saved' ? '此浏览器专属缓存' : saveStatus.kind === 'memory' ? '当前页内存，刷新可能丢失' : saveStatus.kind === 'conflict' ? '检测到其他标签页更新，本页停止写入' : '原始记录未载入'}，不是企业服务端任务库，不支持多人协同。</p></div><span class="status-badge">${escapeHtml(saveStatus.kind === 'saved' ? '已保存' : '需处理')}</span></div><div class="settings-row"><div>恢复记录<p>${state.recovery.length} 条异常记录已隔离保留；下载备份可人工检查。</p></div><button class="button" data-action="download-recovery" ${state.recovery.length ? '' : 'disabled'}>下载恢复记录</button></div><div class="settings-row"><div>重置原型<p>只清理这版原型的浏览器记录，不影响旧版缓存、真实插件或其他应用。</p></div><button class="button" data-action="reset">重置原型</button></div></section><section class="settings-panel"><h2>品牌</h2><p>沿用 EMERALD CLINICAL TRIALS。当前 Logo 为依据提供图片重绘的矢量原型，正式使用需替换为批准的原始资产。</p></section></div>`;
 }
 function render() {
   const work = currentWork();
@@ -268,6 +299,36 @@ function chooseApp(appId) {
     persistSoon();
     if ($('#dialog').open) $('#dialog').close();
     activeWorkId = null; navigate('workspace'); render();
+  } catch (error) { toast(error.message); }
+}
+function currentModelId() {
+  const work = currentWork();
+  return work ? activeInput(work).modelId : currentDraft().modelId;
+}
+function pickModelDialog() {
+  const selected = currentModelId();
+  const groups = groupedModels(modelCatalog);
+  const body = `<p>选择用于这项工作的模型。选择只在本平台目录内进行，不能输入任意提供方、地址或模型 ID。切换后只影响新的输入修订和下一次执行；不会改写已有记录。</p><div class="model-picker">${groups.map(group =>
+    `<div class="model-group"><div class="model-group-head">${escapeHtml(group.provider.name)}<small>${escapeHtml(group.provider.note)}</small></div>${group.models.map(m => {
+      const state = modelAvailability(m.id);
+      const disabled = state.state !== 'available';
+      return `<button type="button" class="model-choice ${selected === m.id ? 'selected' : ''} ${disabled ? 'unavailable' : ''}" data-model-pick="${escapeHtml(m.id)}" aria-pressed="${selected === m.id}" ${disabled ? 'disabled aria-disabled="true"' : ''}><span class="model-choice-main"><strong>${escapeHtml(m.name)}</strong>${m.badge ? `<span class="status-badge result">${escapeHtml(m.badge)}</span>` : ''}<span class="status-badge ${disabled ? 'stopped' : 'attention'}">${escapeHtml(state.label)}</span><small>${escapeHtml(m.description)}</small><span class="model-meta"><span>${escapeHtml(formatContext(m.contextWindow))}</span><span>${escapeHtml(modalityLabel(m.modalities))}</span><span>${escapeHtml(reasoningLabel(m))}</span></span><small class="model-source">${escapeHtml(verificationLabel(m))} · ${escapeHtml(m.source)}</small>${disabled ? `<small class="model-unavailable">${escapeHtml(state.reason)}</small>` : ''}</span><span class="model-choice-check">${selected === m.id ? icon('check') : ''}</span></button>`;
+    }).join('')}</div>`).join('')}</div>`;
+  openDialog('选择模型', body);
+}
+function chooseModel(modelId) {
+  savePrompt();
+  const work = currentWork();
+  try {
+    if (work) {
+      const changed = setWorkModel(work, modelId, catalog);
+      persistSoon(); if ($('#dialog').open) $('#dialog').close(); render();
+      toast(changed ? '模型已切换，形成新的输入修订；已记录的结果保持原模型，下一次执行才使用新模型。当前未接入，不会调用模型。' : '模型未变化。');
+    } else {
+      setDraftModel(currentDraft(), modelId);
+      persistSoon(); if ($('#dialog').open) $('#dialog').close(); render();
+      toast(`已选择 ${modelLabel(modelId)}，随草稿保存；只影响下一次执行。当前未接入，不会调用模型。`);
+    }
   } catch (error) { toast(error.message); }
 }
 function newWorkFlow() {
@@ -339,6 +400,7 @@ document.addEventListener('click', event => {
   const action = button.dataset.action;
   if (button.dataset.openWork) { savePrompt(); flush(); openWork(button.dataset.openWork); return; }
   if (button.dataset.appPick) { chooseApp(button.dataset.appPick); return; }
+  if (button.dataset.modelPick) { chooseModel(button.dataset.modelPick); return; }
   if (button.dataset.option) {
     const draft = currentDraft();
     try { savePrompt(); const option = findApplication(draft.appId, catalog)?.options.find(o => o.key === button.dataset.option); if (option?.values.includes(button.dataset.value)) { draft.options[button.dataset.option] = button.dataset.value; persistSoon(); render(); } }
@@ -377,6 +439,7 @@ document.addEventListener('click', event => {
   }
   if (action === 'help') { openDialog('如何使用平台', '<p>先选择项目，再选择应用；描述工作要求，资料可以稍后补充。工作、沟通和结果保存在同一个上下文中。</p><p>切换项目或应用时，各项目和应用下的草稿分别保留。历史工作保存创建时的项目和应用版本，后续修改项目设置不会改写旧记录。</p><p>归档后记录只读，结果仍可在成果文件查看。当前原型不连接模型、不执行工具，添加文件只保存名称。</p>', '<button class="button primary" data-action="close-dialog">知道了</button>'); return; }
   if (action === 'pick-app') { pickAppDialog(); return; }
+  if (action === 'pick-model') { pickModelDialog(); return; }
   if (action === 'close-dialog') { $('#dialog').close(); return; }
   if (action === 'menu') { syncMenu(!document.body.classList.contains('nav-open')); return; }
   if (action === 'add-project') { editProject(); return; }
@@ -404,6 +467,10 @@ document.addEventListener('change', event => {
   }
   if (event.target.id === 'work-app') { workFilter.appId = event.target.value; render(); }
   if (event.target.id === 'work-project') { workFilter.projectId = event.target.value; render(); }
+  if (event.target.id === 'default-model') {
+    try { setDefaultModel(state, event.target.value); persistSoon(); render(); toast(`默认模型已设为 ${modelLabel(event.target.value)}，只影响新建草稿。`); }
+    catch (error) { render(); toast(error.message); }
+  }
   if (event.target.id === 'file-picker') {
     const files = [...event.target.files].map(file => ({ name: file.name.slice(0, 255), role: '待 AI 识别', source: 'local' }));
     event.target.value = '';

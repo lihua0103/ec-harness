@@ -59,7 +59,7 @@ const factory = {
 const executor = new DshProfileExecutor(
   {
     profile: 'worker', dshHome: workerHome, workspace, patches: [overlay], timeoutMs: 240000,
-    initializeTimeoutMs: 60000,
+    initializeTimeoutMs: 60000, runtimeBundleDigest: 'b'.repeat(64),
   },
   factory,
 );

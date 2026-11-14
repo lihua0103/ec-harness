@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
-const modules = ['app.js', 'applications.mjs', 'model.mjs', 'storage.mjs'];
+const modules = ['app.js', 'applications.mjs', 'models.mjs', 'model.mjs', 'storage.mjs'];
 let failed = false;
 for (const file of modules) {
   const result = spawnSync(process.execPath, ['--check', path.join(root, file)], { stdio: 'inherit' });

@@ -1,0 +1,71 @@
+{
+  "at": "2026-11-12T07:51:43.772Z",
+  "checks": [
+    {
+      "name": "two distinct native sessions were created",
+      "ok": true,
+      "detail": "session-bb408685-842f-4993-a408-bd65bbf3ee0d / session-e2ba4c08-c74f-4047-92b9-eee0d6eb10b0"
+    },
+    {
+      "name": "two execution domains are registered",
+      "ok": true,
+      "detail": "24fd2749-d5fe-4432-8b99-67b3a0663280 / c31c4f83-d004-42d0-8427-3fe7f7c210da"
+    },
+    {
+      "name": "each work is bound in its own domain",
+      "ok": true,
+      "detail": "201/201"
+    },
+    {
+      "name": "domain A opens its own native session",
+      "ok": true,
+      "detail": "作区\n\n更多\nWORK-A-T12：请只回复 A-OK。\n标准模式\n对话\n轨迹\nWORK-A-T12：请只回复 A-OK。\n15:51\n已完成\n已完成，用时 3秒\n\nA-OK\n\n用量 11.3K tok\n15:51\n发消息或创建任务, / 调用指令, @ 文件或对话\n工作区内修改\nGLM-5.3-Flash\nDefault\n1 轮 1 步·35 tok/s\n11.3K tok·缓存命中 0%\n1%"
+    },
+    {
+      "name": "composer keeps a draft in domain A",
+      "ok": true,
+      "detail": "DRAFT-A-T12"
+    },
+    {
+      "name": "domain B opens its own native session",
+      "ok": true,
+      "detail": "多\nWORK-B-T12：请只回复 B-OK。\n标准模式\n对话\n轨迹\nWORK-B-T12：请只回复 B-OK。\n15:51\n上下文注入\nruntime-context\n上下文注入\nskill-catalog\n上下文注入\ntime-context\n深度求索中\n深度求索中，用时 3秒 ···\n发消息或创建任务, / 调用指令, @ 文件或对话\n工作区内修改\nGLM-5.3-Flash\nDefault"
+    },
+    {
+      "name": "domain A history is not shown in domain B",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "domain B has no draft from domain A",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "composer keeps a draft in domain B",
+      "ok": true,
+      "detail": "DRAFT-B-T12"
+    },
+    {
+      "name": "switching back restores only domain A draft",
+      "ok": true,
+      "detail": "DRAFT-A-T12"
+    },
+    {
+      "name": "switching back restores domain A history",
+      "ok": true,
+      "detail": "+\nN\n插件\n工作台\n自动化任务\n更多\n工作区\n\n更多\n测试指令：仅回复A-OK\n标准模式\n对话\n轨迹\nWORK-A-T12：请只回复 A-OK。\n15:51\n已完成\n已完成，用时 3秒\n\nA-OK\n\n用量 11.3K tok\n15:51\n\nDRAFT-A-T12\n\n工作区内修改\nGLM-5.3-Flash\nDefault\n1 轮 1 步·35 tok/s\n11.3K tok·缓存命中 0%\n1%"
+    },
+    {
+      "name": "domain B draft is intact after the round trip",
+      "ok": true,
+      "detail": "DRAFT-B-T12"
+    },
+    {
+      "name": "no unexpected page errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "errors": []
+}

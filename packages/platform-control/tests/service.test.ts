@@ -1,9 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PlatformControlService, type RunExecutor, type RunOutcome } from '../src/service.js';
+import {
+  PlatformControlService,
+  type RunExecutor,
+  type RunOutcome,
+  type UserQuestionRequest,
+  type UserQuestionResult,
+} from '../src/service.js';
 import { PlatformError } from '../src/registry.js';
 import type { Principal } from '../src/policy.js';
 import { draft } from './helpers.js';
@@ -15,10 +22,13 @@ class FakeExecutor implements RunExecutor {
   readonly kind = 'fake';
   launched: string[] = [];
   cancelled: string[] = [];
-  async dispatch(): Promise<{ launchId: string; fencingToken: number }> {
-    const launchId = `launch-${this.launched.length + 1}`;
+  async dispatch(input: {
+    launchId?: string;
+    fencingToken?: number;
+  }): Promise<{ launchId: string; fencingToken: number }> {
+    const launchId = input.launchId ?? `launch-${this.launched.length + 1}`;
     this.launched.push(launchId);
-    return { launchId, fencingToken: this.launched.length };
+    return { launchId, fencingToken: input.fencingToken ?? this.launched.length };
   }
   async cancel(launchId: string): Promise<boolean> {
     this.cancelled.push(launchId);
@@ -28,8 +38,12 @@ class FakeExecutor implements RunExecutor {
 class OutcomeExecutor implements RunExecutor {
   readonly kind = 'outcome';
   constructor(private readonly outcome: RunOutcome) {}
-  async dispatch() {
-    return { launchId: 'launch-outcome', fencingToken: 1, outcome: Promise.resolve(this.outcome) };
+  async dispatch(input: { launchId?: string; fencingToken?: number }) {
+    return {
+      launchId: input.launchId ?? 'launch-outcome',
+      fencingToken: input.fencingToken ?? 1,
+      outcome: Promise.resolve(this.outcome),
+    };
   }
   async cancel(): Promise<boolean> {
     return true;
@@ -38,7 +52,7 @@ class OutcomeExecutor implements RunExecutor {
 const waitForTerminal = async (service: PlatformControlService, runId: string): Promise<void> => {
   for (let attempt = 0; attempt < 100; attempt++) {
     const state = service.getRun(runId, operator).snapshot.state;
-    if (state === 'SUCCEEDED' || state === 'FAILED' || state === 'CANCELLED') return;
+    if (['SUCCEEDED', 'FAILED', 'CANCELLED', 'UNKNOWN'].includes(state)) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error('run did not reach a terminal state');
@@ -133,13 +147,78 @@ test('revocation blocks new runs and stale revisions cannot overwrite newer fact
   }
 });
 
-test('worker outcome registers artifacts and completes the run', async () => {
+test('missing exit, cleanup or consumption evidence never produces success or permits late inputs', async () => {
+  for (const missing of ['exitProven', 'cleanedUp', 'consumedThrough', 'descendantsDone'] as const) {
+    const root = await mkdtemp(join(tmpdir(), 'platform-facts-'));
+    const outcome: RunOutcome = {
+      status: 'succeeded', finishReason: 'completed', exitProven: true,
+      cleanedUp: true, consumedThrough: 1, descendantsDone: true,
+    };
+    delete outcome[missing];
+    const service = new PlatformControlService(join(root, 'control.sqlite'), new OutcomeExecutor(outcome), undefined,
+      { requireArtifacts: false });
+    try {
+      service.registerApp(draft(), operator);
+      const run = service.createRun('listing', '1.0.0', {}, operator);
+      await service.dispatchRun(run.runId, run.snapshot.revision, serviceActor);
+      await waitForTerminal(service, run.runId);
+      assert.equal(service.getRun(run.runId, operator).snapshot.state, 'UNKNOWN', missing);
+      assert.throws(() => service.appendInput(run.runId, {}, operator),
+        (error: unknown) => error instanceof PlatformError && error.code === 'RUN_TERMINAL');
+      assert.throws(() => service.retryRun(run.runId, operator),
+        (error: unknown) => error instanceof PlatformError && error.code === 'RUN_RETRY_NOT_TERMINAL_FAILURE');
+      if (missing === 'consumedThrough') assert.equal(service.inputs(run.runId, 0, 10, operator).items[0].state, 'PENDING');
+    } finally {
+      service.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('late accepted inputs stay pending when only the dispatched prefix was consumed', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'platform-input-prefix-'));
+  let resolveOutcome!: (outcome: RunOutcome) => void;
+  const outcome = new Promise<RunOutcome>((resolve) => { resolveOutcome = resolve; });
+  const executor: RunExecutor = {
+    kind: 'deferred',
+    dispatch: async ({ launchId, fencingToken }) => ({ launchId: launchId!, fencingToken: fencingToken!, outcome }),
+    cancel: async () => true,
+  };
+  const service = new PlatformControlService(join(root, 'control.sqlite'), executor, undefined, { requireArtifacts: false });
+  try {
+    service.registerApp(draft(), operator);
+    const run = service.createRun('listing', '1.0.0', {}, operator);
+    await service.dispatchRun(run.runId, run.snapshot.revision, serviceActor);
+    service.appendInput(run.runId, { late: true }, operator);
+    resolveOutcome({ status: 'succeeded', exitProven: true, finishReason: 'completed',
+      cleanedUp: true, descendantsDone: true, consumedThrough: 1 });
+    await waitForTerminal(service, run.runId);
+    assert.equal(service.getRun(run.runId, operator).snapshot.state, 'UNKNOWN');
+    assert.deepEqual(service.inputs(run.runId, 0, 10, operator).items.map((item) => item.state), ['CONSUMED', 'PENDING']);
+  } finally {
+    service.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('worker outcome seals artifacts and completes only with a sealed copy', async () => {
   const root = await mkdtemp(join(tmpdir(), 'platform-outcome-'));
   const path = join(root, 'control.sqlite');
+  const workspace = join(root, 'workspace');
+  await mkdir(join(workspace, 'output'), { recursive: true });
+  const source = join(workspace, 'output', 'listing.csv');
+  const bytes = Buffer.from('synthetic,listing\n1,sealed\n');
+  await writeFile(source, bytes);
+  const digest = createHash('sha256').update(bytes).digest('hex');
   const executor = new OutcomeExecutor({
     status: 'succeeded',
+    exitProven: true,
+    cleanedUp: true,
+    descendantsDone: true,
+    consumedThrough: 1,
+    finishReason: 'completed',
     finalResponse: 'done',
-    artifacts: [{ name: 'output/listing.csv', digest: 'a'.repeat(64), bytes: 42, mediaType: 'text/csv' }],
+    artifacts: [{ name: 'output/listing.csv', digest, bytes: bytes.byteLength, mediaType: 'text/csv', sourcePath: source }],
   });
   const service = new PlatformControlService(path, executor, undefined, { requireArtifacts: true });
   try {
@@ -154,6 +233,47 @@ test('worker outcome registers artifacts and completes the run', async () => {
       service.artifacts(run.runId, operator).map((artifact) => artifact.name),
       ['output/listing.csv'],
     );
+    // The worker workspace may change after the run; delivery must use the sealed copy.
+    await writeFile(source, 'tampered after seal');
+    const artifact = await service.readArtifact(run.runId, 'output/listing.csv', operator);
+    assert.equal(artifact.data.toString(), bytes.toString());
+    // A changed sealed copy is detected instead of being delivered as original.
+    await writeFile(join(root, 'artifacts', run.runId, 'output', 'listing.csv'), 'tampered sealed copy');
+    await assert.rejects(
+      service.readArtifact(run.runId, 'output/listing.csv', operator),
+      (error: unknown) => error instanceof PlatformError && error.code === 'RUN_ARTIFACT_TAMPERED',
+    );
+  } finally {
+    service.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an artifact whose bytes do not match its digest never completes the run', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'platform-outcome-digest-'));
+  const source = join(root, 'out.txt');
+  await writeFile(source, 'unexpected bytes');
+  const executor = new OutcomeExecutor({
+    status: 'succeeded',
+    exitProven: true,
+    cleanedUp: true,
+    descendantsDone: true,
+    consumedThrough: 1,
+    finishReason: 'completed',
+    artifacts: [{ name: 'out.txt', digest: 'a'.repeat(64), bytes: 16, sourcePath: source }],
+  });
+  const service = new PlatformControlService(join(root, 'control.sqlite'), executor, undefined, {
+    requireArtifacts: true,
+  });
+  try {
+    service.registerApp(draft(), operator);
+    const run = service.createRun('listing', '1.0.0', {}, operator);
+    await service.dispatchRun(run.runId, run.snapshot.revision, serviceActor);
+    await waitForTerminal(service, run.runId);
+    const failed = service.getRun(run.runId, operator);
+    assert.equal(failed.snapshot.state, 'FAILED');
+    assert.match(failed.snapshot.reason ?? '', /RUN_ARTIFACT_DIGEST_MISMATCH/);
+    assert.equal(service.artifacts(run.runId, operator).length, 0);
   } finally {
     service.close();
     await rm(root, { recursive: true, force: true });
@@ -164,6 +284,8 @@ test('invalid worker artifacts fail the run instead of leaving it running', asyn
   const root = await mkdtemp(join(tmpdir(), 'platform-outcome-invalid-'));
   const executor = new OutcomeExecutor({
     status: 'succeeded',
+    exitProven: true,
+    finishReason: 'completed',
     artifacts: [{ name: '../escape.csv', digest: 'a'.repeat(64), bytes: 1 }],
   });
   const service = new PlatformControlService(join(root, 'control.sqlite'), executor, undefined, {
@@ -214,7 +336,7 @@ test('startup reconciliation fails runs left active by a previous control proces
       const result = reopened.reconcileOrphans(serviceActor);
       assert.equal(result.failed, 1);
       const failed = reopened.getRun(run.runId, operator);
-      assert.equal(failed.snapshot.state, 'FAILED');
+      assert.equal(failed.snapshot.state, 'UNKNOWN');
       assert.equal(failed.snapshot.reason, 'HOST_RESTARTED_RECONCILIATION_REQUIRED');
     } finally {
       reopened.close();
@@ -292,6 +414,147 @@ test('retry creates a new run from a failed/cancelled run and rejects active run
       inputDigest: original.inputDigest,
     });
     assert.equal(service.getRun(original.runId, operator).snapshot.state, 'CANCELLED');
+  } finally {
+    service.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('queue scan is fair: an old QUEUED run is dispatched despite many newer terminal runs', async () => {
+  const { root, service } = await setup();
+  try {
+    const old = service.createRun('listing', '1.0.0', { old: true }, operator);
+    for (let i = 0; i < 120; i++) {
+      const r = service.createRun('listing', '1.0.0', { i }, operator);
+      await service.cancelRun(r.runId, r.snapshot.revision, operator);
+    }
+    const dispatched = await service.dispatchQueued(1, serviceActor);
+    assert.equal(dispatched.length, 1);
+    assert.equal(dispatched[0].runId, old.runId);
+  } finally {
+    service.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('launch intent is persisted before spawn and marked failed when the executor rejects', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'platform-intent-'));
+  const path = join(root, 'control.sqlite');
+  const executor = new OutcomeExecutor({ status: 'succeeded' });
+  const service = new PlatformControlService(path, executor);
+  try {
+    service.registerApp(draft(), operator);
+    const run = service.createRun('listing', '1.0.0', {}, operator);
+    const bound = await service.dispatchRun(run.runId, run.snapshot.revision, serviceActor);
+    const attempts = service.attempts(run.runId, operator);
+    assert.equal(attempts.length, 1);
+    assert.equal(attempts[0].launchId, bound.snapshot.launchId);
+    assert.equal(attempts[0].fencingToken, bound.snapshot.fencingToken);
+  } finally {
+    service.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+class QuestionExecutor implements RunExecutor {
+  readonly kind = 'question';
+  result?: Promise<UserQuestionResult>;
+  settle?: (outcome: RunOutcome) => void;
+  async dispatch(input: Parameters<RunExecutor['dispatch']>[0]) {
+    if (!input.onUserQuestion) throw new Error('missing question handler');
+    this.result = input.onUserQuestion(
+      {
+        requestId: 'req-1',
+        sessionId: 'session-1',
+        questions: [{ id: 'q1', question: '选择方案', options: [{ label: 'A' }, { label: 'B' }] }],
+      } satisfies UserQuestionRequest,
+      { signal: new AbortController().signal },
+    );
+    const outcome = new Promise<RunOutcome>((resolveOutcome) => {
+      this.settle = resolveOutcome;
+    });
+    return { launchId: input.launchId ?? 'launch-q', fencingToken: input.fencingToken ?? 1, outcome };
+  }
+  async cancel(): Promise<boolean> {
+    return true;
+  }
+}
+const waitForInteraction = async (service: PlatformControlService, runId: string) => {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const items = service.interactions(runId, operator);
+    if (items.length) return items[0];
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('interaction did not appear');
+};
+
+test('an SDK user question is persisted, answered once, and bound to its session', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'platform-question-'));
+  const executor = new QuestionExecutor();
+  const service = new PlatformControlService(join(root, 'control.sqlite'), executor, undefined, {
+    requireArtifacts: false,
+  });
+  try {
+    service.registerApp(draft(), operator);
+    const run = service.createRun('listing', '1.0.0', { goal: 'ask' }, operator);
+    await service.dispatchRun(run.runId, run.snapshot.revision, serviceActor);
+    const interaction = await waitForInteraction(service, run.runId);
+    assert.equal(interaction.state, 'PENDING');
+    assert.equal(interaction.sessionId, 'session-1');
+    assert.equal(interaction.requestId, 'req-1');
+
+    await assert.rejects(
+      async () => service.answerInteraction(interaction.interactionId, { answers: [{ id: 'q1', selected: ['Z'] }] }, operator),
+      (error: unknown) => error instanceof PlatformError && error.code === 'INTERACTION_ANSWER_INVALID',
+    );
+    const answered = service.answerInteraction(
+      interaction.interactionId,
+      { answers: [{ id: 'q1', selected: ['A'] }] },
+      operator,
+    );
+    assert.equal(answered.state, 'ANSWERED');
+    assert.deepEqual(await executor.result, { answers: [{ id: 'q1', selected: ['A'] }] });
+    await assert.rejects(
+      async () => service.answerInteraction(interaction.interactionId, { answers: [{ id: 'q1', selected: ['B'] }] }, operator),
+      (error: unknown) => error instanceof PlatformError && error.code === 'INTERACTION_NOT_PENDING',
+    );
+    executor.settle?.({
+      status: 'succeeded',
+      exitProven: true,
+      cleanedUp: true,
+      descendantsDone: true,
+      consumedThrough: 1,
+      finishReason: 'completed',
+      finalResponse: 'done',
+    });
+    await waitForTerminal(service, run.runId);
+    assert.equal(service.getRun(run.runId, operator).snapshot.state, 'SUCCEEDED');
+  } finally {
+    service.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cancelling a run dismisses pending questions and rejects late answers', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'platform-question-cancel-'));
+  const executor = new QuestionExecutor();
+  const service = new PlatformControlService(join(root, 'control.sqlite'), executor, undefined, {
+    requireArtifacts: false,
+  });
+  try {
+    service.registerApp(draft(), operator);
+    let run = service.createRun('listing', '1.0.0', { goal: 'ask' }, operator);
+    run = await service.dispatchRun(run.runId, run.snapshot.revision, serviceActor);
+    const interaction = await waitForInteraction(service, run.runId);
+    const cancelled = await service.cancelRun(run.runId, service.getRun(run.runId, operator).snapshot.revision, operator);
+    assert.equal(cancelled.cancelSettled, true);
+    const settled = service.interactions(run.runId, operator)[0];
+    assert.equal(settled.state, 'CANCELLED');
+    assert.deepEqual(await executor.result, { cancelled: true });
+    await assert.rejects(
+      async () => service.answerInteraction(interaction.interactionId, { answers: [{ id: 'q1', selected: ['A'] }] }, operator),
+      (error: unknown) => error instanceof PlatformError && /INTERACTION_(RUN_TERMINAL|NOT_PENDING)/.test(error.code),
+    );
   } finally {
     service.close();
     await rm(root, { recursive: true, force: true });

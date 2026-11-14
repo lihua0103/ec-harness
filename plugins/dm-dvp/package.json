@@ -4,8 +4,8 @@
   "description": "临床 DVP（数据核查计划）：公司模板工作簿解析、fire-when 逻辑校验、正/反/恰边界测试用例候选。生成物一律为候选，交 DM/医学/统计/DBD 审核。",
   "type": "module",
   "main": "./lib/index.js",
-  "exports": {".": "./lib/index.js", "./package.json": "./package.json"},
-  "files": ["lib", "cordis.patch.yml", "README.md", "DEVELOPMENT.md"],
+  "exports": {".": "./lib/index.js", "./package.json": "./package.json", "./application.json": "./application.json"},
+  "files": ["lib", "application.json", "cordis.patch.yml", "README.md", "DEVELOPMENT.md"],
   "engines": {"node": ">=24.9.0", "dsh": "0.2.2-rc.1"},
   "dsh": {"bundle": {"patch": "./cordis.patch.yml"}},
   "scripts": {

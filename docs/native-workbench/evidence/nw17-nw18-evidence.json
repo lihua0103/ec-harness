@@ -1,0 +1,67 @@
+{
+  "at": "2026-11-12T08:08:56.958Z",
+  "scope": "platform batch/revision semantics on synthetic data; no real Listing/DVP business execution",
+  "summary": {
+    "reports": {
+      "workId": "6550167d-3439-4dce-98a3-f306b59ee399",
+      "appId": "ec.synthetic.reports",
+      "baselines": [
+        {
+          "revision": 2,
+          "sourceRef": "dir:D:\\project\\company\\ec-clinical-dsh\\.runtime\\nw-web-home\\demo-workspace#batch-2",
+          "digestPrefix": "280d89f4b7d6"
+        },
+        {
+          "revision": 1,
+          "sourceRef": "dir:D:\\project\\company\\ec-clinical-dsh\\.runtime\\nw-web-home\\demo-workspace#batch-1",
+          "digestPrefix": "8f5815465303"
+        }
+      ],
+      "runs": [
+        {
+          "runId": "b52ab49d-3a21-47de-8cb9-bb5cad91ad69",
+          "state": "SUCCEEDED",
+          "model": "model.synthetic-b",
+          "artifacts": [
+            "reports/run2-01.csv",
+            "reports/run2-02.csv"
+          ]
+        },
+        {
+          "runId": "e59bf35a-8d08-446a-bef5-22b44174658d",
+          "state": "SUCCEEDED",
+          "model": "model.synthetic-a",
+          "artifacts": [
+            "reports/run1-01.csv",
+            "reports/run1-02.csv"
+          ]
+        }
+      ]
+    },
+    "dvp": {
+      "workId": "e3550d82-a8e0-4d61-b247-bd4080247781",
+      "appId": "ec.synthetic.dvp",
+      "baselines": [
+        {
+          "revision": 1,
+          "sourceRef": "dir:D:\\project\\company\\ec-clinical-dsh\\.runtime\\nw-web-home\\demo-workspace#dvp-source-1",
+          "digestPrefix": "4a0a9abb574e"
+        }
+      ],
+      "runs": []
+    },
+    "question": {
+      "workId": "7ea56396-92a9-43b4-9018-f92c1b9d74eb",
+      "appId": "ec.synthetic.reports",
+      "baselines": [],
+      "runs": [
+        {
+          "runId": "c46809bb-af9c-42d0-b28e-03fd85a09d87",
+          "state": "STARTING",
+          "model": "model.synthetic-a",
+          "artifacts": []
+        }
+      ]
+    }
+  }
+}

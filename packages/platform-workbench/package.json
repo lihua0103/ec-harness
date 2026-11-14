@@ -1,0 +1,57 @@
+{
+  "name": "@ec-clinical/platform-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./src/*": "./src/*",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "description": "原生 WebUI 企业工作台集成包：在 DSH 原生会话上提供项目/应用/工作入口与工作上下文解析，不实现第二套聊天内核。",
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ],
+      "platform": "web"
+    }
+  },
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node node_modules/tsx/dist/cli.mjs --test tests/*.test.ts",
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
+    "verify": "npm run typecheck && npm run build && npm run test"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "link:../../upstream/deepseek-harness-git/vendor/cordis",
+    "@deepseek-ai/dsh-client-ui-slots": "link:../../upstream/deepseek-harness-git/packages/client/ui-slots",
+    "@deepseek-ai/dsh-client-ui-renderer": "link:../../upstream/deepseek-harness-git/packages/client/ui-renderer",
+    "@deepseek-ai/dsh-client-ui-conversation": "link:../../upstream/deepseek-harness-git/packages/client/ui-conversation",
+    "@deepseek-ai/dsh-client-ui-workspace": "link:../../upstream/deepseek-harness-git/packages/client/ui-workspace",
+    "@deepseek-ai/dsh-client-ui-sidebar": "link:../../upstream/deepseek-harness-git/packages/client/ui-sidebar",
+    "@deepseek-ai/dsh-client-ui-session": "link:../../upstream/deepseek-harness-git/packages/client/ui-session",
+    "@deepseek-ai/dsh-api-session-controller": "link:../../upstream/deepseek-harness-git/packages/api/session-controller",
+    "@types/node": "22.20.1",
+    "@types/react": "18.3.31",
+    "esbuild": "0.28.2",
+    "react": "18.3.1",
+    "tsx": "4.23.13",
+    "typescript": "6.0.3",
+    "@deepseek-ai/dsh-host-webserver": "link:../../upstream/deepseek-harness-git/packages/host/webserver",
+    "@deepseek-ai/dsh-client-ui-layout": "link:../../upstream/deepseek-harness-git/packages/client/ui-layout"
+  }
+}

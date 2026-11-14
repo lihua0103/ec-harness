@@ -1,0 +1,120 @@
+{
+  "at": "2026-11-12T05:56:23.149Z",
+  "checks": [
+    {
+      "name": "workbench panel opens",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "works are listed",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "detail shows run history",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "detail shows 12 sealed artifacts",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "detail shows 13 execution inputs",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "detail shows 12 input batches",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact name rendered",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "detail heading receives focus",
+      "ok": true,
+      "detail": "H1"
+    },
+    {
+      "name": "artifact pager moves to page 2",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact pager keeps the total visible",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact download returns 200",
+      "ok": true,
+      "detail": "200"
+    },
+    {
+      "name": "download keeps its filename",
+      "ok": true,
+      "detail": "attachment; filename=\"reports_summary-11.csv\"; filename*=UTF-8''reports%2Fsummary-11.csv"
+    },
+    {
+      "name": "download returns the sealed bytes",
+      "ok": true,
+      "detail": "\"batch,value\\n11,77\\n\""
+    },
+    {
+      "name": "empty work explains that no run exists",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "compact density toggles",
+      "ok": true,
+      "detail": "compact"
+    },
+    {
+      "name": "compact view keeps every artifact",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "narrow layout has no horizontal overflow",
+      "ok": true,
+      "detail": "overflow=0"
+    },
+    {
+      "name": "dark theme reports a dark color-scheme",
+      "ok": true,
+      "detail": "{\"color\":\"rgb(249, 250, 251)\",\"background\":\"rgb(21, 21, 23)\",\"scheme\":\"dark\"}"
+    },
+    {
+      "name": "read failure shows the real control-plane code",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "read failure offers retry",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "retry recovers the same view",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "no unexpected browser console errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "errors": [
+    "console: Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+    "console: Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+    "console: Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+  ]
+}

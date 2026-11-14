@@ -70,7 +70,8 @@ function runR(runtime:RuntimeSpec,scriptPath:string,cwd:string,args:string[],sig
   });
 }
 /** Inspect CSV/RDS/RData files through R: object names, size, columns and typed sample rows. */
-export interface DatasetTable {name:string;rows:number|null;columns:string[]|null;classes:Record<string,string>|null;sample:Array<Record<string,unknown>>|null;error?:string;}
+export interface ColumnStat {naCount:number;blankCount?:number;numericSummary?:{min:number;max:number;mean:number};}
+export interface DatasetTable {name:string;rows:number|null;columns:string[]|null;classes:Record<string,string>|null;sample:Array<Record<string,unknown>>|null;columnStats:Record<string,ColumnStat>|null;error?:string;}
 export interface DatasetDescription {source:string;kind:string;tables:DatasetTable[];warnings:string[];stderr:string;stdoutTruncated:boolean;}
 export function datasetKind(path:string):'sas'|'xpt'|'csv'|'rds'|'rdata'|'zip' {
   const ext=extname(path).toLowerCase();
@@ -127,6 +128,31 @@ read_any <- function(path, kind) {
   if (kind == "xpt") return(list(frames = list(dataset = haven::read_xport(path)), skipped = character(0)))
   list(frames = list(dataset = haven::read_sas(path)), skipped = character(0))
 }
+# Per-column honest diagnostics computed from the actual object: NA/blank counts and, when the
+# values are (or wholly convert to) numbers, min/max/mean. Never reported when not computable.
+column_stats <- function(frame) {
+  lapply(frame, function(x) {
+    na <- sum(is.na(x))
+    entry <- list(naCount = as.integer(na))
+    values <- if (is.factor(x)) as.character(x) else x
+    if (is.character(values)) {
+      entry$blankCount <- as.integer(sum(values == "" & !is.na(values)))
+      conv <- suppressWarnings(type.convert(values, as.is = TRUE))
+    } else {
+      conv <- values
+    }
+    if (is.numeric(conv)) {
+      present <- conv[!is.na(conv)]
+      if (length(present)) {
+        mn <- min(present); mx <- max(present); av <- mean(present)
+        if (is.finite(mn) && is.finite(mx) && is.finite(av)) {
+          entry$numericSummary <- list(min = mn, max = mx, mean = av)
+        }
+      }
+    }
+    entry
+  })
+}
 tables <- list(); warnings <- character(0)
 # The "<<-" operator typed directly in the top-level tryCatch expression skips the global binding and hits the
 # locked base function "warnings"; appends must go through a closure so the search starts one frame up.
@@ -140,7 +166,9 @@ tryCatch({
     frame <- result$frames[[i]]
     cols <- names(frame); classes <- vapply(frame, function(x) paste(class(x), collapse = "/"), character(1))
     sample <- utils::head(frame, max_rows)
-    tables[[name]] <- list(name = name, rows = nrow(frame), columns = cols, classes = as.list(classes), sample = sample, error = NULL)
+    # No error = NULL field here: jsonlite serializes R NULL as {} and downstream
+    # stringification turns it into a placeholder "[object Object]" error.
+    tables[[name]] <- list(name = name, rows = nrow(frame), columns = cols, classes = as.list(classes), sample = sample, columnStats = column_stats(frame))
   }
   if (length(result$skipped)) add_warning(paste0("skipped non-data.frame: ", paste(result$skipped, collapse = "; ")))
 }, error = function(e) add_warning(conditionMessage(e)))
@@ -156,7 +184,26 @@ function normalizeTable(value:unknown):DatasetTable {
   return {name:String(table.name??''),rows:table.rows==null?null:Number(table.rows),columns:asStringArray(table.columns),
     classes:classes&&typeof classes==='object'&&!Array.isArray(classes)?Object.fromEntries(Object.entries(classes).map(([k,v])=>[k,String(v)])):null,
     sample:Array.isArray(table.sample)?table.sample as Array<Record<string,unknown>>:null,
-    error:table.error?String(table.error):undefined};
+    columnStats:normalizeColumnStats(table.columnStats),
+    // Only a real string is an error; jsonlite NULL arrives as {} and must not become "[object Object]".
+    error:typeof table.error==='string'&&table.error?table.error:undefined};
+}
+function normalizeColumnStats(value:unknown):Record<string,ColumnStat>|null {
+  if(!value||typeof value!=='object'||Array.isArray(value))return null;
+  const result:Record<string,ColumnStat>={};
+  for(const [column,raw] of Object.entries(value as Record<string,unknown>)){
+    const stat=(raw??{}) as Record<string,unknown>;
+    const numeric=stat.numericSummary;
+    const summary=numeric&&typeof numeric==='object'&&!Array.isArray(numeric)
+      ?{min:Number((numeric as Record<string,unknown>).min),max:Number((numeric as Record<string,unknown>).max),mean:Number((numeric as Record<string,unknown>).mean)}
+      :undefined;
+    const numericSummary=summary&&Number.isFinite(summary.min)&&Number.isFinite(summary.max)&&Number.isFinite(summary.mean)
+      ?summary:undefined;
+    result[column]={naCount:Number(stat.naCount??0),
+      ...(stat.blankCount==null?{}:{blankCount:Number(stat.blankCount)}),
+      ...(numericSummary?{numericSummary}:{})};
+  }
+  return result;
 }
 export interface DescribeContext {projectDir?:string;password?:string;}
 export async function describeDataset(runtime:RuntimeSpec,path:string,maxRows=5,signal?:AbortSignal,context?:DescribeContext):Promise<DatasetDescription> {

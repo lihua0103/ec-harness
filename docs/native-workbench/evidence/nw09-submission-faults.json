@@ -1,0 +1,50 @@
+{
+  "at": "2026-11-12T07:58:10.343Z",
+  "binding": {
+    "workId": "907f1d36-3271-4a43-a3ad-884d2324c759",
+    "domainId": "c4e9d51b-a11a-4a95-9f50-4d8d8443271c",
+    "sessionId": "session-nw09"
+  },
+  "checks": [
+    {
+      "name": "intent is recorded before admission",
+      "ok": true,
+      "detail": "201/RECORDED"
+    },
+    {
+      "name": "the recorded intent survives a control-plane restart",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "a retried request id collapses onto the same intent",
+      "ok": true,
+      "detail": "201/ce97e669-fdd1-4fbf-b776-caa904becdcd"
+    },
+    {
+      "name": "the same request id with different content is refused",
+      "ok": true,
+      "detail": "409/SUBMISSION_REQUEST_REUSED"
+    },
+    {
+      "name": "a recovered admission receipt advances the intent",
+      "ok": true,
+      "detail": "200/ACCEPTED"
+    },
+    {
+      "name": "native consumption settles the intent",
+      "ok": true,
+      "detail": "200/CONSUMED"
+    },
+    {
+      "name": "an unknown receipt stays UNKNOWN after a restart",
+      "ok": true,
+      "detail": "UNKNOWN"
+    },
+    {
+      "name": "an UNKNOWN intent is not silently replayed by an admission",
+      "ok": true,
+      "detail": "409/SUBMISSION_STATE_STALE"
+    }
+  ]
+}

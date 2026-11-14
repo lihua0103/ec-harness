@@ -1,0 +1,46 @@
+{
+  "at": "2026-11-12T07:48:50.427Z",
+  "checks": [
+    {
+      "name": "the first turn is running before the queue/steer attempts",
+      "ok": true,
+      "detail": "1"
+    },
+    {
+      "name": "plain Enter shows the queued message",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "the queue is visible while the turn runs",
+      "ok": true,
+      "detail": "排队"
+    },
+    {
+      "name": "Ctrl+Enter accepts the steering message",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "the steering message is part of the finished conversation",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "the queued message runs after the current turn",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "neither message was duplicated",
+      "ok": true,
+      "detail": "1/1"
+    },
+    {
+      "name": "no unexpected page errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "errors": []
+}

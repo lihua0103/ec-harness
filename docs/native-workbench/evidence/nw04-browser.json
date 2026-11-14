@@ -1,0 +1,20 @@
+{
+  "at": "2026-11-12T06:10:20.621Z",
+  "note": "transcript 根节点在长输出时会重新渲染/虚拟化，长度可能缩短；本文件只证明输入草稿期间内容仍在变化、草稿与焦点保留。同一轮的最终完成在 nw04-postrun-browser.json 单独复核（已完成，用时 28 秒，含第 15 行）。",
+  "checks": [
+    {
+      "id": "NW04.stream-updates-while-typing",
+      "ok": true,
+      "detail": "315 -> 160"
+    },
+    {
+      "id": "NW04.draft-and-focus-preserved",
+      "ok": true
+    },
+    {
+      "id": "NW04.output-completes-after-typing",
+      "ok": false,
+      "detail": "final=160（本轮未等到结算；同轮完成见 postrun）"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "at": "2026-11-12T06:13:04.964Z",
+  "checks": [
+    {
+      "id": "NW04.same-run-completed-after-typing",
+      "ok": true,
+      "detail": "已完成，用时 28秒"
+    },
+    {
+      "id": "NW04.output-reached-final-line",
+      "ok": true,
+      "detail": "length=828"
+    },
+    {
+      "id": "NW04.prompt-still-single",
+      "ok": true
+    }
+  ]
+}

@@ -76,6 +76,30 @@ test('single-column CSV keeps columns as a one-element array after jsonlite norm
   }finally{await rm(root,{recursive:true,force:true});}
 });
 
+test('describe reports real columnStats and never a placeholder object error',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'dm-datasets-'));
+  try{
+    const csv=join(root,'stats.csv');
+    await writeFile(csv,'A,B\n1,x\n2,\n,NA\n3,y\n');
+    const d=await describeDataset(runtime,csv);
+    const table=d.tables[0];
+    // jsonlite NULL-as-{} used to surface here as the string "[object Object]".
+    assert.equal(table.error,undefined);
+    assert.equal(table.rows,4);
+    assert.ok(table.columnStats,JSON.stringify(table.columnStats));
+    const a=table.columnStats.A;
+    assert.equal(a.naCount,0);
+    assert.equal(a.blankCount,1);
+    assert.equal(a.numericSummary?.min,1);
+    assert.equal(a.numericSummary?.max,3);
+    assert.equal(a.numericSummary?.mean,2);
+    const b=table.columnStats.B;
+    assert.equal(b.naCount,0);
+    assert.equal(b.blankCount,1);
+    assert.equal(b.numericSummary,undefined);
+  }finally{await rm(root,{recursive:true,force:true});}
+});
+
 test('RDS named listing lists expose one table per data.frame under its own name',async()=>{
   const root=await mkdtemp(join(tmpdir(),'dm-datasets-'));
   try{

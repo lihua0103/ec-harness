@@ -1,0 +1,95 @@
+{
+  "dryRun": true,
+  "generatedAt": "2026-11-12T08:09:08.950Z",
+  "controlStore": {
+    "status": "OK",
+    "counts": {
+      "projects": 1,
+      "project_workspaces": 2,
+      "works": 4,
+      "runs": 4,
+      "run_inputs": 7,
+      "run_artifacts": 4,
+      "run_events": 9,
+      "run_interactions": 1,
+      "audit_events": 42,
+      "work_drafts": 1,
+      "work_session_bindings": 0,
+      "submissions": 0,
+      "execution_domains": 2,
+      "input_baselines": 3,
+      "app_releases": 2,
+      "model_catalog": 1
+    },
+    "works": [
+      {
+        "workId": "3e8c080d-e7f9-4ad3-bd6e-17ac3089f7e6",
+        "title": "NW10 跨域切换（合成）916254",
+        "appId": "ec.synthetic.reports",
+        "appVersion": "1.0.0",
+        "state": "ACTIVE",
+        "projectId": "c1cf6ce4-a9f8-4544-a7ea-187cc8744491",
+        "sessionId": null,
+        "domainId": null,
+        "runs": 1,
+        "artifacts": 0
+      },
+      {
+        "workId": "6550167d-3439-4dce-98a3-f306b59ee399",
+        "title": "季度方案整理（合成演示）",
+        "appId": "ec.synthetic.reports",
+        "appVersion": "1.0.0",
+        "state": "ACTIVE",
+        "projectId": "c1cf6ce4-a9f8-4544-a7ea-187cc8744491",
+        "sessionId": null,
+        "domainId": null,
+        "runs": 2,
+        "artifacts": 4
+      },
+      {
+        "workId": "7ea56396-92a9-43b4-9018-f92c1b9d74eb",
+        "title": "等待答复的工作（合成演示）",
+        "appId": "ec.synthetic.reports",
+        "appVersion": "1.0.0",
+        "state": "ACTIVE",
+        "projectId": "c1cf6ce4-a9f8-4544-a7ea-187cc8744491",
+        "sessionId": null,
+        "domainId": null,
+        "runs": 1,
+        "artifacts": 0
+      },
+      {
+        "workId": "e3550d82-a8e0-4d61-b247-bd4080247781",
+        "title": "DVP 修订（合成演示）",
+        "appId": "ec.synthetic.dvp",
+        "appVersion": "1.0.0",
+        "state": "ACTIVE",
+        "projectId": "c1cf6ce4-a9f8-4544-a7ea-187cc8744491",
+        "sessionId": null,
+        "domainId": null,
+        "runs": 0,
+        "artifacts": 0
+      }
+    ],
+    "unboundWorks": 4,
+    "digest": "69a5f6c69dc5455aad1cce136fc5dc65b6eee440cb666affe21f2812c1d2ff05"
+  },
+  "browserStorage": {
+    "kind": "v4",
+    "projects": 1,
+    "works": 2,
+    "inputs": 3,
+    "messages": 1,
+    "drafts": 1,
+    "readOnlyWorks": 1,
+    "recovery": 0,
+    "earliest": "2026-10-01T08:00:00.000Z",
+    "latest": "2026-10-02T09:00:00.000Z"
+  },
+  "notes": [
+    "dry-run：未创建、更新或删除任何记录。",
+    "旧 Work 没有原生 Session 关联时只能只读展示；必须由用户确认后才创建带来源的新 Session。",
+    "内存中的活动记录不在运行正文中，迁移不补造历史事件。",
+    "4 个旧 Work 尚未绑定原生会话，迁移时需只读展示。"
+  ]
+}

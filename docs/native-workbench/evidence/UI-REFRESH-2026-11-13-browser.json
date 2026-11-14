@@ -1,0 +1,350 @@
+{
+ "total": 28,
+ "failed": 0,
+ "results": [
+  {
+   "name": "browser channel",
+   "ok": true,
+   "detail": "msedge"
+  },
+  {
+   "name": "topbar brand + connection",
+   "ok": true,
+   "detail": {
+    "wordmark": "EMERALD",
+    "connection": "平台已连接",
+    "navItems": [
+     "我的工作",
+     "项目空间",
+     "应用中心",
+     "待我处理1",
+     "平台设置"
+    ],
+    "navCount": "1",
+    "recent": [
+     "NW10 跨域切换（合成）916254",
+     "等待答复的工作（合成演示）",
+     "DVP 修订（合成演示）",
+     "季度方案整理（合成演示）"
+    ],
+    "heroTitle": "今天，研究工作进展如何？",
+    "eyebrow": "11月14日星期六",
+    "launchTitle": "你现在想完成什么？",
+    "quickTargets": [
+     "↗合成 DVP 修订应用",
+     "↗合成成果演示应用"
+    ],
+    "launchModel": "合成模型 B（不可调用）",
+    "readinessTag": "执行器待配置",
+    "readinessLines": [
+     "应用目录已加载 · 2 个可用",
+     "模型目录可选择 · 2 个可用",
+     "…Worker 执行器尚未配置"
+    ],
+    "queueRows": 4,
+    "queueStates": [
+     "已排队",
+     "启动中",
+     "未发起运行",
+     "已成功"
+    ],
+    "queueUpdated": [
+     "1 天前",
+     "1 天前",
+     "1 天前",
+     "1 天前"
+    ],
+    "queueHead": [
+     "工作",
+     "专业应用",
+     "运行状态",
+     "最近活动",
+     "操作",
+     "操作"
+    ],
+    "projects": [
+     "临床数据项目（合成）"
+    ],
+    "pendingEmpty": null,
+    "foot": "平台连接正常专业应用 2项目空间 1模型与平台设置　›",
+    "overflowX": 0,
+    "topbarHeight": 56,
+    "navWidth": 210,
+    "pagePaddingLeft": "28px",
+    "bodyFont": "13px",
+    "primaryBg": "rgb(8, 123, 107)"
+   }
+  },
+  {
+   "name": "navigation order and recent works",
+   "ok": true,
+   "detail": {
+    "nav": [
+     "我的工作",
+     "项目空间",
+     "应用中心",
+     "待我处理1",
+     "平台设置"
+    ],
+    "recent": [
+     "NW10 跨域切换（合成）916254",
+     "等待答复的工作（合成演示）",
+     "DVP 修订（合成演示）",
+     "季度方案整理（合成演示）"
+    ]
+   }
+  },
+  {
+   "name": "launch panel with real catalogue quick targets",
+   "ok": true,
+   "detail": {
+    "quick": [
+     "↗合成 DVP 修订应用",
+     "↗合成成果演示应用"
+    ],
+    "model": "合成模型 B（不可调用）"
+   }
+  },
+  {
+   "name": "readiness reports the unconfigured executor honestly",
+   "ok": true,
+   "detail": {
+    "tag": "执行器待配置",
+    "lines": [
+     "应用目录已加载 · 2 个可用",
+     "模型目录可选择 · 2 个可用",
+     "…Worker 执行器尚未配置"
+    ]
+   }
+  },
+  {
+   "name": "works queue rows with recorded run states",
+   "ok": true,
+   "detail": {
+    "rows": 4,
+    "states": [
+     "已排队",
+     "启动中",
+     "未发起运行",
+     "已成功"
+    ],
+    "updated": [
+     "1 天前",
+     "1 天前",
+     "1 天前",
+     "1 天前"
+    ],
+    "head": [
+     "工作",
+     "专业应用",
+     "运行状态",
+     "最近活动",
+     "操作",
+     "操作"
+    ]
+   }
+  },
+  {
+   "name": "home has page padding and no horizontal overflow",
+   "ok": true,
+   "detail": {
+    "overflowX": 0,
+    "padding": "28px",
+    "topbar": 56,
+    "nav": 210,
+    "font": "13px",
+    "primary": "rgb(8, 123, 107)"
+   }
+  },
+  {
+   "name": "quick target pre-selects that application",
+   "ok": true,
+   "detail": {
+    "quickLabel": "合成 DVP 修订应用",
+    "form": {
+     "heading": "新建工作",
+     "app": "合成 DVP 修订应用 @1.0.0",
+     "project": "临床数据项目（合成）",
+     "workspace": "合成工作空间 — D:\\project\\company\\ec-clinical-dsh\\.runtime\\nw-web-home\\demo-workspace"
+    }
+   }
+  },
+  {
+   "name": "create Work lands on its detail page",
+   "ok": true,
+   "detail": {
+    "title": "UI 验证工作 1794619526367"
+   }
+  },
+  {
+   "name": "probe setup binds a real native session",
+   "ok": true,
+   "detail": {
+    "sessionId": "session-006b7fc4-0b85-4ff6-8f7a-170c61dfc6af",
+    "workId": "6550167d-3439-4dce-98a3-f306b59ee399",
+    "status": 200,
+    "reused": "session-006b7fc4-0b85-4ff6-8f7a-170c61dfc6af"
+   }
+  },
+  {
+   "name": "detail shows runs, sealed artifacts and context",
+   "ok": true,
+   "detail": {
+    "runs": 2,
+    "artifacts": 2,
+    "downloads": 2,
+    "facts": [
+     "项目",
+     "应用",
+     "原生会话",
+     "执行域",
+     "工作空间"
+    ],
+    "overflowX": 0
+   }
+  },
+  {
+   "name": "console keeps the native conversation and adds the run rail",
+   "ok": true,
+   "detail": {
+    "title": "季度方案整理（合成演示）",
+    "pill": "已成功",
+    "crumb": "← 返回临床数据项目（合成）·合成成果演示应用·运行 b52ab49d",
+    "nativeSession": "session-006b7fc4-0b85-4ff6-8f7a-170c61dfc6af",
+    "nativePhase": "active",
+    "composer": true,
+    "railPanels": [
+     "运行状态",
+     "文件成果",
+     "运行历史"
+    ],
+    "facts": [
+     "当前状态已成功",
+     "运行编号b52ab49d",
+     "开始时间2026/11/12 16:08:18",
+     "默认模型合成模型 B（不可调用）",
+     "工作空间D:\\project\\company\\ec-clinical-dsh\\.runtime\\nw-web-home\\demo-workspace"
+    ],
+    "artifacts": 2,
+    "runRows": 2,
+    "threadHeight": 747,
+    "railHeight": 747,
+    "pageOverflowY": 0,
+    "overflowX": 0,
+    "nativeHeaderInsideThread": false
+   }
+  },
+  {
+   "name": "console fits one screen without page scroll or overflow",
+   "ok": true,
+   "detail": {
+    "overflowY": 0,
+    "overflowX": 0,
+    "thread": 747,
+    "rail": 747
+   }
+  },
+  {
+   "name": "rail run switch updates the run facts",
+   "ok": true
+  },
+  {
+   "name": "console detail action returns to the same Work",
+   "ok": true
+  },
+  {
+   "name": "page 项目空间 renders",
+   "ok": true,
+   "detail": {
+    "heading": "项目空间"
+   }
+  },
+  {
+   "name": "page 应用中心 renders",
+   "ok": true,
+   "detail": {
+    "heading": "应用中心"
+   }
+  },
+  {
+   "name": "page 待我处理 renders",
+   "ok": true,
+   "detail": {
+    "heading": "待我处理"
+   }
+  },
+  {
+   "name": "page 平台设置 renders",
+   "ok": true,
+   "detail": {
+    "heading": "平台设置"
+   }
+  },
+  {
+   "name": "compact density applies live",
+   "ok": true,
+   "detail": {
+    "pressed": "true",
+    "density": "compact",
+    "font": "12px"
+   }
+  },
+  {
+   "name": "dark theme restyles the page",
+   "ok": true,
+   "detail": {
+    "background": "rgb(18, 23, 26)",
+    "color": "rgb(228, 234, 236)",
+    "card": "rgb(26, 32, 36)"
+   }
+  },
+  {
+   "name": "mobile layout has no horizontal overflow",
+   "ok": true,
+   "detail": {
+    "overflowX": 0,
+    "docOverflowX": 0,
+    "navVisible": "flex",
+    "recentHidden": "none",
+    "rowHeight": 69.9375,
+    "tableHead": "none",
+    "launchStacked": "column"
+   }
+  },
+  {
+   "name": "mobile console keeps thread and rail usable",
+   "ok": true,
+   "detail": {
+    "overflowX": 0,
+    "threadHeight": 5349,
+    "railVisible": true,
+    "composer": true
+   }
+  },
+  {
+   "name": "archive action settles through the control plane",
+   "ok": true
+  },
+  {
+   "name": "archived Works leave the continue queue",
+   "ok": true,
+   "detail": {
+    "rows": 4
+   }
+  },
+  {
+   "name": "the archived filter reveals them again",
+   "ok": true
+  },
+  {
+   "name": "no runtime errors",
+   "ok": true,
+   "detail": []
+  },
+  {
+   "name": "no failed requests",
+   "ok": true,
+   "detail": []
+  }
+ ]
+}

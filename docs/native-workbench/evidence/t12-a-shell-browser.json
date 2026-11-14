@@ -1,0 +1,92 @@
+{
+  "at": "2026-11-12T08:57:47.572Z",
+  "checks": [
+    {
+      "name": "only one plugin page node exists",
+      "ok": true,
+      "detail": "1"
+    },
+    {
+      "name": "the platform page is the default main",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "internal enterprise nav has five entries",
+      "ok": true,
+      "detail": "[\"▤项目空间\",\"◈应用中心\",\"▦我的工作\",\"◷待处理\",\"⚙平台设置\"]"
+    },
+    {
+      "name": "the platform page spans the main column",
+      "ok": true,
+      "detail": "{\"x\":56,\"y\":0,\"width\":1384,\"height\":900}"
+    },
+    {
+      "name": "no iframe is used",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "the plugin client bundle is loaded",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "no old standalone app asset is requested",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "internal nav opens 项目空间",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "internal nav opens 应用中心",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "internal nav opens 待处理",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "internal nav opens 平台设置",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "a native session is available",
+      "ok": true,
+      "detail": "session-297c5d3b-55bd-429d-acec-62978ec78a43"
+    },
+    {
+      "name": "a work binds to the native session",
+      "ok": true,
+      "detail": "201"
+    },
+    {
+      "name": "opening a work shows the native conversation",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "the native conversation header offers 返回工作台",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "返回工作台 returns to the platform page",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "no unexpected page errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "errors": [],
+  "badResponses": []
+}

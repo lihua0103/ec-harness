@@ -1,4 +1,5 @@
 import { applications, defaults, findApplication, supported } from './applications.mjs';
+import { DEFAULT_MODEL_ID, modelAvailability, modelLabel } from './models.mjs';
 
 export const MAX_FILES = 30;
 export const copy = value => structuredClone(value);
@@ -7,14 +8,17 @@ const now = () => new Date().toISOString();
 export const draftKey = (projectId, appId) => JSON.stringify([projectId, appId]);
 export function freshState(catalog = applications) {
   const project = { id: 'P001', revision: 1, name: '临床项目示例', code: 'SYN-001', directory: 'D:/Clinical/SYN-001', batch: '2026-11-01', server: '' };
-  return { version: 4, revision: 0, projects: [project], drafts: {}, works: [], recovery: [], preferences: { favorites: [], recent: [] }, selection: { projectId: project.id, appId: catalog[0]?.appId || '' } };
+  return { version: 4, revision: 0, projects: [project], drafts: {}, works: [], recovery: [], preferences: { favorites: [], recent: [], defaultModelId: DEFAULT_MODEL_ID }, selection: { projectId: project.id, appId: catalog[0]?.appId || '' } };
 }
 export function getDraft(state, projectId = state.selection.projectId, appId = state.selection.appId, catalog = applications) {
   const key = draftKey(projectId, appId);
   if (!Object.hasOwn(state.drafts, key)) {
     const app = findApplication(appId, catalog);
     if (!supported(app)) throw Error('应用当前不可用，请选择其他应用。');
-    state.drafts[key] = { projectId, appId, options: defaults(app), prompt: '', files: [], sourceWorkId: null };
+    // Keep the recorded preference even if the catalog no longer has it, so the UI can explain
+    // the real state instead of silently swapping in another model.
+    const preferred = state.preferences?.defaultModelId;
+    state.drafts[key] = { projectId, appId, options: defaults(app), prompt: '', files: [], sourceWorkId: null, modelId: preferred || DEFAULT_MODEL_ID };
   }
   return state.drafts[key];
 }
@@ -76,17 +80,39 @@ export function createWork(state, draft, catalog = applications) {
   const prompt = draft.prompt.trim();
   if (!prompt) throw Error('请描述你希望完成的工作。');
   if (draft.files.length > MAX_FILES) throw Error('资料超过30个，先保留备份并整理资料。');
+  const modelId = draft.modelId || state.preferences?.defaultModelId || null;
+  const availability = modelAvailability(modelId);
+  if (availability.state !== 'available') throw Error(`${availability.label}：${availability.reason}`);
   const work = {
     id: id('WORK'), title: prompt.slice(0, 60), appId: app.appId, appVersion: app.version,
     appSnapshot: copy(app), projectId: project.id, projectSnapshot: copy(project),
     contextOrigin: 'captured', createdAt: now(), archivedAt: null, sourceWorkId: draft.sourceWorkId || null,
-    inputs: [{ revision: 1, request: prompt, options: copy(draft.options), files: copy(draft.files), createdAt: now(), reason: '创建工作' }],
+    inputs: [{ revision: 1, request: prompt, options: copy(draft.options), files: copy(draft.files), modelId, createdAt: now(), reason: '创建工作' }],
     messages: [{ role: 'user', text: prompt, inputRevision: 1 }], replyDraft: '', resultPreviews: [], readOnlyReason: '',
   };
   state.works.unshift(work);
   state.preferences.recent = [app.appId, ...state.preferences.recent.filter(x => x !== app.appId)].slice(0, 20);
   state.drafts[draftKey(draft.projectId, draft.appId)] = { ...copy(draft), prompt: '', files: [], sourceWorkId: null };
   return work;
+}
+export function setDraftModel(draft, modelId) {
+  const availability = modelAvailability(modelId);
+  if (availability.state !== 'available') throw Error(`${availability.label}：${availability.reason}`);
+  draft.modelId = modelId;
+}
+export function setWorkModel(work, modelId, catalog = applications) {
+  assertEditable(work, catalog);
+  const availability = modelAvailability(modelId);
+  if (availability.state !== 'available') throw Error(`${availability.label}：${availability.reason}`);
+  const previous = activeInput(work);
+  if (previous.modelId === modelId) return false;
+  appendInput(work, { ...previous, modelId }, '模型切换');
+  return true;
+}
+export function setDefaultModel(state, modelId) {
+  const availability = modelAvailability(modelId);
+  if (availability.state !== 'available') throw Error(`${availability.label}：${availability.reason}`);
+  state.preferences.defaultModelId = modelId;
 }
 export function appendMessage(work, text, catalog = applications) {
   assertEditable(work, catalog);
@@ -127,14 +153,14 @@ export function previewMarkdown(work, previewId) {
   const preview = work.resultPreviews.find(p => p.id === previewId);
   if (!preview) throw Error('未找到结果预览。');
   const input = work.inputs.find(i => i.revision === preview.inputRevision);
-  return `# EMERALD 原型说明（非业务交付）\n\n未调用模型、未读取资料内容、未执行或审核。\n\n工作：${work.id}\n应用：${work.appSnapshot.displayName}\n项目：${work.projectSnapshot.name}\n上下文：${work.contextOrigin === 'captured' ? '创建时快照' : '旧记录未保存历史快照'}\n输入修订：${input.revision}\n\n## 要求\n${input.request}\n\n## 资料名称\n${input.files.map(f => '- ' + f.name).join('\n') || '未添加'}\n\n## 预期成果（未生成）\n${preview.types.map(t => '- ' + t).join('\n')}\n`;
+  return `# EMERALD 原型说明（非业务交付）\n\n未调用模型、未读取资料内容、未执行或审核。\n\n工作：${work.id}\n应用：${work.appSnapshot.displayName}\n项目：${work.projectSnapshot?.name || '未记录'}\n模型：${modelLabel(input.modelId)}\n上下文：${work.contextOrigin === 'captured' ? '创建时快照' : '旧记录未保存历史快照'}\n输入修订：${input.revision}\n\n## 要求\n${input.request}\n\n## 资料名称\n${input.files.map(f => '- ' + f.name).join('\n') || '未添加'}\n\n## 预期成果（未生成）\n${preview.types.map(t => '- ' + t).join('\n')}\n`;
 }
 export const newId = id;
 export function validFile(file) { return !!file && typeof file.name === 'string' && file.name.length > 0 && file.name.length <= 255 && typeof file.role === 'string' && file.role.length <= 80 && ['local', 'sample'].includes(file.source); }
 const text = x => typeof x === 'string';
 const record = x => x && typeof x === 'object' && !Array.isArray(x);
 export function validProject(p) { return record(p) && ['id', 'name', 'code', 'directory', 'batch', 'server'].every(k => text(p[k])) && Number.isInteger(p.revision); }
-export function validDraft(d) { return record(d) && text(d.projectId) && text(d.appId) && text(d.prompt) && record(d.options) && Array.isArray(d.files) && d.files.every(validFile); }
+export function validDraft(d) { return record(d) && text(d.projectId) && text(d.appId) && text(d.prompt) && record(d.options) && Array.isArray(d.files) && d.files.every(validFile) && (d.modelId == null || text(d.modelId)); }
 export function validWork(w) {
   return record(w) && ['id', 'title', 'appId', 'appVersion', 'projectId', 'createdAt'].every(k => text(w[k]))
     && validProject(w.projectSnapshot) && record(w.appSnapshot) && text(w.appSnapshot.displayName)
@@ -143,7 +169,7 @@ export function validWork(w) {
     && Array.isArray(w.appSnapshot.plan) && w.appSnapshot.plan.every(text)
     && Array.isArray(w.appSnapshot.materialRoles) && w.appSnapshot.materialRoles.every(text)
     && Array.isArray(w.inputs) && w.inputs.length > 0
-    && w.inputs.every((i, n) => record(i) && i.revision === n + 1 && text(i.request) && record(i.options) && Array.isArray(i.files) && i.files.every(validFile))
+    && w.inputs.every((i, n) => record(i) && i.revision === n + 1 && text(i.request) && record(i.options) && Array.isArray(i.files) && i.files.every(validFile) && (i.modelId == null || text(i.modelId)))
     && Array.isArray(w.messages) && w.messages.every(m => record(m) && ['user', 'assistant'].includes(m.role) && text(m.text))
     && Array.isArray(w.resultPreviews) && w.resultPreviews.every(p => record(p) && text(p.id) && w.inputs.some(i => i.revision === p.inputRevision) && Array.isArray(p.types) && p.types.every(text))
     && (w.archivedAt === null || text(w.archivedAt)) && text(w.replyDraft) && text(w.readOnlyReason);

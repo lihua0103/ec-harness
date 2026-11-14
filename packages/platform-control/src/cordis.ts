@@ -7,9 +7,10 @@ import { PlatformError } from './registry.js';
 import { AuthorizationError, LocalOperatorPolicy, type Principal } from './policy.js';
 import { RunError } from '../../platform-runtime/src/run.js';
 import { resolveStorePath, validateConfig, type Config } from './config.js';
+import { publicCatalog } from './models.js';
 import { DshProfileExecutor } from './worker.js';
 import { RunScheduler } from './scheduler.js';
-import type { AppState, AppReleaseDraft } from './store.js';
+import type { AppState, AppReleaseDraft, WorkState } from './store.js';
 
 export type { Config } from './config.js';
 
@@ -47,19 +48,27 @@ const publicRun = <T extends { input?: unknown }>(record: T): Omit<T, 'input'> =
 
 export function apply(ctx: Context, config: Config = {}): void {
   const validated = validateConfig(config);
-  const executor = validated.worker ? new DshProfileExecutor(validated.worker) : null;
   const service = new PlatformControlService(
     resolveStorePath(validated),
-    executor,
+    null,
     validated.allowedApps ? new LocalOperatorPolicy({ allowedApps: validated.allowedApps }) : undefined,
     { requireArtifacts: validated.requireArtifacts },
   );
+  if (validated.worker) {
+    // Persist exit evidence in launch_attempts so it survives control-process restarts.
+    service.setExecutor(
+      new DshProfileExecutor(validated.worker, undefined, {
+        record: (launchId, proven) => service.recordExitEvidence(launchId, proven),
+        read: (launchId) => service.readExitEvidence(launchId),
+      }),
+    );
+  }
   ctx.provide('platformControl', service);
   ctx.effect(() => () => service.close());
   if (validated.reconcileOnStartup) {
     service.reconcileOrphans({ actorId: 'service:startup', kind: 'service' });
   }
-  if (executor && validated.scheduler?.enabled !== false) {
+  if (validated.worker && validated.scheduler?.enabled !== false) {
     const scheduler = new RunScheduler(service, validated.scheduler?.intervalMs ?? 5000, {
       actorId: 'service:scheduler',
       kind: 'service',
@@ -115,9 +124,15 @@ export function apply(ctx: Context, config: Config = {}): void {
             createdAt: app.createdAt,
           }));
           const runs = service.listRuns(undefined, 0, 50, principal);
+          const works = service.listWorks(undefined, 0, 50, principal);
           return {
             apps,
+            works: { total: works.total, items: works.items },
             runs: { total: runs.total, items: runs.items.map(publicRun) },
+            models: {
+              catalog: publicCatalog(service.modelCatalog(principal)),
+              preference: service.modelPreference(principal),
+            },
             status: service.status(),
           };
         });
@@ -182,20 +197,186 @@ export function apply(ctx: Context, config: Config = {}): void {
   );
   ctx.tools.register(
     defineTool({
-      name: 'platform_run_create',
+      name: 'platform_model_catalog_register',
       description:
-        '为 ACTIVE 应用版本创建一个 QUEUED 运行，冻结 releaseDigest/planDigest 与输入摘要。创建不等于执行；Worker 由平台监督器派发。',
+        '登记/替换部署审定的模型目录快照（metadata-only）：目录 ID、批准 RuntimeBundle 摘要、默认选择与模型项。不接收密钥、任意 baseURL 或性能排名；同一内容幂等，变更留审计。',
+      parameters: { catalogJson: { ...string, required: true, description: 'ModelCatalogDraft JSON；≤200KB。' } },
+      output,
+      async execute(args, exec) {
+        return run(() => {
+          const principal = operator(exec);
+          const draft = parseJson(args.catalogJson, 200_000, 'MODEL_CATALOG_TOO_LARGE');
+          return service.registerModelCatalog(draft, principal);
+        });
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_model_catalog',
+      description:
+        '读取当前模型目录（含可用性/停用原因、能力元数据与来源验证标记）与调用者偏好；不返回凭据或密钥。目录为空时返回 null。',
+      parameters: {},
+      output,
+      async execute(_args, exec) {
+        return run(() => {
+          const principal = operator(exec);
+          return {
+            catalog: publicCatalog(service.modelCatalog(principal)),
+            preference: service.modelPreference(principal),
+          };
+        });
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_model_preference_set',
+      description:
+        '保存调用者默认模型偏好（目录内可用的 selectionId）。偏好只影响后续新运行；运行快照不会被改写，也不授予任何业务或数据权限。',
+      parameters: { selectionId: { ...string, required: true } },
+      output,
+      async execute(args, exec) {
+        return run(() => service.setModelPreference(args.selectionId, operator(exec)));
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_work_create',
+      description:
+        '创建一项员工工作（Work）：项目、ACTIVE 应用版本与标题。Run 是这项工作下的执行尝试；同一 Work 同时最多一个非终态 Run。',
       parameters: {
+        projectId: { ...string, required: true },
         appId: { ...string, required: true },
         appVersion: { ...string, required: true },
+        title: { ...string, required: true, description: '≤200 字符。' },
+      },
+      output,
+      async execute(args, exec) {
+        return run(() =>
+          service.createWork(
+            { projectId: args.projectId, appId: args.appId, appVersion: args.appVersion, title: args.title },
+            operator(exec),
+          ),
+        );
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_work_list',
+      description: '列出工作（可按 ACTIVE/ARCHIVED 筛选），最近更新在前。',
+      parameters: { state: { ...string, enum: ['ACTIVE', 'ARCHIVED'] }, offset: { type: 'number' }, limit: { type: 'number' } },
+      output,
+      async execute(args, exec) {
+        return run(() =>
+          service.listWorks(
+            args.state as WorkState | undefined,
+            args.offset ?? 0,
+            Math.min(args.limit ?? 20, 100),
+            operator(exec),
+          ),
+        );
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_work_get',
+      description: '读取一项工作的归属、应用版本与状态。',
+      parameters: { workId: { ...string, required: true } },
+      output,
+      async execute(args, exec) {
+        return run(() => service.getWork(args.workId, operator(exec)));
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_work_archive',
+      description: '归档工作：之后不能在该 Work 下创建新 Run；历史 Run 与输入不回写。',
+      parameters: { workId: { ...string, required: true } },
+      output,
+      async execute(args, exec) {
+        return run(() => service.archiveWork(args.workId, operator(exec)));
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_work_runs',
+      description: '列出一项工作下的执行尝试，最新创建在前。',
+      parameters: { workId: { ...string, required: true }, offset: { type: 'number' }, limit: { type: 'number' } },
+      output,
+      async execute(args, exec) {
+        return run(() => {
+          const page = service.runsForWork(
+            args.workId,
+            args.offset ?? 0,
+            Math.min(args.limit ?? 20, 100),
+            operator(exec),
+          );
+          return { total: page.total, items: page.items.map(publicRun) };
+        });
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_work_run_create',
+      description:
+        '在 ACTIVE Work 下创建一次执行尝试：冻结应用版本、输入与模型路由快照；同 Work 已有非终态 Run 时拒绝。创建不等于执行。',
+      parameters: {
+        workId: { ...string, required: true },
         inputJson: { ...string, required: true, description: '运行输入 JSON；≤1MB。' },
+        modelSelectionId: { ...string, description: '平台模型目录中的 selectionId。' },
+        modelOptionsJson: { ...string, description: '可选模型参数 JSON。' },
       },
       output,
       async execute(args, exec) {
         return run(() => {
           const principal = operator(exec);
           const input = parseJson(args.inputJson, 1024 * 1024, 'RUN_INPUT_TOO_LARGE');
-          return publicRun(service.createRun(args.appId, args.appVersion, input, principal));
+          const modelOptions = args.modelOptionsJson
+            ? parseJson(args.modelOptionsJson, 20_000, 'MODEL_OPTIONS_INVALID')
+            : undefined;
+          return publicRun(
+            service.createWorkRun(args.workId, input, principal, {
+              ...(args.modelSelectionId !== undefined ? { modelSelectionId: args.modelSelectionId } : {}),
+              ...(modelOptions !== undefined ? { modelOptions } : {}),
+            }),
+          );
+        });
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_run_create',
+      description:
+        '为 ACTIVE 应用版本创建一个 QUEUED 运行，冻结 releaseDigest/planDigest、输入摘要与模型路由快照。可选 modelSelectionId（目录内可用项）；缺省时使用保存的偏好，再无则用部署默认。未知/停用模型明确失败，不会静默改用其他模型。创建不等于执行。',
+      parameters: {
+        appId: { ...string, required: true },
+        appVersion: { ...string, required: true },
+        inputJson: { ...string, required: true, description: '运行输入 JSON；≤1MB。' },
+        modelSelectionId: { ...string, description: '平台模型目录中的 selectionId；不接受 provider/model 字符串路由。' },
+        modelOptionsJson: { ...string, description: '可选模型参数 JSON（如 reasoningEffort/maxTokens）；须在目录项允许范围内。' },
+      },
+      output,
+      async execute(args, exec) {
+        return run(() => {
+          const principal = operator(exec);
+          const input = parseJson(args.inputJson, 1024 * 1024, 'RUN_INPUT_TOO_LARGE');
+          const modelOptions = args.modelOptionsJson
+            ? parseJson(args.modelOptionsJson, 20_000, 'MODEL_OPTIONS_INVALID')
+            : undefined;
+          return publicRun(
+            service.createRun(args.appId, args.appVersion, input, principal, {
+              ...(args.modelSelectionId !== undefined ? { modelSelectionId: args.modelSelectionId } : {}),
+              ...(modelOptions !== undefined ? { modelOptions } : {}),
+            }),
+          );
         });
       },
     }),

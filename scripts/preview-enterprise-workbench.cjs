@@ -7,9 +7,12 @@ const root = path.resolve(__dirname, '../prototypes/enterprise-workbench');
 const files = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/index.html', ['index.html', 'text/html; charset=utf-8']],
+  ['/design.html', ['design.html', 'text/html; charset=utf-8']],
+  ['/design.css', ['design.css', 'text/css; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
   ['/applications.mjs', ['applications.mjs', 'text/javascript; charset=utf-8']],
+  ['/models.mjs', ['models.mjs', 'text/javascript; charset=utf-8']],
   ['/model.mjs', ['model.mjs', 'text/javascript; charset=utf-8']],
   ['/storage.mjs', ['storage.mjs', 'text/javascript; charset=utf-8']],
   ['/brand.svg', ['brand.svg', 'image/svg+xml']],
@@ -27,5 +30,6 @@ const server = http.createServer((req, res) => {
   });
 });
 server.on('error', error => {console.error(`Prototype preview failed: ${error.message}`);process.exitCode=1;});
-server.listen(3081, '127.0.0.1', () => console.log('Enterprise workbench prototype ready: http://127.0.0.1:3081'));
+const port = Number(process.env.PORT) || 3081;
+server.listen(port, '127.0.0.1', () => console.log(`Enterprise workbench prototype ready: http://127.0.0.1:${server.address().port}`));
 for(const signal of ['SIGINT','SIGTERM']) process.on(signal,()=>server.close(()=>process.exit(0)));

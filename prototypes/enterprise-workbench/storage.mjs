@@ -2,6 +2,7 @@ import { applications, defaults, findApplication, supported } from './applicatio
 import {
   MAX_FILES, copy, draftKey, freshState, newId, validDraft, validFile, validProject, validWork,
 } from './model.mjs';
+import { DEFAULT_MODEL_ID } from './models.mjs';
 
 export const KEY = 'emerald.dsh.platform.prototype.v4';
 export const LEGACY_KEY = 'emerald.dsh.platform.prototype.v3';
@@ -42,7 +43,7 @@ function workFromLegacy(task, state, catalog) {
     projectId: asText(task.projectId) || project?.id || '', projectSnapshot: projectSnapshot(project),
     contextOrigin: project ? 'legacy-project' : 'unknown', createdAt: created,
     archivedAt: null, sourceWorkId: null,
-    inputs: [{ revision: 1, request: prompt, options: mappedOptions(app, task.type ? { listingType: task.type } : undefined), files: copy(files), createdAt: created, reason: '从 v3 记录迁移' }],
+    inputs: [{ revision: 1, request: prompt, options: mappedOptions(app, task.type ? { listingType: task.type } : undefined), files: copy(files), modelId: null, createdAt: created, reason: '从 v3 记录迁移' }],
     messages: (Array.isArray(task.messages) ? task.messages : []).filter(m => isObject(m) && ['user', 'assistant'].includes(m.role) && typeof m.text === 'string').map(m => ({ role: m.role, text: asText(m.text, 12000), inputRevision: 1 })),
     replyDraft: '', resultPreviews: [], readOnlyReason: '',
   };
@@ -56,7 +57,7 @@ function workFromLegacy(task, state, catalog) {
 export function migrateV3(v3, catalog = applications) {
   if (!isObject(v3) || v3.version !== 3) throw Error('不是可迁移的 v3 记录。');
   const state = freshState(catalog);
-  state.projects = []; state.works = []; state.drafts = {}; state.recovery = []; state.preferences = { favorites: [], recent: [] };
+  state.projects = []; state.works = []; state.drafts = {}; state.recovery = []; state.preferences = { favorites: [], recent: [], defaultModelId: DEFAULT_MODEL_ID };
   for (const p of Array.isArray(v3.projects) ? v3.projects : []) {
     if (!isObject(p) || typeof p.id !== 'string' || state.projects.some(x => x.id === p.id)) { state.recovery.push(recoveryEntry('project', p, '项目记录不完整，已保留原始内容。')); continue; }
     const project = { id: p.id, revision: 1, name: asText(p.name, 500), code: asText(p.code, 500), directory: asText(p.directory, 1000), batch: asText(p.batch, 1000), server: asText(p.server, 1000) };
@@ -82,7 +83,7 @@ export function migrateV3(v3, catalog = applications) {
     if (!app || files.length > MAX_FILES) {
       state.recovery.push(recoveryEntry('draft', source, files.length > MAX_FILES ? '旧草稿资料超过30个，已原样隔离。' : '旧草稿应用不可用，已原样隔离。'));
     } else {
-      state.drafts[draftKey(source.projectId, appId)] = { projectId: source.projectId, appId, options: mappedOptions(app, source.type ? { listingType: source.type } : undefined), prompt: asText(source.prompt), files, sourceWorkId: null };
+      state.drafts[draftKey(source.projectId, appId)] = { projectId: source.projectId, appId, options: mappedOptions(app, source.type ? { listingType: source.type } : undefined), prompt: asText(source.prompt), files, sourceWorkId: null, modelId: DEFAULT_MODEL_ID };
       state.selection = { projectId: source.projectId, appId };
     }
   }
@@ -111,12 +112,20 @@ export function sanitizeV4(value, catalog = applications) {
   state.preferences = {
     favorites: Array.isArray(value.preferences?.favorites) ? value.preferences.favorites.filter(x => typeof x === 'string') : [],
     recent: Array.isArray(value.preferences?.recent) ? value.preferences.recent.filter(x => typeof x === 'string').slice(0, 20) : [],
+    // Keep an unrecognized recorded model id (e.g. a revoked catalog entry) so the UI can show
+    // its real state. Only a missing/invalid value falls back to the platform default.
+    defaultModelId: typeof value.preferences?.defaultModelId === 'string' && value.preferences.defaultModelId
+      ? value.preferences.defaultModelId
+      : DEFAULT_MODEL_ID,
   };
   for (const [key, draft] of Object.entries(isObject(value.drafts) ? value.drafts : {})) {
     if (!validDraft(draft) || draft.files.length > MAX_FILES || !supported(findApplication(draft.appId, catalog))) {
       state.recovery.push(recoveryEntry('draft', draft, '草稿校验未通过或应用不可用，已隔离保留。')); continue;
     }
-    state.drafts[key] = copy(draft);
+    state.drafts[key] = {
+      ...copy(draft),
+      modelId: typeof draft.modelId === 'string' && draft.modelId ? draft.modelId : state.preferences.defaultModelId,
+    };
   }
   state.recovery.push(...(Array.isArray(value.recovery) ? value.recovery.filter(isObject) : []));
   const projectId = value.selection?.projectId;

@@ -112,20 +112,115 @@ DVP 单独装配缺少 `clinicalKnowledge`。
 | platform-workbook | `npm run typecheck` | 通过 |
 | platform-knowledge | `npm run verify` | tsc 通过；bundle 构建通过 |
 | platform-runtime | `npm run verify` | tsc 通过；7/7 测试通过 |
-| platform-control | `npm run verify` | tsc 通过；17/17 测试通过；bundle 构建通过 |
+| platform-control | `npm run verify` | tsc 通过；23/23 测试通过；bundle 构建通过 |
 | 全仓门禁 | `node scripts/verify-all.cjs` | 6/6 包验证命令通过；规范检查（插件互引/包边界导入）0 违规；自检夹具通过 |
 | DSH Web 装配 | `node scripts/start-dsh-web.cjs`（3080） | 启动无错误；插件页显示 `@ec-clinical/dsh-dm-listing`、`@ec-clinical/dsh-dm-dvp`、`@ec-clinical/platform-knowledge`、`@ec-clinical/platform-control` 均安装并启用 |
 
 测试使用合成/临时数据，未读取真实临床项目。DSH 只做了宿主装配烟测（页面显示四包启用），未发送模型业务请求、
 未执行真实项目、未完成临床验收。
 
-## 仍未完成（不属于本轮可独立修复的代码缺陷）
+## 平台模型目录与工作台模型体验（第四轮）
 
-1. **企业身份、授权与数据入口**：需要 IT/API 合同与部署环境；当前插件仍使用本机文件与操作者 R 配置。
-2. **DSH Worker 集成**：`platform-runtime`/`platform-control` 已提供计划解析、持久运行、事件与审计；
-   `RunExecutor` 尚未配置，不能实际启动 Worker；进程监督、租约与调度待实现。
-3. **工作台仍为原型**：未接真实执行、认证与文件服务；不能以原型演示当平台验收。
-4. **真实项目业务验收**：Listing 真实项目端到端、DVP 真实方案/模板复核仍需按项目执行并留证。
-5. **统一代码托管与 CI**：外层工作区已建立 Git 基线（`main` 首个提交含源码、规范、钩子与门禁；忽略 node_modules、构建产物、运行证据与固定上游检出）。远端托管、分支保护与 CI 实际运行未完成：`.github/workflows/verify.yml` 的守卫通道即本项目检查脚本，完整通道需拉取上游 DSH 构建并安装 R，尚未在托管 runner 执行，不能视为已验证。
-6. **全仓格式化**：已新增 `.editorconfig`、`.prettierrc.json`，并格式化 Listing 入口与 platform-knowledge
-   核心模块；其余历史压缩式文件仍待一次独立、无逻辑变更的格式化提交。
+- **控制面模型合同**：新增 `src/models.ts` 与 `model_catalog`/`model_preferences` 持久表。
+  目录是部署注册的 metadata-only 快照（RuntimeBundle 摘要、默认选择、selectionId/provider/model/
+  adapter、可用性与停用原因、能力与允许参数、验证来源）；校验拒绝密钥类字段、重复或路由式
+  selectionId、不可用默认项。同一内容幂等，变更写审计。
+- **Run 模型快照**：`platform_run_create` 按显式选择 → 保存偏好 → 部署默认解析，服务端重新校验并冻结
+  `ModelConfigSnapshot`；未知/停用/跨 RuntimeBundle 明确失败，不静默 fallback。目录更新不改写历史 Run；
+  retry 重新校验原 route，拒绝改映射。Worker dispatch 收到快照并传递给 SDK；adapter 不一致报
+  `WORKER_MODEL_ROUTE_MISMATCH`。
+- **工作台原型**：模型目录增加可用性、来源/验证与“未声明”能力；选择器禁止任意 provider/模型 ID；
+  未知/不可用的旧选择显式阻止开始工作，不静默替换；修订消息与结果预览显示绑定的模型快照。
+  预览服务器支持 `PORT`，避免与并行会话的 3081 冲突。
+- **实测**：控制面 typecheck 通过、39/39 测试通过、bundle 构建通过；工作台 27/27 测试通过；
+  浏览器验证模型选择/切换/设置页渲染，控制台无错误。未执行 DSH 实时目录探测、真实 adapter 握手、
+  企业授权或真实模型调用。
+
+## Work、工作台 API 与正式前端切片（第五轮）
+
+- **Work 与准入**：新增 `works` 持久表/仓库与服务/工具；Run 可绑定 Work；同一 Work 同时最多一个
+  非终态 Run；归档拒绝新 Run 与 retry。`dispatch` 改为完整分页读取全部输入，修复固定 100 条截断。
+- **HTTP 工作台 API**：`packages/platform-control/src/http.ts` 提供同源 `/api/*`，服务层逐请求授权；
+  运行投影不含输入正文；静态资源白名单 + CSP；错误映射稳定。`api-cli.ts` 绑定 loopback 并以固定
+  本地 operator 启动，`--seed` 只注册合成应用与本地模型目录。
+- **正式前端**：新增 `apps/enterprise-workbench`（工作列表、工作画布、运行尝试、模型控制、事件/输入/
+  成果上下文、排队/取消/归档状态、窄屏布局），只消费 API，无预设回复或假执行。`verify-all` 纳入
+  `apps/` 验证发现。
+- **实测**：控制面 typecheck 通过、51/51 测试通过、bundle 构建通过；正式前端 6/6 状态测试通过；
+  浏览器实测新建工作→排队运行→补充输入→取消→归档→切换模型新建尝试，控制台无错误；全仓待重跑。
+  未执行真实 Worker、模型调用、企业身份或成果封存。
+
+## 工作台体验诚实性与门禁严格化（第六轮）
+
+- **工作台不再静默换模型**：目录中保存的偏好或当前选择不可用时，选择器显式显示“当前选择不可用，
+  请显式选择模型”，并阻止“设为默认”；开始工作、新建尝试、重试前都校验当前所选模型可用，
+  不可用即拒绝并给出原因，不再自动替换为目录中的第一个可用项或部署默认。旧的替换逻辑已删除。
+- **历史完整性**：工作列表、某工作的运行尝试、事件、输入改为按平台分页取全量（`total/offset` 循环），
+  修复 5 秒轮询下只显示前 100 条事件/输入的截断；中间页为空或响应无效时显式报 `PAGE_INCOMPLETE` /
+  `PAGE_INVALID`，不把截断列表当完整历史。
+- **写操作断网诚实性**：读请求断网提示重试；写请求断网改为“结果未知，请先刷新核对，不要直接重复提交”，
+  不再错误宣称“当前操作没有提交”。
+- **运行状态完整映射**：前端补齐 `WAITING_FOR_USER`、`FINALIZING`、`CANCELLING`、`UNKNOWN`；
+  `UNKNOWN` 与 `FINALIZING` 不提供补充输入/新建重试入口（`canAppend` 白名单），提示需要可信结算或
+  对账。重试请求携带界面当前显式选择的模型。
+- **聚合门禁严格化**（`scripts/verify-all.cjs`）：必须显式声明 `scripts.verify`，不再缺省择一执行
+  typecheck/test/build；配置 Bundle 按 manifest 的实际 `dsh.bundle.patch` 检查，不强制 `src/`、`build.mjs`
+  或固定 patch 名；规范检查器缺失即失败；把检查器 `--self-test`、聚合器自检、各原型 `verify.mjs`
+  纳入检查；子进程非零退出、启动异常或信号中止均计失败。
+- **实测（Node 24.9.0，本轮全仓基线）**：`scripts/verify-all.cjs` **12/12 检查通过**——Listing 70/70、
+  DVP 68/68、platform-control 58/58、platform-runtime 7/7、platform-identity 7/7、正式工作台 10/10、
+  platform-knowledge/workbook 类型与构建、聚合器自检 19/19、原型 27/27、规范检查器自检通过。
+- **DSH 装配组合**：以独立端口加载 web profile 执行 `--dump-config`（不启动服务、不调用模型），退出码 0，
+  组合结果包含 `@ec-clinical/platform-control`、`@ec-clinical/platform-knowledge`、`@ec-clinical/dsh-dm-listing`、
+  `@ec-clinical/dsh-dm-dvp` 四个包。这是配置组合证据，不等于运行时挂载/工具调用的集成验收。
+- **未完成**：预览面板在当前窗口未打开时上报视口 0×0，点击交互无法执行，浏览器交互回归 NOT_RUN
+  （截图可渲染但不构成交互验收）；需在可见窗口或用真实浏览器重跑
+  新建工作→排队→模型切换→取消→重试流程。
+
+## 成果封存、事件流与原生问答（第七轮）
+
+- **成果封存与授权下载**：Worker 关闭后由控制面复制字节到 `artifacts/<runId>/<name>`，复制时复算
+  SHA-256 与大小；不一致运行失败且不登记；只有封存副本计入完成屏障。下载接口重新鉴权并在读取时
+  复验，篡改返回 `RUN_ARTIFACT_TAMPERED`，投影不暴露封存路径。
+- **可恢复事件流**：`GET /api/runs/:id/events/stream`（SSE）按持久 sequence 游标
+  （`Last-Event-ID`/`after`）重放，断线可续传；工作台优先用流、保留 5 秒轮询兜底。
+- **原生问答收件箱**：SDK `onUserQuestion` 持久化为 `run_interactions`（run/session/requestId），
+  控制面等待 CAS 答复；重复答复、未知选项/空答复、运行终止后的晚答均拒绝；取消/终止时未答问题
+  置 CANCELLED/EXPIRED 并向 SDK 返回 `{cancelled:true}`；工作台提供选项/多选/自定义答复。
+- **实测（Node 24.9.0）**：platform-control 64/64；全仓 `scripts/verify-all.cjs` **12/12 检查通过**。
+  未运行真实模型、未接 DSH 工具审批/平台业务审核通道、未做运行状态机 WAITING_FOR_USER。
+
+## 补充方案剩余工作矩阵（2026-11-11，按实际证据）
+
+状态口径：PASS=有本轮实际执行证据；PARTIAL=代码合同/回归已完成但缺集成或真实环境证据；
+NOT_RUN=未执行；BLOCKED=需 IT/业务/部署授权或环境。
+
+| 编号 | 状态 | 已具备的事实 | 仍缺 |
+|---|---|---|---|
+| DSH01 | PARTIAL | Run 快照记录 selection/provider/model/adapter/options，Worker 按快照传参；有快照的成功缺 `model/selection` 证据时为 UNKNOWN | 真实 SDK 握手与实际 adapter route 的网络级证据 |
+| DSH02 | PARTIAL | RuntimeBundle 摘要匹配、adapter 不一致拒绝、撤销后 dispatch 再校验 | profile/patch/adapter 制品闭包验证；缺 adapter 明确失败的真实运行 |
+| DSH03 | BLOCKED | 部署注册目录 + 结构校验 + 来源标记（provider-declared/platform-verified/unverified） | 部署侧 `ctx.llm` 探测与带 profile/adapter 摘要的目录快照发布 |
+| DSH04 | PARTIAL | selection 级策略过滤目录/偏好/创建/重试，猜 ID 与不存在同样拒绝，审计 model/selection 事件，策略缺失 fail-closed | 真实企业组织/项目/区域身份接入（IT） |
+| DSH05 | PARTIAL | 目录变更不改写历史快照；UNKNOWN 隔离同 Work 新 Run；outcome 绑定 launch+epoch | 真实 A/B 模型执行与恢复证据 |
+| DSH06 | PARTIAL | 停用/撤销/路由重映射拒绝，无静默 fallback；排队再校验 | 运行期凭据过期/限额的真实错误分类证据 |
+| DSH07 | PARTIAL | SDK 原生用户问题已接入持久收件箱：绑定 request/session、CAS 一次性答复、取消/终止置 CANCELLED/EXPIRED、晚答拒绝，API 与工作台收件箱可用 | DSH 工具审批通道（approvalRequests/client.onRequest）与平台业务审核通道未接入；运行状态机未引入 WAITING_FOR_USER（提问期间保持 RUNNING）；断线后的账号级收件箱同步未做 |
+| DSH08 | PARTIAL | 平台状态事件持久化、可恢复 SSE 流按游标重放；输入消费按实际派发前缀 + claim 证明；晚追加保持 PENDING | DSH 通知持久水位与 run 终态由真实结算产生的集成验收 |
+| DSH09 | PARTIAL | close 幂等、先 close 后 hash 成果、`exitProven` 缺失记 UNKNOWN、取消不假报结算 | 进程树终止证据、崩溃接管与 `resumeSession` 原 home/session 恢复实测 |
+| DSH10 | NOT_RUN | 控制面为通用 capability/selection 结构，无 Listing/DVP 分支 | 第二合成 provider + 第三 probe 应用的配置发现验收 |
+
+补充方案其他剩余（与上表不重复）：
+
+1. **工作台体验**：SSE 实时更新、原生提问收件箱与等待答复/封存中/未知状态已实现；尚无 DSH 工具审批
+   收件箱、平台业务审核通道、浏览器成果预览、locale 资源外置与 RTL 评估、非开发员工试点
+   （U07–U14 的产品/研究部分）。
+2. **成果与证据**：已实现控制面封存副本、授权下载与读取时摘要复验；仍缺浏览器预览（不执行文件脚本）、
+   Evidence/ReviewRecord 分层展示与业务复核记录（WP6 剩余）。
+3. **企业运行**：身份/项目授权/secretRef/网络与资源限额、撤权处置、进程监督与租约续期（WP7、WP4 剩余）。
+4. **知识验证**：验证回执来源核验与跨进程候选激活（WP9）未在本轮推进。
+5. **发布工程**：远端托管、分支保护、CI 全量通道实际运行、SBOM/许可清单（WP3/WP10 剩余）。
+6. **格式一致性**：历史压缩式文件的独立格式化提交。
+7. **真实项目业务验收**：Listing 真实项目端到端、DVP 真实方案/模板复核需按授权项目执行并留证，
+   合成回归不代替业务验收。
+
+上述 NOT_RUN/BLOCKED 项不能用本轮单元测试或全仓门禁代替；需在对应环境取得证据后逐项更新。
+本文件此前“仍未完成”列表中的原型/Worker 配置等表述已被上表取代，以当前源码与上表为准。

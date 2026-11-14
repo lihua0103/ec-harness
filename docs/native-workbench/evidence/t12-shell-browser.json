@@ -1,0 +1,111 @@
+{
+  "at": "2026-11-12T08:38:59.740Z",
+  "checks": [
+    {
+      "name": "enterprise nav entry: 项目空间",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "enterprise nav entry: 应用中心",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "enterprise nav entry: 我的工作",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "enterprise nav entry: 待处理",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "enterprise nav entry: 平台设置",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "default main is the enterprise home",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "the shell topbar is present",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "projects page opens",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "project creation refuses an empty name",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "project creation returns a real project",
+      "ok": true,
+      "detail": "视觉重建项目 728092"
+    },
+    {
+      "name": "apps page lists the platform release",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "work detail opens in the enterprise shell",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "work detail has the context/artifact rail",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "a run is created from the detail page",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "cancel settles or records a stop request",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "retry creates a second run",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "reconcile stays disabled for a non-UNKNOWN run",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "archive action settles on the archived state",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "pending page opens with an honest empty state",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "settings page exposes the model directory",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "no unexpected page errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "errors": []
+}

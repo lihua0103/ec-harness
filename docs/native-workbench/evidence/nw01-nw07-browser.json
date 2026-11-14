@@ -1,0 +1,86 @@
+{
+  "at": "2026-11-12T06:00:48.218Z",
+  "checks": [
+    {
+      "id": "NW01.round1",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "NW01.round2-context",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "NW01.same-session",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "NW01.one-user-prompt-each",
+      "ok": false,
+      "detail": ""
+    },
+    {
+      "id": "NW02.incremental-before-final",
+      "ok": false,
+      "detail": "samples=3, increases=2"
+    },
+    {
+      "id": "NW04.stream-continues-while-typing",
+      "ok": true,
+      "detail": "0 -> 0"
+    },
+    {
+      "id": "NW04.draft-and-focus-preserved",
+      "ok": true,
+      "detail": "draft=\"草稿保留测试\""
+    },
+    {
+      "id": "NW06.stop-visible-while-running",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "NW06.stop-settles-with-partial-content",
+      "ok": false,
+      "detail": "partial=0"
+    },
+    {
+      "id": "NW06.same-session-continues",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "NW03.tool-activity-visible",
+      "ok": true,
+      "detail": "trace contains tool entry"
+    },
+    {
+      "id": "NW07.refresh-restores-session",
+      "ok": false,
+      "detail": "marker missing"
+    },
+    {
+      "id": "NW07.no-duplicate-messages",
+      "ok": false,
+      "detail": "count=0"
+    },
+    {
+      "id": "NW21.native-shell-intact",
+      "ok": false,
+      "detail": "49 labelled buttons"
+    },
+    {
+      "id": "NW21.no-console-errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "streamSamples": [
+    0,
+    5,
+    366
+  ],
+  "errors": []
+}

@@ -2,15 +2,37 @@
 
 企业级开发规范：[DSH 插件开发规范 v1.0](DSH-PLUGIN-DEVELOPMENT-STANDARD.md)——**当前系统及所有后续开发必须遵守**，不设存量豁免，不为错误实现保留兼容层；不符合项须修正或重做并通过对应检查。规范唯一维护于该正文。
 
+## 原生 WebUI 与企业工作台统一实施（2026-11-12）
+
+[详细开发实施任务书](NATIVE-WEBUI-ENTERPRISE-WORKBENCH-IMPLEMENTATION.md)：保留原生实时会话能力，统一企业工作体验，支持员工独立环境与集中部署，并预备对接既有身份权限系统。包含 T00–T11 任务依赖、文件责任、目标接口、迁移步骤、NW01–NW24 验收与接续开发指令；**当前是开发方案，不是功能已实现或部署通过**。
+
+实施进度与证据：[STATUS](native-workbench/STATUS.md)（按任务状态）、[基线证据](native-workbench/evidence/BASELINE.md)、[上游能力矩阵](native-workbench/CONTRACT-MATRIX.md)、[本轮实现记录](native-workbench/IMPLEMENTATION-2026-11-12.md)。路线决策见 [ADR-0003](adr/ADR-0003-NATIVE-WEBUI-WORKBENCH.md)。
+
+T07/T09 成果与体验：[本轮实现记录](native-workbench/IMPLEMENTATION-2026-11-12-CONTINUED.md)、[证据与截图](native-workbench/evidence/T07-T09-REPORTS-UX.md)。T10 迁移：[只读盘点与退役前置](native-workbench/MIGRATION-2026-11-12.md)。T11 验收矩阵：[NW01–NW24 结果（第三棒更新）](native-workbench/ACCEPTANCE-2026-11-12-T12.md)。
+
+第三棒（T10 整页替代 + T11 未跑项）：[实现记录](native-workbench/IMPLEMENTATION-2026-11-12-T12.md)、[集中部署逐条核对](native-workbench/HOSTED-2026-11-12.md)、[旧入口退役方案](native-workbench/RETIREMENT-PLAN-2026-11-12.md)；T05 原生提交关联与 NW05/08/09/10/17/23 证据见 `native-workbench/evidence/`。
+
+**旧入口已停止对外服务（2026-11-12）**：控制面默认 API-only，`apps/enterprise-workbench` 目录保留、不再默认对外；历史验收记录保留，回退用显式 `--app`（见 [退役执行记录](native-workbench/RETIREMENT-EXECUTION-2026-11-12.md)）。
+
+企业外壳重建：[实现记录](native-workbench/IMPLEMENTATION-2026-11-12-SHELL.md)、[旧页视觉基线](native-workbench/evidence/OLD-WORKBENCH-VISUAL-BASELINE.md)、[原生插件装配与边界](native-workbench/evidence/NATIVE-ASSEMBLY.md)；A 方案截图见 `native-workbench/evidence/t12-a-shell-*`。
+
+工作台 UI 概念稿对齐（2026-11-13）：[实现与验证记录](native-workbench/UI-REFRESH-2026-11-13.md)——按已评审概念稿重做视觉系统、首页信息架构与工作控制台外框（线程仍为原生会话），浏览器回归 28/28＋问答专项 10/10＋规模检索 18/18、主题对比度 128/128、包测试 55/55；截图见 `native-workbench/evidence/UI-REFRESH-2026-11-13-*`。
+
 ## 2026-11-11 整改现状（代码优先）
 
 [整改记录](REMEDIATION-2026-11-11.md)记录本轮已修复与实测：PDF ObjStm/页数完整性、DVP 真分页、
 知识 claims 激活语义、公共包抽离（platform-workbook / platform-knowledge / platform-runtime）、
-两插件独立装配与全量测试。Listing 70/70、DVP 68/68 测试通过；平台运行包 7/7、控制面 17/17 通过。
-这些是代码与单元测试事实，**不是** DSH 宿主集成、企业身份/数据接口、工作台原型或临床业务验收。
+两插件独立装配与全量测试、平台控制面（应用登记/持久运行/模型目录与 Run 快照/完成事实 fail-closed/
+模型级授权/成果封存与下载/可恢复事件流/原生问答收件箱）、正式前端 `apps/enterprise-workbench`。
+最新一轮全仓门禁 12/12 检查通过：Listing 70/70、DVP 68/68、platform-control 64/64、
+platform-runtime 7/7、platform-identity 7/7、正式工作台 10/10，聚合器自检 19/19、原型 27/27、
+规范检查通过；web profile 配置组合含四个平台/插件包。
+这些是代码与单元测试事实，**不是** DSH 宿主集成、企业身份/数据接口、真实模型执行或临床业务验收。
 
-仍未完成：企业身份授权与 IT 数据入口、Worker 执行器与进程监督、成果登记/调度、工作台真实执行、
-真实项目端到端验收、统一 Git/CI。工程边界见[开发规范](DSH-PLUGIN-DEVELOPMENT-STANDARD.md)。
+[整改记录](REMEDIATION-2026-11-11.md)中的“补充方案剩余工作矩阵”按 DSH01–DSH10 逐项列出
+PARTIAL/NOT_RUN/BLOCKED 及所缺证据；仍未完成项包括：企业身份授权与 IT 数据入口、原生问答/审批
+持久通道、成果封存/下载与 SSE、真实模型目录探测、Worker 进程监督/崩溃接管、真实项目端到端验收、
+统一 CI 全量通道。工程边界见[开发规范](DSH-PLUGIN-DEVELOPMENT-STANDARD.md)。
 
 **2026-11-11 继续推进**：[平台控制面首批实现](PLATFORM-CONTROL-IMPLEMENTATION.md)已登记应用发布、持久运行/
 事件/审计并按 DSH bundle 安装；Worker 执行器按 [ADR-0002](adr/ADR-0002-WORKER-EXECUTOR.md) 使用

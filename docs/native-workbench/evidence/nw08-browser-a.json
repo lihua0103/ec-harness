@@ -1,0 +1,15 @@
+{
+  "at": "2026-11-12T07:52:24.696Z",
+  "checks": [
+    {
+      "name": "phase A leaves one turn running",
+      "ok": true,
+      "detail": "1"
+    },
+    {
+      "name": "phase A typed the restart prompt",
+      "ok": true,
+      "detail": ""
+    }
+  ]
+}

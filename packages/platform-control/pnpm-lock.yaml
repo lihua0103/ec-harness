@@ -11,6 +11,9 @@ importers:
       '@deepseek-ai/cordis':
         specifier: link:../../upstream/deepseek-harness-git/vendor/cordis
         version: link:../../upstream/deepseek-harness-git/vendor/cordis
+      '@deepseek-ai/dsh-sdk-client':
+        specifier: link:../../upstream/deepseek-harness-git/packages/sdk/client
+        version: link:../../upstream/deepseek-harness-git/packages/sdk/client
       '@deepseek-ai/dsh-system-prompt':
         specifier: link:../../upstream/deepseek-harness-git/packages/core/system-prompt
         version: link:../../upstream/deepseek-harness-git/packages/core/system-prompt

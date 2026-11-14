@@ -28,7 +28,16 @@ test('the control bundle mounts its tools and service without a worker executor'
       'platform_run_create',
       'platform_run_cancel',
       'platform_run_artifacts',
+      'platform_work_create',
+      'platform_work_list',
+      'platform_work_get',
+      'platform_work_archive',
+      'platform_work_runs',
+      'platform_work_run_create',
       'platform_workbench_snapshot',
+      'platform_model_catalog',
+      'platform_model_catalog_register',
+      'platform_model_preference_set',
       'platform_audit_events',
     ]) {
       assert(ctx.tools.get(name), name);
