@@ -668,6 +668,8 @@ export const WORKBENCH_CSS = `
 .ec-wb .ec-wb-wizard-actions { display: flex; justify-content: space-between; gap: 8px; align-items: center; flex-wrap: wrap; }
 .ec-wb .ec-wb-session-tools { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }
 .ec-wb .ec-wb-session-tools .ec-wb-select { width: auto; min-width: 150px; flex: 0 1 auto; }
+.ec-wb .ec-wb-rerun-form { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--ec-line); }
+.ec-wb .ec-wb-rerun-form .ec-wb-form-actions { align-items: center; }
 
 @media (prefers-color-scheme: dark) {
   .ec-wb {

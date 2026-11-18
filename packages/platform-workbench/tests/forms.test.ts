@@ -85,3 +85,20 @@ test('a Listing scenario travels with the run input; no scenario leaves the enve
   }
   assert.throws(() => runInput('   '), /RUN_GOAL_REQUIRED/)
 })
+
+test('a rerun input freezes the identity of the batch it started from (SC-03)', async () => {
+  const { runInput } = await import('../src/forms.js')
+  const baseline = { baselineId: 'b1', revision: 2, sourceRef: 'D:/data/batch2', digest: 'c'.repeat(64) }
+  assert.deepEqual(runInput('换批重跑', undefined, baseline), {
+    goal: '换批重跑',
+    inputBaseline: baseline,
+  })
+  // Scenario and baseline travel together without one erasing the other.
+  assert.deepEqual(runInput('换批重跑', 'Manual', baseline), {
+    goal: '换批重跑',
+    applicationOptions: { listingType: 'Manual' },
+    inputBaseline: baseline,
+  })
+  // No baseline, no key: the ordinary envelope stays byte-identical to before.
+  assert.deepEqual(Object.keys(runInput('梳理核查要点')), ['goal'])
+})

@@ -64,6 +64,7 @@ import { buildAnswers, chosenModel, modelChoices, runInput, type NativeQuestion 
 import type { WorkContext } from '../work-context.js'
 import { bindingDraft, selectBindingDomain } from '../work-context.js'
 import type { SubmissionWatchOptions } from './submission-observer.js'
+import { workPointers } from './pointers.js'
 import { clearPersistedView, hashToView, readPersistedView, viewKey, viewToHash, writePersistedView, type PersistedView } from './view-state.js'
 import {
   availableTimeZones,
@@ -1588,6 +1589,158 @@ function ReviewPanel({ api, run, onChanged }: {
   )
 }
 
+/** The three Work pointers (SC-03) as one honest card: the baseline being edited, the most recent
+ *  run, and the current recognition — three separate lines, never collapsed into "最新". The
+ *  recognition line reads the newest succeeded run's reviews and refuses to show approval that
+ *  has not actually been read from the control plane. */
+function DeliveryPointerCard({ api, baselines, runs, reviewsError }: {
+  api: WorkbenchApi
+  baselines: Page<InputBaselineItem>
+  runs: Page<RunSummary>
+  reviewsError?: string
+}) {
+  const [reviews, setReviews] = useState<ReviewItem[] | null>(null)
+  const candidateRunId = runs.items.find((run) => run.snapshot?.state === 'SUCCEEDED')?.runId ?? null
+
+  useEffect(() => {
+    if (!candidateRunId) { setReviews(null); return undefined }
+    let live = true
+    setReviews(null)
+    void (async () => {
+      try {
+        const result = await api.runReviews(candidateRunId)
+        if (live) setReviews(result.items)
+      } catch {
+        // 读取失败不冒充"未复核"：reviews 保持 null，由 reviewsError 呈现真实原因。
+        if (live) setReviews(null)
+      }
+    })()
+    return () => { live = false }
+  }, [api, candidateRunId])
+
+  const pointers = workPointers(baselines.items, runs.items, reviews)
+  const delivery = pointers.delivery
+  const deliveryDetail = reviewsError
+    ? `复核结论读取失败：${reviewsError}。在读取到结论之前不显示认可。`
+    : delivery.detail
+  return (
+    <section className="ec-wb-card" aria-labelledby="ec-wb-pointers">
+      <div className="ec-wb-card-head"><h2 id="ec-wb-pointers">工作指针</h2></div>
+      <p className="ec-wb-muted">正在编辑的基线、最近运行、当前认可三件事分开看，不统称「最新」。</p>
+      <dl className="ec-wb-facts">
+        <dt>输入基线</dt>
+        <dd>
+          {pointers.baseline
+            ? <>第 {pointers.baseline.revision} 批 · {pointers.baseline.sourceRef}
+              {pointers.baseline.digestChanged === true ? '（与上一批不同）' : ''}
+              {pointers.baseline.digestChanged === false ? '（与上一批摘要相同）' : ''}
+              <small className="ec-wb-muted"> · {formatTime(pointers.baseline.createdAt)}</small>
+            </>
+            : '尚未登记输入批次'}
+        </dd>
+        <dt>最近运行</dt>
+        <dd>
+          {pointers.run
+            ? <>{pointers.run.runId.slice(0, 8)} · {runStateText(pointers.run.state)}<small className="ec-wb-muted"> · {formatTime(pointers.run.createdAt)}</small></>            : '还没有运行'}
+        </dd>
+        <dt>当前认可</dt>
+        <dd>
+          {delivery.runId && reviewsError === undefined ? <>{delivery.label}<small className="ec-wb-muted">（运行 {delivery.runId.slice(0, 8)}）</small></> : delivery.label}
+          <small className="ec-wb-muted"> · {deliveryDetail}</small>
+        </dd>
+      </dl>
+    </section>
+  )
+}
+
+/** 换批重跑（SC-03 核心）：登记新输入批次（追加，不覆盖旧批次），并以新批次发起一次新运行。
+ *  新批次身份随运行输入一起冻结，旧运行和旧批次原样保留；同一工作一次只有一个活动运行。 */
+function RerunForm({ api, workId, catalog, preference, hasWorkspace, activeRunId, onCreated }: {
+  api: WorkbenchApi
+  workId: string
+  catalog: ModelCatalog | null | undefined
+  preference: ModelPreference | null | undefined
+  hasWorkspace: boolean
+  activeRunId?: string | null
+  onCreated(runId: string): void
+}) {
+  const [sourceRef, setSourceRef] = useState('')
+  const [digest, setDigest] = useState('')
+  const [note, setNote] = useState('')
+  const [model, setModel] = useState(() => chosenModel(catalog, preference) ?? '')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  useEffect(() => { if (!model) setModel(chosenModel(catalog, preference) ?? '') }, [catalog, preference, model])
+
+  const digestOk = /^[0-9a-f]{64}$/i.test(digest.trim())
+
+  const submit = async () => {
+    if (!hasWorkspace) { setError('此工作尚未选择工作空间，不能发起重跑。'); return }
+    if (activeRunId) { setError('此工作已有进行中的运行；平台同一工作只允许一个活动运行，它结束后可换批重跑。'); return }
+    if (!sourceRef.trim()) { setError('请填写新资料的引用（目录或文件集标识，由资料治理流程给出）。'); return }
+    if (!digestOk) { setError('请填写新资料的 SHA-256 摘要（64 位十六进制）。平台不代算摘要，摘要由资料治理流程提供。'); return }
+    if (!model) { setError('请选择可用模型，或先由部署登记模型目录。'); return }
+    setBusy(true)
+    setError('')
+    setNotice('')
+    try {
+      const baseline = await api.appendInputBaseline(workId, { sourceRef: sourceRef.trim(), digest: digest.trim().toLowerCase() })
+      const run = await api.createRun(workId, {
+        input: runInput(
+          note.trim() ? `换批重跑（第 ${baseline.revision} 批）：${note.trim()}` : `换批重跑：使用第 ${baseline.revision} 批资料再次执行`,
+          undefined,
+          { baselineId: baseline.baselineId, revision: baseline.revision, sourceRef: baseline.sourceRef, digest: baseline.digest },
+        ),
+        modelSelectionId: model,
+      })
+      setNotice(`已登记第 ${baseline.revision} 批（旧批次原样保留），并以它发起新运行 ${run.runId.slice(0, 8)}。`)
+      setSourceRef('')
+      setDigest('')
+      setNote('')
+      onCreated(run.runId)
+    } catch (reason) {
+      setError(`换批重跑未完成：${errorText(reason)}。如果批次已登记，输入批次列表里可以看到它；不会重复登记。`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ec-wb-rerun-form">
+      <p className="ec-wb-muted">使用新资料再次运行：登记一个新输入批次并立即用它发起运行。旧批次、旧运行和已认可的结论原样保留，不覆盖。</p>
+      {!hasWorkspace ? <p className="ec-wb-empty">此工作尚未选择工作空间，不能发起重跑。</p> : null}
+      {activeRunId ? <p className="ec-wb-empty">此工作已有进行中的运行（{activeRunId.slice(0, 8)}）；它结束后才能换批重跑。</p> : null}
+      <label className="ec-wb-field">
+        <span className="ec-wb-field-label">新资料引用</span>
+        <input className="ec-wb-input" value={sourceRef} maxLength={500} disabled={busy || !hasWorkspace || !!activeRunId}
+          placeholder="如 D:\data\studyX\batch2 或资料集编号" aria-label="新资料引用"
+          onChange={(event) => setSourceRef(event.target.value)} />
+      </label>
+      <label className="ec-wb-field">
+        <span className="ec-wb-field-label">新资料 SHA-256 摘要</span>
+        <input className="ec-wb-input" value={digest} maxLength={64} disabled={busy || !hasWorkspace || !!activeRunId}
+          placeholder="64 位十六进制，由资料治理流程提供" aria-label="新资料 SHA-256 摘要"
+          onChange={(event) => setDigest(event.target.value)} />
+      </label>
+      <label className="ec-wb-field">
+        <span className="ec-wb-field-label">本次重跑说明（可选）</span>
+        <input className="ec-wb-input" value={note} maxLength={2000} disabled={busy || !hasWorkspace || !!activeRunId}
+          placeholder="如：数据库锁定后新批次" aria-label="本次重跑说明"
+          onChange={(event) => setNote(event.target.value)} />
+      </label>
+      <div className="ec-wb-form-actions">
+        <ModelSelect catalog={catalog} preference={preference} value={model} onChange={setModel} disabled={busy || !hasWorkspace || !!activeRunId} />
+        <button type="button" className="ec-wb-button ec-wb-primary" disabled={busy || !hasWorkspace || !!activeRunId} onClick={() => void submit()}>
+          {busy ? '正在登记并发起…' : '登记新批次并重跑'}
+        </button>
+      </div>
+      {error ? <p className="ec-wb-error-text" role="alert">{error}</p> : null}
+      {notice ? <p className="ec-wb-muted" role="status">{notice}</p> : null}
+    </div>
+  )
+}
+
 function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOpenSession, onBindSession, onReload }: {
   api: WorkbenchApi
   data: WorkbenchBootstrap
@@ -1851,6 +2004,7 @@ function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOp
 
         <div className="ec-wb-detail">
           <div className="ec-wb-stack">
+            <DeliveryPointerCard api={api} baselines={baselines} runs={runs} />
             {context && context.work.state !== 'ARCHIVED'
               ? (
                 <section className="ec-wb-card" aria-labelledby="ec-wb-bind">
@@ -2033,17 +2187,34 @@ function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOp
                   ? <p className="ec-wb-empty">尚未登记输入批次。</p>
                   : (
                     <div>
-                      {baselines.items.map((baseline) => (
+                      {baselines.items.map((baseline, index) => (
                         <div className="ec-wb-row" key={baseline.baselineId}>
                           <span className="ec-wb-row-main">
                             <strong>第 {baseline.revision} 批 · {baseline.sourceRef}</strong>
-                            <small className="ec-wb-muted">{formatTime(baseline.createdAt)}<span className="ec-wb-expert-only"> · <span className="ec-wb-digest">{baseline.digest.slice(0, 12)}…</span></span></small>
+                            <small className="ec-wb-muted">{formatTime(baseline.createdAt)}
+                              {index > 0 && baseline.digest !== baselines.items[index - 1]?.digest ? ' · 与上一批不同' : ''}
+                              {index > 0 && baseline.digest === baselines.items[index - 1]?.digest ? ' · 与上一批摘要相同' : ''}
+                              <span className="ec-wb-expert-only"> · <span className="ec-wb-digest">{baseline.digest.slice(0, 12)}…</span></span>
+                            </small>
                           </span>
                         </div>
                       ))}
                       <Pager total={baselines.total} offset={baselinesOffset} limit={BASELINE_PAGE} busy={false} onOffset={(offset) => void loadBaselines(offset)} />
                     </div>
                   )}
+              {context && context.work.state !== 'ARCHIVED'
+                ? (
+                  <RerunForm
+                    api={api}
+                    workId={workId}
+                    catalog={data.models?.catalog}
+                    preference={data.models?.preference}
+                    hasWorkspace={!!context.workspace}
+                    activeRunId={activeRun?.runId ?? null}
+                    onCreated={(runId) => void onRunCreated(runId)}
+                  />
+                )
+                : null}
             </section>
 
             <section className="ec-wb-card" aria-labelledby="ec-wb-run-inputs">
@@ -3150,6 +3321,22 @@ function SettingsPage({ api, data, onReload }: {
       </header>
       <div className="ec-wb-home-grid">
         <div className="ec-wb-stack">
+          <section className="ec-wb-card" aria-labelledby="ec-wb-identity">
+            <div className="ec-wb-card-head"><h2 id="ec-wb-identity">身份与部署</h2><span className="ec-wb-badge" data-tone="warn">单操作者部署</span></div>
+            <dl className="ec-wb-facts">
+              <dt>部署形态</dt>
+              <dd>本地单操作者：控制面由本机进程持有，无登录页、无多用户认证。</dd>
+              <dt>操作者</dt>
+              <dd>控制面按固定身份（local-operator 模式，不校验调用方）在服务端执行授权检查；同一台机器上的所有操作都记在这一个操作者名下。</dd>
+              <dt>隔离</dt>
+              <dd>无多用户隔离、无 SSO/多租户。这些能力尚未生效，因此界面不显示登录或权限管理——不显示不等于已具备。</dd>
+              <dt>数据授权</dt>
+              <dd>由 IT、API 与执行环境承担；工作台只登记资料引用与摘要，不读取目录内容。</dd>
+              <dt>审计</dt>
+              <dd>所有操作记入下方审计链，可导出核对；审计辅助追溯，不是电子签名。</dd>
+            </dl>
+            <p className="ec-wb-muted">真实企业认证（SSO/多租户）须按 IT 合同另行接入；接入之前界面保持诚实标注，不冒充已启用授权。</p>
+          </section>
           <PreferencesCard />
           <ModelDefaultPanel api={api} catalog={catalog} preference={data.models?.preference} onReload={onReload} />
           <section className="ec-wb-card" aria-labelledby="ec-wb-model-catalog">

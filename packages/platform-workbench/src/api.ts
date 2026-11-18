@@ -351,6 +351,16 @@ export class WorkbenchApi {
     ) as Promise<Page<InputBaselineItem>>;
   }
 
+  /** Append one input batch (SC-03): the actor is the server-side principal, never a body field. */
+  appendInputBaseline(workId: string, draft: { sourceRef: string; digest: string }, signal?: AbortSignal): Promise<InputBaselineItem> {
+    return this.call(
+      'POST',
+      `/api/works/${encodeURIComponent(workId)}/input-baselines`,
+      { sourceRef: draft.sourceRef, digest: draft.digest },
+      signal,
+    ) as Promise<InputBaselineItem>;
+  }
+
   /** Sealed and metadata-only artifacts of one execution. */
   runArtifacts(runId: string, signal?: AbortSignal): Promise<{ items: ArtifactItem[] }> {
     return this.call('GET', `/api/runs/${encodeURIComponent(runId)}/artifacts`, undefined, signal) as Promise<{ items: ArtifactItem[] }>;

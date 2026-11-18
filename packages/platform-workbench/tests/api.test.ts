@@ -314,3 +314,18 @@ test('run events address the durable ledger with explicit paging', async () => {
   assert.equal(page.items[0].event.type, 'started');
   assert.equal(seen, '/api/runs/r%201/events?offset=0&limit=50');
 });
+
+test('a rerun baseline append addresses the work batch resource and carries no client actor', async () => {
+  const seen: Array<{ url: string; body?: Record<string, unknown> }> = [];
+  const api = new Api('', fakeFetch((url, init) => {
+    const request = init as { body?: string } | undefined;
+    seen.push({ url, ...(request?.body ? { body: JSON.parse(request.body) as Record<string, unknown> } : {}) });
+    return { status: 201, body: { baselineId: 'b2', workId: 'w 1', revision: 2, sourceRef: 'D:/data/b2', digest: 'c'.repeat(64), createdBy: 'op', createdAt: 't' } };
+  }));
+  const baseline = await api.appendInputBaseline('w 1', { sourceRef: 'D:/data/b2', digest: 'c'.repeat(64) });
+  assert.equal(baseline.revision, 2);
+  assert.deepEqual(seen, [
+    { url: '/api/works/w%201/input-baselines', body: { sourceRef: 'D:/data/b2', digest: 'c'.repeat(64) } },
+  ]);
+  assert.equal('createdBy' in (seen[0].body ?? {}), false);
+});
