@@ -75,6 +75,26 @@ test('the concept draft surfaces are present in the page stylesheet', () => {
   }
 });
 
+test('the 2026-11-17 experience pass surfaces are present and scoped', () => {
+  for (const selector of [
+    '.ec-wb .ec-wb-segmented',
+    '.ec-wb .ec-wb-mode-banner',
+    '.ec-wb .ec-wb-console-center',
+    '.ec-wb .ec-wb-bind-steps',
+    '.ec-wb .ec-wb-wizard',
+    '.ec-wb .ec-wb-stepbar',
+    '.ec-wb .ec-wb-freshness',
+    '.ec-wb .ec-wb-session-tools',
+  ]) {
+    assert.ok(WORKBENCH_CSS.includes(selector), `missing experience surface: ${selector}`);
+  }
+  // The explicit live-chat / run-record switch must keep a keyboard-visible focus ring.
+  assert.ok(
+    WORKBENCH_CSS.includes('.ec-wb .ec-wb-segmented button:focus-visible'),
+    'segmented control keeps a focus-visible ring',
+  );
+});
+
 test('the console gives the native thread a bounded height instead of growing the page', () => {
   const body = WORKBENCH_CSS.split('.ec-wb .ec-wb-console-body {')[1]?.split('}')[0] ?? '';
   assert.match(body, /min-height:\s*0/);

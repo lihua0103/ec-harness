@@ -240,3 +240,77 @@ test('domains and bindings use the control-plane paths and carry no client actor
   assert.equal('submittedBy' in (calls[2]?.body ?? {}), false);
   assert.equal('createdBy' in (calls[2]?.body ?? {}), false);
 });
+
+test('review calls use the documented paths and carry CAS facts in the body', async () => {
+  const seen: Array<{ url: string; method?: string; body?: string }> = [];
+  const api = new Api('', fakeFetch((url, init) => {
+    const request = init as { method?: string; body?: string } | undefined;
+    seen.push({ url, ...(request?.method ? { method: request.method } : {}), ...(request?.body ? { body: request.body } : {}) });
+    if (url.endsWith('/reviews') && request?.method === 'POST') {
+      return { status: 201, body: { reviewId: 'r1', runId: 'run1', state: 'REQUESTED', requestedBy: 'me', revision: 1, createdAt: '', updatedAt: '' } };
+    }
+    if (url.endsWith('/reviews')) {
+      return { status: 200, body: { items: [{ reviewId: 'r1', runId: 'run1', state: 'REQUESTED', requestedBy: 'me', revision: 1, createdAt: '', updatedAt: '' }] } };
+    }
+    return { status: 200, body: { reviewId: 'r1', runId: 'run1', state: 'APPROVED', requestedBy: 'me', reviewer: 'me', revision: 2, createdAt: '', updatedAt: '' } };
+  }));
+
+  const listed = await api.runReviews('run1');
+  assert.equal(listed.items.length, 1);
+  const requested = await api.requestReview('run1', '请复核');
+  assert.equal(requested.state, 'REQUESTED');
+  const decided = await api.decideReview('r1', 'APPROVED', 1, '已核对');
+  assert.equal(decided.state, 'APPROVED');
+
+  assert.match(seen[0].url, /\/api\/runs\/run1\/reviews$/);
+  assert.equal(seen[1].method, 'POST');
+  assert.deepEqual(JSON.parse(seen[1].body ?? '{}'), { note: '请复核' });
+  assert.match(seen[2].url, /\/api\/reviews\/r1\/decision$/);
+  assert.deepEqual(JSON.parse(seen[2].body ?? '{}'), { decision: 'APPROVED', expectedRevision: 1, note: '已核对' });
+});
+
+test('audit export parses NDJSON lines and derives the chain head and last sequence', async () => {
+  let seen = '';
+  const lines = [
+    JSON.stringify({ sequence: 1, actor: 'op', action: 'RUN_CREATED', target: 'r1', createdAt: 't', prevDigest: '0'.repeat(64), digest: 'a'.repeat(64) }),
+    JSON.stringify({ sequence: 2, actor: 'op', action: 'RUN_STARTED', target: 'r1', createdAt: 't', prevDigest: 'a'.repeat(64), digest: 'b'.repeat(64) }),
+  ].join('\n') + '\n';
+  const api = new Api('', (async (url: string) => {
+    seen = url;
+    return { ok: true, status: 200, text: async () => lines };
+  }) as never);
+  const result = await api.auditExport({ target: 'r1', after: 0, limit: 200 });
+  assert.equal(result.count, 2);
+  assert.equal(result.entries[1].action, 'RUN_STARTED');
+  assert.equal(result.headDigest, 'b'.repeat(64));
+  assert.equal(result.lastSequence, 2);
+  assert.match(seen, /\/api\/audit\/export\?target=r1&after=0&limit=200/);
+});
+
+test('an empty audit export reads as a zero chain, not a fabricated entry', async () => {
+  const api = new Api('', (async () => ({ ok: true, status: 200, text: async () => '' })) as never);
+  const result = await api.auditExport({ after: 5 });
+  assert.equal(result.count, 0);
+  assert.deepEqual(result.entries, []);
+  assert.equal(result.headDigest, '0'.repeat(64));
+  assert.equal(result.lastSequence, 5);
+});
+
+test('an audit export refusal keeps the control-plane code', async () => {
+  const api = new Api('', (async () => ({ ok: false, status: 403, text: async () => JSON.stringify({ code: 'PLATFORM_AUTHORIZATION_DENIED' }) })) as never);
+  await assert.rejects(
+    () => api.auditExport(),
+    (error: unknown) => error instanceof PlatformApiError && error.status === 403 && error.code === 'PLATFORM_AUTHORIZATION_DENIED',
+  );
+});
+
+test('run events address the durable ledger with explicit paging', async () => {
+  let seen = '';
+  const api = new Api('', fakeFetch((url) => {
+    seen = url;
+    return { status: 200, body: { total: 1, items: [{ sequence: 3, revision: 2, event: { type: 'started' }, actor: 'op', createdAt: 't' }] } };
+  }));
+  const page = await api.runEvents('r 1', { offset: 0, limit: 50 });
+  assert.equal(page.items[0].event.type, 'started');
+  assert.equal(seen, '/api/runs/r%201/events?offset=0&limit=50');
+});

@@ -73,6 +73,9 @@ export const WORKBENCH_CSS = `
 .ec-wb ::-webkit-scrollbar-thumb { background: #c3d2d6; border: 2px solid transparent; border-radius: 5px; background-clip: content-box; }
 .ec-wb ::-webkit-scrollbar-track { background: transparent; }
 .ec-wb[data-density="compact"] { --ec-gap: 10px; --ec-pad: 12px; font-size: 12px; }
+/* Expert diagnostics: raw infrastructure facts (paths, session ids, digests) stay hidden from the
+   business-facing view until the employee turns on expert mode. A display preference, not a gate. */
+.ec-wb:not([data-expert="on"]) .ec-wb-expert-only { display: none; }
 .ec-wb h1 { margin: 0; font-size: 24px; line-height: 1.2; letter-spacing: -.035em; font-weight: 700; color: #123f4a; }
 .ec-wb h2 { margin: 0; font-size: 13px; line-height: 1.4; font-weight: 650; color: #1c4852; }
 .ec-wb h3 { margin: 0; font-size: 12px; line-height: 1.4; font-weight: 650; color: #234a53; }
@@ -182,6 +185,10 @@ export const WORKBENCH_CSS = `
 .ec-wb .ec-wb-hero-actions { display: flex; align-items: center; gap: 8px; padding-bottom: 2px; flex-wrap: wrap; }
 .ec-wb .ec-wb-chip { font-size: 10px; color: #5c7278; padding-right: 7px; white-space: nowrap; }
 .ec-wb .ec-wb-hero-cta { min-height: 32px; padding: 0 13px; font-size: 11px; }
+/* Continue-first home: a compact functional header, not a dominant greeting hero — the works queue
+   leads the stack so returning employees resume work immediately. */
+.ec-wb-page-home .ec-wb-hero { min-height: 0; }
+.ec-wb-page-home .ec-wb-hero h1 { font-size: 18px; }
 .ec-wb .ec-wb-home-grid { display: grid; grid-template-columns: minmax(0, 1fr) 282px; gap: var(--ec-gap); align-items: start; }
 /* The home canvas fills the screen like the reviewed draft: the queue and the project panel take
    the remaining height instead of leaving a dead band under a short list. */
@@ -527,6 +534,23 @@ export const WORKBENCH_CSS = `
    only gives it a definite height, so the enterprise rail never grows the page scroll. */
 .ec-wb .ec-wb-session-conversation { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
+/* Run transcript (selected run in the console center): the run's own scrollable history. */
+.ec-wb .ec-wb-transcript { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.ec-wb .ec-wb-transcript-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 2px 4px 12px 2px; }
+.ec-wb .ec-wb-transcript-item { background: var(--ec-white); border: 1px solid var(--ec-line); border-radius: 10px; padding: 10px 14px 12px; }
+.ec-wb .ec-wb-transcript-item header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.ec-wb .ec-wb-transcript-item time { font-size: 10px; color: #7d9297; }
+.ec-wb .ec-wb-transcript-kind { font-size: 10px; font-weight: 640; padding: 2px 8px; border-radius: 4px; background: #eef3f4; color: #4f676d; flex: none; }
+.ec-wb .ec-wb-transcript-item.is-text .ec-wb-transcript-kind,
+.ec-wb .ec-wb-transcript-item.is-final .ec-wb-transcript-kind { background: var(--ec-green-weak); color: #217251; }
+.ec-wb .ec-wb-transcript-item.is-reasoning .ec-wb-transcript-kind { background: #f2effa; color: #6b5bb5; }
+.ec-wb .ec-wb-transcript-item.is-tool-call .ec-wb-transcript-kind,
+.ec-wb .ec-wb-transcript-item.is-tool-result .ec-wb-transcript-kind { background: #fdf3e4; color: #a86a1f; }
+.ec-wb .ec-wb-transcript-item p { margin: 0; font-size: 12px; line-height: 1.65; color: #2b4c55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ec-wb .ec-wb-transcript-item.is-reasoning p { color: #5c7278; font-size: 11.5px; }
+.ec-wb .ec-wb-transcript-item.is-final { border-color: #bfe0d2; background: #f4faf7; }
+.ec-wb .ec-wb-transcript-item pre { margin: 8px 0 0; font-size: 10.5px; line-height: 1.5; color: #4f676d; background: #f6f9fa; border: 1px solid var(--ec-line); border-radius: 6px; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
+
 /* ── Responsive ─────────────────────────────────────────────────────────── */
 @media (min-width: 1600px) {
   .ec-wb .ec-wb-home-grid { grid-template-columns: minmax(0, 1fr) 310px; }
@@ -593,7 +617,19 @@ export const WORKBENCH_CSS = `
   .ec-wb .ec-wb-search { flex: 1 1 100%; min-width: 0; }
   .ec-wb .ec-wb-select.ec-wb-queue-select { flex: 1 1 0; min-width: 0; }
   .ec-wb .ec-wb-queue-empty, .ec-wb .ec-wb-queue-note { padding-left: 12px; padding-right: 12px; }
-  .ec-wb .ec-wb-console-head { padding: 10px 14px; }
+  .ec-wb .ec-wb-console-head { padding: 10px 14px; flex-wrap: wrap; }
+  .ec-wb .ec-wb-console-head > div:first-child { flex: 1 1 100%; min-width: 0; }
+  .ec-wb .ec-wb-console-actions { flex-wrap: wrap; gap: 7px; width: 100%; min-width: 0; }
+  .ec-wb .ec-wb-console-actions > .ec-wb-button { flex: 1 1 auto; min-width: 0; }
+  .ec-wb .ec-wb-segmented { width: 100%; max-width: 100%; }
+  .ec-wb .ec-wb-segmented button { flex: 1 1 0; min-width: 0; }
+  .ec-wb .ec-wb-mode-banner { flex-direction: column; align-items: flex-start; gap: 4px; }
+  .ec-wb .ec-wb-bind-steps li { font-size: 11px; }
+  .ec-wb .ec-wb-session-tools { width: 100%; }
+  .ec-wb .ec-wb-session-tools .ec-wb-search { flex: 1 1 100%; }
+  .ec-wb .ec-wb-session-tools .ec-wb-select { flex: 1 1 0; min-width: 0; }
+  .ec-wb .ec-wb-wizard-actions > .ec-wb-button { flex: 1 1 auto; }
+  .ec-wb .ec-wb-freshness { flex-wrap: wrap; }
 }
 @media (max-height: 740px) and (min-width: 981px) {
   .ec-wb .ec-wb-page { padding-top: 15px; }
@@ -604,6 +640,35 @@ export const WORKBENCH_CSS = `
 @media (prefers-reduced-motion: reduce) {
   .ec-wb *, .ec-wb *::before, .ec-wb *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
+/* Interaction affordances added with the 2026-11-17 experience pass: an explicit live-chat /
+   run-record switch, a binding-status strip, a work wizard and freshness lines. All colours come
+   from the same tokens, so the dark block below re-inks them without duplicate rules. */
+.ec-wb .ec-wb-freshness { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--ec-muted); }
+.ec-wb .ec-wb-freshness button { border: 0; background: none; color: var(--ec-primary); font: inherit; cursor: pointer; text-decoration: underline; }
+.ec-wb .ec-wb-segmented { display: inline-flex; border: 1px solid var(--ec-line); border-radius: var(--ec-radius-sm); overflow: hidden; background: var(--ec-soft); }
+.ec-wb .ec-wb-segmented button { border: 0; background: transparent; color: var(--ec-secondary); padding: 5px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+.ec-wb .ec-wb-segmented button[aria-pressed="true"] { background: var(--ec-white); color: var(--ec-ink); box-shadow: var(--ec-shadow-1); }
+.ec-wb .ec-wb-segmented button:focus-visible { outline: 2px solid var(--dsw-focus-ring-color, var(--ec-focus)); outline-offset: -2px; }
+.ec-wb .ec-wb-mode-banner { display: flex; justify-content: space-between; gap: 12px; align-items: center; border: 1px solid var(--ec-amber-line); background: var(--ec-amber-weak); color: var(--ec-amber); border-radius: var(--ec-radius-sm); padding: 6px 10px; font-size: 12px; }
+.ec-wb .ec-wb-mode-banner button { border: 0; background: none; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
+.ec-wb .ec-wb-console-center { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; }
+.ec-wb .ec-wb-console-center > .ec-wb-console-thread, .ec-wb .ec-wb-console-center > .ec-wb-transcript { flex: 1; min-height: 0; }
+.ec-wb .ec-wb-bind-steps { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0 0 8px; padding: 0; }
+.ec-wb .ec-wb-bind-steps li { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ec-muted); border: 1px solid var(--ec-line); border-radius: 999px; padding: 2px 9px; }
+.ec-wb .ec-wb-bind-steps li[data-state="done"] { color: var(--ec-primary); border-color: var(--ec-line-strong); }
+.ec-wb .ec-wb-bind-steps li[data-state="active"] { color: var(--ec-ink); border-color: var(--ec-primary); }
+.ec-wb .ec-wb-bind-steps li[data-state="blocked"] { color: var(--ec-danger); border-color: var(--ec-danger); }
+.ec-wb .ec-wb-wizard { display: flex; flex-direction: column; gap: 12px; }
+.ec-wb .ec-wb-stepbar { display: flex; gap: 6px; flex-wrap: wrap; list-style: none; margin: 0; padding: 0; font-size: 12px; }
+.ec-wb .ec-wb-stepbar li { padding: 3px 10px; border-radius: 999px; border: 1px solid var(--ec-line); color: var(--ec-muted); }
+.ec-wb .ec-wb-stepbar li[aria-current="step"] { border-color: var(--ec-primary); color: var(--ec-primary); }
+.ec-wb .ec-wb-stepbar li[data-done="true"] { color: var(--ec-secondary); }
+.ec-wb .ec-wb-step-button { appearance: none; background: none; border: 0; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer; }
+.ec-wb .ec-wb-step-button:disabled { cursor: default; opacity: .5; }
+.ec-wb .ec-wb-wizard-actions { display: flex; justify-content: space-between; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ec-wb .ec-wb-session-tools { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }
+.ec-wb .ec-wb-session-tools .ec-wb-select { width: auto; min-width: 150px; flex: 0 1 auto; }
+
 @media (prefers-color-scheme: dark) {
   .ec-wb {
     --ec-ink: #e4eaec;

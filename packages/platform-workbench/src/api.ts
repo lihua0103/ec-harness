@@ -16,6 +16,13 @@ export interface WorkbenchItem {
   updatedAt?: string;
 }
 
+/** The model route frozen into a run at creation (control-plane ModelConfigSnapshot subset). */
+export interface RunModelSnapshot {
+  selectionId: string;
+  provider: string;
+  model: string;
+}
+
 export interface RunSummary {
   runId: string;
   workId: string | null;
@@ -23,6 +30,7 @@ export interface RunSummary {
   appVersion: string;
   createdAt: string;
   snapshot?: { state?: string; revision?: number; reason?: string; cancelRequested?: boolean };
+  model?: RunModelSnapshot | null;
 }
 
 export interface ArtifactItem {
@@ -32,6 +40,23 @@ export interface ArtifactItem {
   mediaType?: string;
   sealedAt?: string;
   createdAt?: string;
+}
+
+/** One live assistant message observed through public SDK notifications while a run executed.
+ *  These are projections: the control plane keeps them only for the current attempt and they
+ *  are absent after a control-plane restart. */
+export interface RunActivity {
+  kind: 'text' | 'reasoning' | 'tool-call' | 'tool-result' | 'status';
+  text: string;
+  detail?: string;
+  createdAt: string;
+}
+
+/** The transcript-shaped slice of one run record: last root-session assistant text plus the
+ *  observed activity window. Never a fabricated summary — absent fields stay absent. */
+export interface RunDetail {
+  result: { finalResponse: string; sessionId?: string; at: string } | null;
+  activities?: RunActivity[];
 }
 
 export interface InputCommitItem {
@@ -50,6 +75,35 @@ export interface InputBaselineItem {
   sourceRef: string;
   digest: string;
   createdBy: string;
+  createdAt: string;
+}
+
+/** One durable audit entry; the export adds the SHA-256 chain links (prevDigest/digest) per line. */
+export interface AuditEntryItem {
+  sequence: number;
+  actor: string;
+  action: string;
+  target: string;
+  details?: unknown;
+  createdAt: string;
+  correlationId?: string;
+  prevDigest?: string;
+  digest?: string;
+}
+
+export interface AuditExportResult {
+  entries: AuditEntryItem[];
+  headDigest: string;
+  lastSequence: number;
+  count: number;
+}
+
+/** One durable run-ledger event (state transition), distinct from the live activity window. */
+export interface RunEventItem {
+  sequence: number;
+  revision: number;
+  event: { type: string; [key: string]: unknown };
+  actor: string;
   createdAt: string;
 }
 
@@ -148,6 +202,30 @@ export interface InteractionItem {
   answer?: unknown;
 }
 
+/** Business review of one succeeded execution. Technical success, sealed artifacts and this
+ *  review are independent facts. */
+export interface ReviewItem {
+  reviewId: string;
+  runId: string;
+  state: 'REQUESTED' | 'APPROVED' | 'REJECTED' | 'SUPERSEDED';
+  requestedBy: string;
+  reviewer?: string;
+  note?: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Last recorded model health fact for one catalog selection. Absence means "not probed", never
+ *  "healthy". */
+export interface ModelHealthItem {
+  selectionId: string;
+  state: 'healthy' | 'degraded' | 'unavailable' | 'unknown';
+  reason?: string;
+  checkedAt: string;
+  revision: number;
+}
+
 export interface WorkbenchBootstrap {
   projects: Array<{ projectId: string; name: string; code?: string }>;
   apps: Array<{
@@ -168,9 +246,10 @@ export interface WorkbenchBootstrap {
     sessionId: string;
     createdAt: string;
     questions: number;
+    runState?: string;
   }>;
-  models?: { catalog: ModelCatalog | null; preference: ModelPreference };
-  status?: { executor?: string; runs?: Record<string, number> };
+  models?: { catalog: ModelCatalog | null; preference: ModelPreference; health?: ModelHealthItem[] };
+  status?: { executor?: string; runs?: Record<string, number>; outbox?: Record<string, number>; approvals?: { active: number; revoked: number } };
 }
 
 export class PlatformApiError extends Error {
@@ -277,6 +356,17 @@ export class WorkbenchApi {
     return this.call('GET', `/api/runs/${encodeURIComponent(runId)}/artifacts`, undefined, signal) as Promise<{ items: ArtifactItem[] }>;
   }
 
+  /** The transcript-shaped slice of one run record (result text + observed activities). */
+  runDetail(runId: string, signal?: AbortSignal): Promise<RunDetail> {
+    return this.call('GET', `/api/runs/${encodeURIComponent(runId)}`, undefined, signal).then((record) => {
+      const source = record as { result?: RunDetail['result']; activities?: RunActivity[] };
+      return {
+        ...(source.result !== undefined ? { result: source.result } : { result: null }),
+        ...(source.activities !== undefined ? { activities: source.activities } : {}),
+      };
+    }) as Promise<RunDetail>;
+  }
+
   /** Input commits accepted for one execution, paged by the control plane. */
   runInputs(runId: string, page: { offset: number; limit: number }, signal?: AbortSignal): Promise<Page<InputCommitItem>> {
     return this.call(
@@ -285,6 +375,49 @@ export class WorkbenchApi {
       undefined,
       signal,
     ) as Promise<Page<InputCommitItem>>;
+  }
+
+  /** Durable run-ledger events (state transitions), newest first; survives a control-plane restart. */
+  runEvents(runId: string, page: { offset: number; limit: number }, signal?: AbortSignal): Promise<Page<RunEventItem>> {
+    return this.call(
+      'GET',
+      `/api/runs/${encodeURIComponent(runId)}/events?offset=${page.offset}&limit=${page.limit}`,
+      undefined,
+      signal,
+    ) as Promise<Page<RunEventItem>>;
+  }
+
+  /** Verifiable audit export (NDJSON with a SHA-256 chain). The body is newline-delimited JSON, not
+   *  one JSON document, so it is parsed line by line; the chain head/last sequence come from the
+   *  lines themselves (the proxy does not forward the X-Audit response headers). */
+  async auditExport(
+    options: { target?: string; after?: number; limit?: number } = {},
+    signal?: AbortSignal,
+  ): Promise<AuditExportResult> {
+    const query = new URLSearchParams();
+    if (options.target) query.set('target', options.target);
+    if (options.after !== undefined) query.set('after', String(options.after));
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    const response = await this.fetchImpl(`${this.baseUrl}/api/audit/export${suffix}`, {
+      method: 'GET',
+      headers: { accept: 'application/x-ndjson' },
+      ...(signal ? { signal } : {}),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      let code = 'PLATFORM_OPERATION_FAILED';
+      try { code = (JSON.parse(text) as { code?: string }).code ?? code; } catch { /* non-JSON error body */ }
+      throw new PlatformApiError(code, response.status);
+    }
+    const entries = text.split('\n').filter((line) => line.trim().length > 0).map((line) => JSON.parse(line) as AuditEntryItem);
+    const last = entries[entries.length - 1];
+    return {
+      entries,
+      headDigest: last?.digest ?? '0'.repeat(64),
+      lastSequence: last?.sequence ?? (options.after ?? 0),
+      count: entries.length,
+    };
   }
 
   /** Record one enterprise submission intent for an already-bound native Session.
@@ -408,6 +541,33 @@ export class WorkbenchApi {
       total: number;
       items: InteractionItem[];
     }>;
+  }
+
+  /** Business review records for one execution. */
+  runReviews(runId: string, signal?: AbortSignal): Promise<{ items: ReviewItem[] }> {
+    return this.call('GET', `/api/runs/${encodeURIComponent(runId)}/reviews`, undefined, signal) as Promise<{
+      items: ReviewItem[];
+    }>;
+  }
+
+  /** Request a business review of a succeeded run; the server refuses anything else. */
+  requestReview(runId: string, note?: string, signal?: AbortSignal): Promise<ReviewItem> {
+    return this.call('POST', `/api/runs/${encodeURIComponent(runId)}/reviews`, note ? { note } : {}, signal) as Promise<ReviewItem>;
+  }
+
+  /** Record a review decision with CAS on the review revision. */
+  decideReview(
+    reviewId: string,
+    decision: 'APPROVED' | 'REJECTED',
+    expectedRevision: number,
+    note?: string,
+    signal?: AbortSignal,
+  ): Promise<ReviewItem> {
+    return this.call('POST', `/api/reviews/${encodeURIComponent(reviewId)}/decision`, {
+      decision,
+      expectedRevision,
+      ...(note ? { note } : {}),
+    }, signal) as Promise<ReviewItem>;
   }
 
   /** Answer one native question. A late, duplicate or post-terminal answer is rejected by the server. */

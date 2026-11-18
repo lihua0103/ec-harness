@@ -52,6 +52,17 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
  * @param ctx - Client root context.
  */
 export function apply(ctx: ClientContext): void {
+  // Boot flash guard: this plugin owns the first screen, but the shell paints its previous main
+  // view (an open conversation) for a beat before the platform panel is selected — the chat
+  // "flashed away" on every refresh. The document stays unlit until the platform page is actually
+  // active (or a failsafe fires, so a broken boot still renders). An inline style, not a CSS rule:
+  // page styles are contractually scoped under `.ec-wb`, and this transient unlit beat follows the
+  // same save/restore inline-style pattern as the native-sidebar hiding below.
+  document.documentElement.style.visibility = 'hidden'
+  const bootGuardFailsafe = setTimeout(() => {
+    document.documentElement.style.visibility = ''
+  }, 2500)
+
   // Page styles are scoped under `.ec-wb` and removed with this effect, so disabling the plugin
   // leaves no styling behind.
   ctx.effect(() => {
@@ -134,6 +145,11 @@ export function apply(ctx: ClientContext): void {
         }
         return String(await ctx.sessions.create(workspaceId ? { workspaceId: workspaceId as never } : {}))
       },
+      /// The Host session catalog for the 历史会话 page (the same list the upstream sidebar
+      /// reads). The snapshot object is the observable source itself — getSnapshot/subscribe —
+      /// so the page subscribes with useSyncExternalStore and stays live across list mutations.
+      sessionList: ctx.sessions.list,
+      refreshSessionList: () => ctx.sessions.refresh(),
     }),
   }, WorkbenchPage))
 
@@ -206,8 +222,12 @@ export function apply(ctx: ClientContext): void {
   }
   const syncSidebarForPanel = (): void => {
     try {
-      if (ctx.layout.panelInfo.getSnapshot().activePanelId === PLATFORM_PANEL_ID) setTimeout(hideNativeSidebar, 120)
-      else restoreNativeSidebar()
+      if (ctx.layout.panelInfo.getSnapshot().activePanelId === PLATFORM_PANEL_ID) {
+        // The platform page is rendering: the boot guard has done its job.
+        clearTimeout(bootGuardFailsafe)
+        document.documentElement.style.visibility = ''
+        setTimeout(hideNativeSidebar, 120)
+      } else restoreNativeSidebar()
     } catch { /* layout unavailable */ }
   }
   ctx.effect(() => {
@@ -220,7 +240,11 @@ export function apply(ctx: ClientContext): void {
       } catch { /* retry briefly while the main registry publishes */ }
       if (attempts >= 8) clearInterval(timer)
     }, 180)
-    return () => { clearInterval(timer); restoreNativeSidebar() }
+    return () => {
+      clearInterval(timer); restoreNativeSidebar()
+      clearTimeout(bootGuardFailsafe)
+      document.documentElement.style.visibility = ''
+    }
   }, 'platform-workbench: enterprise platform default')
   ctx.effect(() => {
     const dispose = ctx.layout.panelInfo.subscribe(syncSidebarForPanel)
