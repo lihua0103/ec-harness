@@ -133,6 +133,9 @@ test('keyboard path: skip link and palette focus affordances exist in the page s
   assert.match(source, /ec-wb-skip/, 'missing skip link');
   assert.match(source, /aria-activedescendant/, 'palette input must follow the combobox pattern');
   assert.match(source, /previous\?\.focus/, 'the palette must restore focus to its trigger on close');
+  // The focus call is deferred one tick, so Escape must be handled at the document level too —
+  // otherwise a quick Escape lands on the body and the modal cannot be dismissed from the keyboard.
+  assert.match(source, /document\.addEventListener\('keydown'/, 'the palette must close on Escape from anywhere');
   assert.match(source, /id="ec-wb-content"/, 'the skip link needs a main landmark target');
 });
 

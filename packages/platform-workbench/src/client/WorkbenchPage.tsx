@@ -765,8 +765,18 @@ function CommandPalette({ api, open, onClose, onOpenWork, onOpenRun, onNavigate 
     // trigger when it closes, so keyboard users are never stranded inside the overlay.
     const previous = document.activeElement as HTMLElement | null
     const timer = setTimeout(() => inputRef.current?.focus(), 0)
+    // Escape closes from anywhere: focus lands on the input one tick later, so a quick Escape
+    // would otherwise fall on the body and leave the overlay open — a keyboard trap.
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        onClose()
+      }
+    }
+    document.addEventListener('keydown', onKey)
     return () => {
       clearTimeout(timer)
+      document.removeEventListener('keydown', onKey)
       previous?.focus?.()
     }
   }, [open])
