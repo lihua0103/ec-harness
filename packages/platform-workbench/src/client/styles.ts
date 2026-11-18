@@ -21,7 +21,7 @@ export const WORKBENCH_CSS = `
   --ec-secondary: #526d73;
   --ec-primary: #087b6b;
   --ec-primary-hover: #06695c;
-  --ec-green: #0b806e;
+  --ec-green: #0a6f61;
   --ec-green-weak: #e8f3f0;
   --ec-paper: #eff4f5;
   --ec-white: #ffffff;
@@ -375,6 +375,23 @@ export const WORKBENCH_CSS = `
 .ec-wb .ec-wb-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 2px; border-top: 1px solid var(--ec-line-soft); }
 .ec-wb .ec-wb-row:first-of-type { border-top: 0; }
 .ec-wb .ec-wb-rows { display: flex; flex-direction: column; }
+/* Inline action form inside a delivery-package row (E1-3): wraps under the row head and keeps
+   labels, inputs and confirm/cancel readable at rail width. */
+.ec-wb .ec-wb-row:has(.ec-wb-action-form) { flex-wrap: wrap; }
+.ec-wb .ec-wb-action-form { display: flex; flex-direction: column; gap: 6px; flex: 1 1 100%; padding: 8px 0 2px; }
+.ec-wb .ec-wb-action-form label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; font-weight: 600; color: var(--ec-ink); }
+.ec-wb .ec-wb-action-form input,
+.ec-wb .ec-wb-action-form select { font: inherit; font-size: 11px; padding: 5px 8px; border: 1px solid var(--ec-line-strong); border-radius: var(--ec-radius-sm); background: var(--ec-white); color: var(--ec-ink); min-width: 0; }
+/* Declarative result views and key-aligned diffs (E1-4/E1-5): compact tables and diff blocks
+   readable at rail width. */
+.ec-wb .ec-wb-inline-field { display: flex; flex-direction: column; gap: 3px; font-size: 11px; font-weight: 600; color: var(--ec-ink); padding-bottom: 6px; }
+.ec-wb .ec-wb-inline-field select { font: inherit; font-size: 11px; padding: 5px 8px; border: 1px solid var(--ec-line-strong); border-radius: var(--ec-radius-sm); background: var(--ec-white); color: var(--ec-ink); min-width: 0; }
+.ec-wb .ec-wb-diff-block, .ec-wb .ec-wb-view-block { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; border-top: 1px solid var(--ec-line-soft); }
+.ec-wb .ec-wb-diff-kind { font-size: 11px; font-weight: 620; color: var(--ec-ink); }
+.ec-wb .ec-wb-finding-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.ec-wb .ec-wb-finding-table th { text-align: left; font-weight: 600; color: #5d7579; padding: 4px 8px 4px 0; border-bottom: 1px solid var(--ec-line-soft); }
+.ec-wb .ec-wb-finding-table td { padding: 4px 8px 4px 0; border-bottom: 1px solid var(--ec-line-soft); color: var(--ec-ink); overflow-wrap: anywhere; }
+.ec-wb .ec-wb-metric-list { margin: 0; padding: 0 0 0 16px; font-size: 11px; color: var(--ec-ink); }
 .ec-wb button.ec-wb-button {
   border: 1px solid var(--ec-line-strong); background: var(--ec-white); color: #47666c;
   font: inherit; font-size: 10px; font-weight: 600; line-height: 1.3; border-radius: var(--ec-radius-sm);
@@ -670,6 +687,23 @@ export const WORKBENCH_CSS = `
 .ec-wb .ec-wb-session-tools .ec-wb-select { width: auto; min-width: 150px; flex: 0 1 auto; }
 .ec-wb .ec-wb-rerun-form { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--ec-line); }
 .ec-wb .ec-wb-rerun-form .ec-wb-form-actions { align-items: center; }
+
+/* Global command palette (Ctrl/⌘+K) added with the E4-6 pass. Token-based like the block
+   above, so the dark theme re-inks it automatically; the only literal is the backdrop veil. */
+.ec-wb .ec-wb-palette-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); display: flex; align-items: flex-start; justify-content: center; padding: 12vh 16px 16px; z-index: 60; }
+.ec-wb .ec-wb-palette { width: 100%; max-width: 560px; background: var(--ec-white); border: 1px solid var(--ec-line-strong); border-radius: var(--ec-radius-sm); box-shadow: var(--ec-shadow-2); display: flex; flex-direction: column; gap: 8px; padding: 12px; max-height: 70vh; }
+.ec-wb .ec-wb-palette-input { width: 100%; }
+.ec-wb .ec-wb-palette-note { margin: 0; font-size: 12px; }
+.ec-wb .ec-wb-palette-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; border-top: 1px solid var(--ec-line); }
+.ec-wb .ec-wb-palette-hit { display: block; width: 100%; text-align: left; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; padding: 8px 10px; border-radius: var(--ec-radius-sm); }
+.ec-wb .ec-wb-palette-hit:hover { background: var(--ec-soft); }
+.ec-wb .ec-wb-palette-hit.is-active { background: var(--ec-soft); outline: 2px solid var(--ec-focus); outline-offset: -2px; }
+.ec-wb .ec-wb-palette-hit:focus-visible { outline: 2px solid var(--ec-focus); outline-offset: -2px; }
+.ec-wb .ec-wb-palette-hit-main { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--ec-ink); }
+.ec-wb .ec-wb-palette-hit-main small { font-size: 11px; color: var(--ec-muted); }
+/* E4-4 keyboard path: the skip link is hidden until it receives focus. */
+.ec-wb .ec-wb-skip { position: absolute; left: 8px; top: -48px; z-index: 70; background: var(--ec-white); color: var(--ec-ink); border: 1px solid var(--ec-line-strong); border-radius: var(--ec-radius-sm); padding: 6px 12px; font: inherit; font-size: 13px; text-decoration: none; transition: top .15s ease; }
+.ec-wb .ec-wb-skip:focus-visible { top: 8px; outline: 2px solid var(--ec-focus); outline-offset: -2px; }
 
 @media (prefers-color-scheme: dark) {
   .ec-wb {

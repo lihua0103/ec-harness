@@ -44,13 +44,19 @@ import {
   WorkbenchApi,
   type ArtifactItem,
   type AuditEntryItem,
+  type DeliveryPackageItem,
+  type EvaluationRunItem,
+  type FindingItem,
+  type FindingsDiff,
   type InputBaselineItem,
   type InputCommitItem,
   type InteractionItem,
   type ModelCatalog,
   type ModelPreference,
+  type OpsPanel,
   type Page,
   type ReviewItem,
+  type ResultViewDecl,
   type RunActivity,
   type RunDetail,
   type RunEventItem,
@@ -504,6 +510,7 @@ const SEARCH_PATHS = (
 )
 const GLYPH_SETTINGS = <Glyph>{SETTINGS_PATHS}</Glyph>
 const GLYPH_CHECK = <Glyph size={11}><polyline points="4 12.5 9 17.5 20 6.5" /></Glyph>
+const GLYPH_SEARCH_TOP = <Glyph size={16}><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.2" y2="16.2" /></Glyph>
 const GLYPH_SPARK = <Glyph size={19}><path d="M12 3.5 14.6 9.4 20.5 12 14.6 14.6 12 20.5 9.4 14.6 3.5 12 9.4 9.4Z" /></Glyph>
 
 /** The brand mark: a faceted emerald, drawn — not a text glyph. */
@@ -559,11 +566,11 @@ function Pager({ total, offset, limit, busy, onOffset }: {
   )
 }
 
-function ErrorBox({ message, onRetry }: { message: string; onRetry(): void }) {
+function ErrorBox({ message, onRetry }: { message: string; onRetry?(): void }) {
   return (
     <div className="ec-wb-error" role="alert">
       <p>{message}</p>
-      <button type="button" className="ec-wb-button" onClick={onRetry}>重试</button>
+      {onRetry ? <button type="button" className="ec-wb-button" onClick={onRetry}>重试</button> : null}
     </div>
   )
 }
@@ -689,16 +696,16 @@ function ModelDefaultPanel({ api, catalog, preference, onReload }: {
   )
 }
 
-/** Titles of Works that are named by a pending question but sit outside the loaded page. One
+/** Titles of Works that are named by a pending item but sit outside the loaded page. One
  *  bounded context read per such Work, so the "需要你处理" list can name what it is asking about. */
 function usePendingWorkTitles(
   api: WorkbenchApi,
-  pending: NonNullable<WorkbenchBootstrap['pending']>,
+  items: Array<{ workId: string | null }>,
   works: WorkbenchItem[],
 ): Record<string, string> {
   const [titles, setTitles] = useState<Record<string, string>>({})
   const known = new Set(works.map((work) => work.workId))
-  const missing = [...new Set(pending
+  const missing = [...new Set(items
     .map((item) => item.workId)
     .filter((id): id is string => typeof id === 'string' && !known.has(id) && !(id in titles)))]
   const key = missing.join(',')
@@ -722,35 +729,156 @@ function usePendingWorkTitles(
   return titles
 }
 
-/** Pending questions across Works. A Work outside the loaded page is still openable: the page
- *  resolves it from its own context on click rather than declaring it invisible. */
-function PendingList({ items, works, titles, onOpen }: {
-  items: NonNullable<WorkbenchBootstrap['pending']>
+/** E3-4 unified todos keep their source kind and their own resolution verb — the list never
+ *  blurs a review decision or a receipt into "a question to answer". */
+const TODO_KINDS: Record<'question' | 'review' | 'delivery-receipt', { label: string; verb: string }> = {
+  question: { label: '问题答复', verb: '回答' },
+  review: { label: '交付复核', verb: '决定' },
+  'delivery-receipt': { label: '交付接收', verb: '确认接收' },
+}
+type TodoItem = NonNullable<WorkbenchBootstrap['todos']>[number]
+
+type SearchHit = Awaited<ReturnType<WorkbenchApi['search']>>[number]
+const SEARCH_KIND_LABEL: Record<SearchHit['kind'], string> = { work: '工作', run: '运行', project: '项目', app: '应用' }
+
+/** E4-6 command palette: one keyboard surface over the global search. Hits open by the same
+ *  navigation they have elsewhere; the server owns matching, the palette only picks. */
+function CommandPalette({ api, open, onClose, onOpenWork, onOpenRun, onNavigate }: {
+  api: WorkbenchApi
+  open: boolean
+  onClose(): void
+  onOpenWork(workId: string): void
+  onOpenRun(workId: string, runId: string): void
+  onNavigate(view: WorkbenchView): void
+}) {
+  const [term, setTerm] = useState('')
+  const [hits, setHits] = useState<SearchHit[]>([])
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [active, setActive] = useState(0)
+  const inputRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    if (!open) return undefined
+    setTerm(''); setHits([]); setError(''); setActive(0)
+    // E4-4 focus management: the palette takes focus when it opens and hands it back to the
+    // trigger when it closes, so keyboard users are never stranded inside the overlay.
+    const previous = document.activeElement as HTMLElement | null
+    const timer = setTimeout(() => inputRef.current?.focus(), 0)
+    return () => {
+      clearTimeout(timer)
+      previous?.focus?.()
+    }
+  }, [open])
+
+  useEffect(() => {
+    const trimmed = term.trim()
+    if (!open || !trimmed) { setHits([]); return undefined }
+    const controller = new AbortController()
+    const timer = setTimeout(() => {
+      setBusy(true)
+      api.search(trimmed, controller.signal)
+        .then((items) => {
+          if (controller.signal.aborted) return
+          setHits(items); setActive(0); setError('')
+        })
+        .catch((reason) => {
+          if (!controller.signal.aborted && (reason as Error)?.name !== 'AbortError') setError(errorText(reason))
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setBusy(false)
+        })
+    }, 200)
+    return () => { controller.abort(); clearTimeout(timer) }
+  }, [term, open, api])
+
+  if (!open) return null
+  const openHit = (hit: SearchHit) => {
+    onClose()
+    if (hit.kind === 'work' && hit.workId) onOpenWork(hit.workId)
+    else if (hit.kind === 'run' && hit.workId && hit.runId) onOpenRun(hit.workId, hit.runId)
+    else if (hit.kind === 'project') onNavigate('projects')
+    else if (hit.kind === 'app') onNavigate('apps')
+  }
+  return (
+    <div className="ec-wb-palette-backdrop" onClick={onClose}>
+      <div className="ec-wb-palette" role="dialog" aria-modal="true" aria-label="全局搜索" onClick={(event) => event.stopPropagation()}>
+        <input
+          ref={inputRef}
+          className="ec-wb-input ec-wb-palette-input"
+          type="search"
+          role="combobox"
+          aria-expanded={hits.length > 0}
+          aria-controls="ec-wb-palette-list"
+          aria-activedescendant={hits[active] ? `ec-wb-palette-opt-${active}` : undefined}
+          aria-label="搜索工作、运行、项目或应用"
+          placeholder="搜索工作、运行、项目或应用"
+          value={term}
+          onChange={(event) => setTerm(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowDown') { event.preventDefault(); setActive((value) => Math.min(value + 1, hits.length - 1)) }
+            else if (event.key === 'ArrowUp') { event.preventDefault(); setActive((value) => Math.max(value - 1, 0)) }
+            else if (event.key === 'Enter' && hits[active]) { event.preventDefault(); openHit(hits[active]) }
+            else if (event.key === 'Escape') onClose()
+          }}
+        />
+        {error ? <p className="ec-wb-error-text ec-wb-palette-note" role="alert">{error}</p> : null}
+        {term.trim() && !error && hits.length === 0
+          ? <p className="ec-wb-muted ec-wb-palette-note">{busy ? '正在搜索…' : '没有匹配项。'}</p>
+          : null}
+        {hits.length > 0 ? (
+          <ul className="ec-wb-palette-list" id="ec-wb-palette-list" role="listbox" aria-label="搜索结果">
+            {hits.map((hit, index) => (
+              <li
+                key={`${hit.kind}:${hit.id}`}
+                id={`ec-wb-palette-opt-${index}`}
+                role="option"
+                aria-selected={index === active}
+                className={`ec-wb-palette-hit${index === active ? ' is-active' : ''}`}
+                tabIndex={-1}
+                onMouseEnter={() => setActive(index)}
+                onClick={() => openHit(hit)}
+              >
+                <span className="ec-wb-badge">{SEARCH_KIND_LABEL[hit.kind]}</span>
+                <span className="ec-wb-palette-hit-main"><strong>{hit.title}</strong><small className="ec-wb-muted">{hit.detail}</small></span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <p className="ec-wb-muted ec-wb-palette-note">↑↓ 选择 · Enter 打开 · Esc 关闭</p>
+      </div>
+    </div>
+  )
+}
+
+/** Unified todo rows (E3-4). Each row names its kind, the concrete act that resolves it and when
+ *  it started waiting; clicking opens the Work's run where that act happens. */
+function UnifiedTodoList({ items, works, titles, onOpen }: {
+  items: TodoItem[]
   works: WorkbenchItem[]
   titles?: Record<string, string>
   onOpen(workId: string, runId: string): void
 }) {
-  if (items.length === 0) return <p className="ec-wb-empty">当前没有等待答复的问题。</p>
+  if (items.length === 0) return <p className="ec-wb-empty">当前没有待处理事项。</p>
   return (
     <div className="ec-wb-rows">
       {items.map((item) => {
         const work = works.find((candidate) => candidate.workId === item.workId)
         const title = work?.title ?? (item.workId ? titles?.[item.workId] : undefined) ?? `工作 ${String(item.workId ?? '').slice(0, 8)}`
+        const kind = TODO_KINDS[item.kind]
         return (
           <button
             type="button"
             className="ec-wb-row-button"
-            key={item.interactionId}
-            disabled={!item.workId}
-            onClick={() => { if (item.workId) onOpen(item.workId, item.runId) }}
+            key={`${item.kind}:${item.id}`}
+            disabled={!item.workId || !item.runId}
+            onClick={() => { if (item.workId && item.runId) onOpen(item.workId, item.runId) }}
           >
             <span className="ec-wb-row-main">
-              <strong>{title}</strong>
-              <small className="ec-wb-muted">
-                {item.runState ? `${runStateText(item.runState)} · ` : ''}{item.questions} 个问题 · {formatTime(item.createdAt)}
-              </small>
+              <strong><span className="ec-wb-badge" data-tone={item.kind === 'question' ? 'warn' : undefined}>{kind.label}</span> {title}</strong>
+              <small className="ec-wb-muted">{item.summary} · {formatTime(item.createdAt)}</small>
             </span>
-            <span className="ec-wb-muted">{work ? '回答 ›' : '打开 ›'}</span>
+            <span className="ec-wb-muted">{work ? `${kind.verb} ›` : '打开 ›'}</span>
           </button>
         )
       })}
@@ -1589,6 +1717,130 @@ function ReviewPanel({ api, run, onChanged }: {
   )
 }
 
+const CHECK_KIND_LABEL: Record<string, string> = {
+  'artifact-present': '产物存在',
+  'artifact-digest': '产物摘要',
+  'artifact-bytes-max': '大小上限',
+  'goal-contains': '目标锚点',
+}
+
+/** E2-1 deterministic verification (expert gold sets deferred): recomputable checks against the
+ *  run's own records — artifact presence, sealed digests, byte ceilings, goal anchors. Nothing
+ *  here claims expert equivalence; the card says so explicitly instead of dressing itself up
+ *  as a business review. */
+function EvaluationCard({ api, run }: { api: WorkbenchApi; run: RunSummary | null }) {
+  const [sets, setSets] = useState<Awaited<ReturnType<WorkbenchApi['listEvaluationSets']>>>([])
+  const [selectedSetId, setSelectedSetId] = useState('')
+  const [evaluation, setEvaluation] = useState<EvaluationRunItem | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [setsError, setSetsError] = useState('')
+
+  useEffect(() => {
+    const controller = new AbortController()
+    setSetsError('')
+    setError('')
+    setEvaluation(null)
+    setSelectedSetId('')
+    setSets([])
+    api.listEvaluationSets(run?.appId, controller.signal)
+      .then((items) => {
+        if (controller.signal.aborted) return
+        const active = items.filter((item) => item.state === 'ACTIVE')
+        setSets(active)
+        setSelectedSetId(active[0]?.evaluationSetId ?? '')
+      })
+      .catch((reason) => {
+        if (!controller.signal.aborted && (reason as Error)?.name !== 'AbortError') setSetsError(errorText(reason))
+      })
+    return () => controller.abort()
+  }, [api, run?.appId])
+
+  if (!run) {
+    return (
+      <section className="ec-wb-card" aria-labelledby="ec-wb-eval">
+        <div className="ec-wb-card-head"><h2 id="ec-wb-eval">确定性验证</h2></div>
+        <p className="ec-wb-empty">选择一个运行后可对其执行确定性检查。</p>
+      </section>
+    )
+  }
+
+  const evaluate = async () => {
+    if (!selectedSetId) return
+    setBusy(true)
+    setError('')
+    setEvaluation(null)
+    try {
+      setEvaluation(await api.evaluateSet(selectedSetId, run.runId))
+    } catch (reason) {
+      setError(`确定性检查未执行：${errorText(reason)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="ec-wb-card" aria-labelledby="ec-wb-eval">
+      <div className="ec-wb-card-head">
+        <h2 id="ec-wb-eval">确定性验证</h2>
+        {evaluation
+          ? (
+            <span className="ec-wb-badge" data-tone={evaluation.failed === 0 ? 'ok' : 'error'}>
+              {evaluation.failed === 0 ? `全部通过（${evaluation.passed}）` : `未通过 ${evaluation.failed} / ${evaluation.passed + evaluation.failed}`}
+            </span>
+          )
+          : null}
+      </div>
+      <p className="ec-wb-muted">
+        确定性检查只核对可复算的事实（产物封存、摘要、大小、目标锚点），不调用模型、不做业务判断；
+        专家金标评测尚未建立，本卡不代替业务复核。
+      </p>
+      {setsError
+        ? <ErrorBox message={`无法读取检查集：${setsError}`} />
+        : sets.length === 0
+          ? <p className="ec-wb-empty">此应用还没有确定性检查集。</p>
+          : (
+            <>
+              <div className="ec-wb-row-actions">
+                <label className="ec-wb-muted" htmlFor="ec-wb-eval-set">检查集</label>
+                <select
+                  id="ec-wb-eval-set"
+                  className="ec-wb-select"
+                  value={selectedSetId}
+                  onChange={(event) => { setSelectedSetId(event.target.value); setEvaluation(null) }}
+                >
+                  {sets.map((item) => (
+                    <option key={item.evaluationSetId} value={item.evaluationSetId}>
+                      {item.name}（{item.entries.reduce((count, entry) => count + entry.checks.length, 0)} 项检查）
+                    </option>
+                  ))}
+                </select>
+                <button type="button" className="ec-wb-button" disabled={busy || !selectedSetId} onClick={() => void evaluate()}>
+                  {busy ? '检查中…' : '运行检查'}
+                </button>
+              </div>
+              {evaluation
+                ? (
+                  <div role="list">
+                    {evaluation.results.map((result, index) => (
+                      <div role="listitem" key={`${result.entryId}-${index}`} className="ec-wb-artifact-row">
+                        <span className="ec-wb-row-main">
+                          <strong>{result.label} · {CHECK_KIND_LABEL[result.check.kind] ?? result.check.kind}</strong>
+                          <small className="ec-wb-muted">{result.detail}</small>
+                        </span>
+                        <span className="ec-wb-badge" data-tone={result.pass ? 'ok' : 'error'}>{result.pass ? '通过' : '未通过'}</span>
+                      </div>
+                    ))}
+                  </div>
+                )
+                : null}
+            </>
+          )}
+      {error ? <p className="ec-wb-error-text" role="alert">{error}</p> : null}
+    </section>
+  )
+}
+
 /** The three Work pointers (SC-03) as one honest card: the baseline being edited, the most recent
  *  run, and the current recognition — three separate lines, never collapsed into "最新". The
  *  recognition line reads the newest succeeded run's reviews and refuses to show approval that
@@ -2106,6 +2358,21 @@ function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOp
               ? <ReviewPanel api={api} run={selectedRun} onChanged={() => { void loadRuns(runsOffset); void onReload() }} />
               : null}
 
+            {selectedRun
+              ? (
+                <ResultViewsCard
+                  api={api}
+                  run={selectedRun}
+                  resultViews={Array.isArray(appDescriptor?.resultViews) ? appDescriptor.resultViews : []}
+                  comparableRunIds={runs.items
+                    .filter((candidate) => candidate.runId !== selectedRun.runId && candidate.snapshot?.state === 'SUCCEEDED')
+                    .map((candidate) => ({ runId: candidate.runId, label: `运行 ${candidate.runId.slice(0, 8)} · ${formatTime(candidate.createdAt)}` }))}
+                />
+              )
+              : null}
+
+            <EvaluationCard api={api} run={selectedRun ?? null} />
+
             <InteractionPanel
               api={api}
               runId={selectedRun?.runId ?? ''}
@@ -2178,6 +2445,8 @@ function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOp
                 )}
             </section>
 
+            <DeliveryPackagesCard api={api} workId={workId} runs={runs} workArchived={context?.work.state === 'ARCHIVED'} />
+
             <section className="ec-wb-card" aria-labelledby="ec-wb-baselines">
               <div className="ec-wb-card-head"><h2 id="ec-wb-baselines">输入批次</h2><span className="ec-wb-badge">{baselines.total}</span></div>
               <p className="ec-wb-muted">批次只追加，不覆盖旧基线；旧执行始终对应它当时的输入摘要。</p>
@@ -2243,6 +2512,396 @@ function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOp
         </div>
       </div>
     </div>
+  )
+}
+
+// ── Delivery packages (E1-3) ────────────────────────────────────────────────
+
+/** 封存(SEAL) ≠ 交付(DELIVER) ≠ 接收(RECEIVED)：三个独立的事实，各自留痕。 */
+const DELIVERY_STATE_LABELS: Record<DeliveryPackageItem['state'], string> = {
+  SEALED: '已封存 · 待交付',
+  DELIVERED: '已交付',
+  RECEIVED: '已接收',
+  WITHDRAWN: '已撤回',
+  SUPERSEDED: '已被替代',
+}
+const DELIVERY_STATE_TONES: Record<DeliveryPackageItem['state'], string | undefined> = {
+  SEALED: 'warn',
+  DELIVERED: 'ok',
+  RECEIVED: 'ok',
+  WITHDRAWN: 'muted',
+  SUPERSEDED: 'muted',
+}
+const REVIEW_STATE_LABELS: Record<DeliveryPackageItem['manifest']['review'] extends null ? never : NonNullable<DeliveryPackageItem['manifest']['review']>['state'], string> = {
+  REQUESTED: '待审核',
+  APPROVED: '已通过',
+  REJECTED: '已拒绝',
+  SUPERSEDED: '已废弃',
+}
+
+/**
+ * One Work's delivery packages, newest first, with the lifecycle the control plane enforces:
+ * sealing freezes the manifest (artifact digests + the review snapshot at seal time), delivery
+ * and reception are recorded separately, withdrawal demands a reason and supersession is an
+ * explicit choice of the replacing package — the UI never merges those facts for the operator.
+ */
+function DeliveryPackagesCard({ api, workId, runs, workArchived }: {
+  api: WorkbenchApi
+  workId: string
+  runs: Page<RunSummary>
+  workArchived: boolean
+}) {
+  const [packages, setPackages] = useState<Page<DeliveryPackageItem>>({ total: 0, items: [] })
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [token, setToken] = useState(0)
+  const [notice, setNotice] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [action, setAction] = useState<{ packageId: string; kind: 'deliver' | 'acknowledge' | 'withdraw' | 'supersede' } | null>(null)
+  const [actionText, setActionText] = useState('')
+  const [actionTarget, setActionTarget] = useState('')
+  const [sealRunId, setSealRunId] = useState('')
+  const [sealNote, setSealNote] = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      setPackages(await api.workDeliveryPackages(workId, { offset: 0, limit: 50 }))
+      setError('')
+    } catch (reason) {
+      setError(errorText(reason))
+    } finally {
+      setLoading(false)
+    }
+  }, [api, workId])
+  useEffect(() => { void load() }, [load, token])
+
+  const refresh = () => setToken((value) => value + 1)
+  const succeededRuns = runs.items.filter((run) => run.snapshot?.state === 'SUCCEEDED')
+
+  const seal = async () => {
+    if (!sealRunId || busy) return
+    setBusy(true)
+    try {
+      const pkg = await api.sealDeliveryPackage(workId, { runId: sealRunId, note: sealNote.trim() || undefined })
+      setNotice(`已封存交付包（${pkg.manifest.artifacts.length} 项成果${pkg.manifest.review ? '，审核快照已随包冻结' : '，封存时该运行未审核'}）。`)
+      setSealRunId('')
+      setSealNote('')
+      refresh()
+    } catch (reason) {
+      setError(errorText(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const runAction = async () => {
+    if (!action || busy) return
+    const target = packages.items.find((pkg) => pkg.packageId === action.packageId)
+    if (!target) return
+    if (action.kind === 'withdraw' && !actionText.trim()) {
+      setError('撤回必须填写原因——这是包历史上留下的唯一解释。')
+      return
+    }
+    if (action.kind === 'supersede' && !actionTarget) {
+      setError('替代必须明确指向另一个未终结的交付包。')
+      return
+    }
+    setBusy(true)
+    try {
+      if (action.kind === 'deliver') {
+        await api.deliverDeliveryPackage(action.packageId, { note: actionText.trim() || undefined, expectedRevision: target.revision })
+        setNotice('已记录交付事实（对方是否接收是另一个独立事实）。')
+      } else if (action.kind === 'acknowledge') {
+        await api.acknowledgeDeliveryPackage(action.packageId, { note: actionText.trim() || undefined, expectedRevision: target.revision })
+        setNotice('已记录接收事实。平台不验证实物接收，这条记录就是全部凭据。')
+      } else if (action.kind === 'withdraw') {
+        await api.withdrawDeliveryPackage(action.packageId, { reason: actionText.trim(), expectedRevision: target.revision })
+        setNotice('交付包已撤回，历史记录原样保留。')
+      } else {
+        await api.supersedeDeliveryPackage(action.packageId, { supersededBy: actionTarget, expectedRevision: target.revision })
+        setNotice('已记录显式替代；旧包的审核快照不会迁移到新包。')
+      }
+      setAction(null)
+      setActionText('')
+      setActionTarget('')
+      refresh()
+    } catch (reason) {
+      setError(errorText(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const actionable = (pkg: DeliveryPackageItem) =>
+    pkg.state === 'SEALED' || pkg.state === 'DELIVERED'
+
+  return (
+    <section className="ec-wb-card" aria-labelledby="ec-wb-deliveries">
+      <div className="ec-wb-card-head"><h2 id="ec-wb-deliveries">交付包</h2><span className="ec-wb-badge">{packages.total}</span></div>
+      <p className="ec-wb-muted">封存≠交付≠接收，各自留痕；撤回要写原因，替代要指明替代者，旧审核不自动迁移。</p>
+      {error ? <ErrorBox message={error} onRetry={() => { setError(''); refresh() }} /> : null}
+      {notice ? <p className="ec-wb-muted" role="status">{notice}</p> : null}
+      {loading && packages.items.length === 0
+        ? <p className="ec-wb-muted" role="status">正在读取交付包…</p>
+        : !error && packages.items.length === 0
+          ? <p className="ec-wb-empty">尚无交付包。运行成功并封存成果后可在此封存为交付包。</p>
+          : (
+            <div>
+              {packages.items.map((pkg) => (
+                <div className="ec-wb-row" key={pkg.packageId}>
+                  <span className="ec-wb-row-main">
+                    <strong>
+                      <span className="ec-wb-badge" data-tone={DELIVERY_STATE_TONES[pkg.state]}>{DELIVERY_STATE_LABELS[pkg.state]}</span>
+                      {' '}运行 {pkg.runId.slice(0, 8)} · {pkg.manifest.artifacts.length} 项成果
+                    </strong>
+                    <small className="ec-wb-muted">
+                      {formatTime(pkg.createdAt)}
+                      {pkg.manifest.review
+                        ? ` · 封存时审核：${REVIEW_STATE_LABELS[pkg.manifest.review.state]}`
+                        : ' · 封存时该运行未审核'}
+                      {pkg.deliveredAt ? ` · 交付于 ${formatTime(pkg.deliveredAt)}` : ''}
+                      {pkg.receivedAt ? ` · 接收于 ${formatTime(pkg.receivedAt)}` : ''}
+                      {pkg.withdrawReason ? ` · 撤回原因：${pkg.withdrawReason}` : ''}
+                      {pkg.supersededBy ? ' · 已指向替代包' : ''}
+                      <span className="ec-wb-expert-only"> · <span className="ec-wb-digest">{pkg.packageDigest.slice(0, 12)}…</span></span>
+                    </small>
+                  </span>
+                  <span className="ec-wb-row-actions">
+                    {actionable(pkg)
+                      ? (
+                        <>
+                          {pkg.state === 'SEALED'
+                            ? <button type="button" className="ec-wb-link" onClick={() => { setAction({ packageId: pkg.packageId, kind: 'deliver' }); setActionText('') }}>记录交付</button>
+                            : <button type="button" className="ec-wb-link" onClick={() => { setAction({ packageId: pkg.packageId, kind: 'acknowledge' }); setActionText('') }}>确认接收</button>}
+                          <button type="button" className="ec-wb-link" onClick={() => { setAction({ packageId: pkg.packageId, kind: 'withdraw' }); setActionText('') }}>撤回</button>
+                          {packages.items.some((other) => other.packageId !== pkg.packageId && actionable(other))
+                            ? <button type="button" className="ec-wb-link" onClick={() => { setAction({ packageId: pkg.packageId, kind: 'supersede' }); setActionText(''); setActionTarget('') }}>被替代</button>
+                            : null}
+                        </>
+                      )
+                      : null}
+                  </span>
+                  {action?.packageId === pkg.packageId
+                    ? (
+                      <div className="ec-wb-action-form" role="group" aria-label="交付包操作">
+                        {action.kind === 'supersede'
+                          ? (
+                            <label>
+                              替代者
+                              <select value={actionTarget} onChange={(event) => setActionTarget(event.target.value)}>
+                                <option value="">选择替代包…</option>
+                                {packages.items.filter((other) => other.packageId !== pkg.packageId && actionable(other)).map((other) => (
+                                  <option key={other.packageId} value={other.packageId}>
+                                    {DELIVERY_STATE_LABELS[other.state]} · 运行 {other.runId.slice(0, 8)} · {formatTime(other.createdAt)}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          )
+                          : (
+                            <label>
+                              {action.kind === 'withdraw' ? '撤回原因（必填）' : '备注（可空）'}
+                              <input value={actionText} onChange={(event) => setActionText(event.target.value)} placeholder={action.kind === 'withdraw' ? '例如：交付对象变更' : ''} />
+                            </label>
+                          )}
+                        <span className="ec-wb-row-actions">
+                          <button type="button" className="ec-wb-link" disabled={busy} onClick={() => void runAction()}>确认</button>
+                          <button type="button" className="ec-wb-link" onClick={() => setAction(null)}>取消</button>
+                        </span>
+                      </div>
+                    )
+                    : null}
+                </div>
+              ))}
+            </div>
+          )}
+      {!workArchived && succeededRuns.length > 0
+        ? (
+          <div className="ec-wb-action-form" role="group" aria-label="封存交付包">
+            <label>
+              封存运行
+              <select value={sealRunId} onChange={(event) => setSealRunId(event.target.value)}>
+                <option value="">选择已成功的运行…</option>
+                {succeededRuns.map((run) => (
+                  <option key={run.runId} value={run.runId}>运行 {run.runId.slice(0, 8)} · {formatTime(run.createdAt)}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              封存备注（可空）
+              <input value={sealNote} onChange={(event) => setSealNote(event.target.value)} placeholder="为什么封存这一批" />
+            </label>
+            <span className="ec-wb-row-actions">
+              <button type="button" className="ec-wb-link" disabled={busy || !sealRunId} onClick={() => void seal()}>封存为交付包</button>
+            </span>
+          </div>
+        )
+        : null}
+    </section>
+  )
+}
+
+// ── Declarative result views + key-aligned diffs (E1-4/E1-5) ────────────────
+
+const DIFF_STATE_LABELS: Record<'added' | 'resolved' | 'changed' | 'unchanged', string> = {
+  added: '新增', resolved: '已消除', changed: '已变化', unchanged: '未变化',
+}
+const DIFF_STATE_TONES: Record<'added' | 'resolved' | 'changed' | 'unchanged', string> = {
+  added: 'warn', resolved: 'ok', changed: 'warn', unchanged: 'muted',
+}
+const SEVERITY_LABELS: Record<string, string> = { info: '提示', warning: '警示', error: '错误' }
+
+/** Renders the app's declared result views from its contributed findings. The platform reads the
+ *  descriptor and the data — it never branches on which application produced the numbers, and a
+ *  field a finding does not carry renders as empty, never as an invented value. */
+function ResultViewsCard({ api, run, resultViews, comparableRunIds }: {
+  api: WorkbenchApi
+  run: RunSummary
+  resultViews: ResultViewDecl[]
+  comparableRunIds: Array<{ runId: string; label: string }>
+}) {
+  const [findings, setFindings] = useState<FindingItem[] | null>(null)
+  const [error, setError] = useState('')
+  const [against, setAgainst] = useState('')
+  const [diff, setDiff] = useState<FindingsDiff | null>(null)
+  const [diffError, setDiffError] = useState('')
+
+  useEffect(() => {
+    let live = true
+    setFindings(null)
+    setError('')
+    void (async () => {
+      try {
+        const page = await api.runFindings(run.runId)
+        if (live) setFindings(page.items)
+      } catch (reason) {
+        if (live) setError(errorText(reason))
+      }
+    })()
+    return () => { live = false }
+  }, [api, run.runId])
+
+  useEffect(() => {
+    if (!against) { setDiff(null); setDiffError(''); return }
+    let live = true
+    setDiffError('')
+    void (async () => {
+      try {
+        // from = the earlier run, to = the selected run: "added" means new in the selected run.
+        const result = await api.runFindingsDiff(against, run.runId)
+        if (live) setDiff(result)
+      } catch (reason) {
+        if (live) { setDiff(null); setDiffError(errorText(reason)) }
+      }
+    })()
+    return () => { live = false }
+  }, [api, against, run.runId])
+
+  const metricStat = (stat: 'count' | 'sum' | 'avg', values: number[]): string => {
+    if (stat === 'count') return String(values.length)
+    if (values.length === 0) return '—'
+    if (stat === 'sum') return String(values.reduce((sum, value) => sum + value, 0))
+    return String(Math.round((values.reduce((sum, value) => sum + value, 0) / values.length) * 1000) / 1000)
+  }
+
+  if (!resultViews.length && (findings === null || findings.length === 0)) return null
+
+  return (
+    <section className="ec-wb-card" aria-labelledby="ec-wb-result-views">
+      <div className="ec-wb-card-head"><h2 id="ec-wb-result-views">结果视图</h2><span className="ec-wb-badge">{findings?.length ?? '…'}</span></div>
+      <p className="ec-wb-muted">视图由应用声明、平台按声明渲染；发现按稳定业务键对齐，不按行号或顺序。</p>
+      {error ? <ErrorBox message={`无法读取结果发现：${error}`} onRetry={() => setAgainst((value) => value)} /> : null}
+      {comparableRunIds.length > 0
+        ? (
+          <label className="ec-wb-inline-field">
+            与更早的运行按业务键比较
+            <select value={against} onChange={(event) => setAgainst(event.target.value)}>
+              <option value="">选择比较对象…</option>
+              {comparableRunIds.map((candidate) => (
+                <option key={candidate.runId} value={candidate.runId}>{candidate.label} → 本运行</option>
+              ))}
+            </select>
+          </label>
+        )
+        : null}
+      {diffError ? <p className="ec-wb-error-text" role="alert">无法比较：{diffError}</p> : null}
+      {diff && !diff.comparable
+        ? <p className="ec-wb-empty">这两次运行不可比较（{diff.reason === 'APP_MISMATCH' ? '不同应用' : '应用版本不同'}）——键的含义可能已变，平台不猜测对齐。</p>
+        : null}
+      {diff?.comparable
+        ? diff.kinds!.map((kind) => (
+          <div key={kind.kind} className="ec-wb-diff-block">
+            <strong className="ec-wb-diff-kind">{kind.kind}：新增 {kind.added} · 已消除 {kind.resolved} · 已变化 {kind.changed} · 未变化 {kind.unchanged}</strong>
+            {kind.items.filter((item) => item.state !== 'unchanged').map((item) => (
+              <div className="ec-wb-row" key={item.key}>
+                <span className="ec-wb-row-main">
+                  <strong>{item.key}</strong>
+                  <small className="ec-wb-muted">{item.after?.summary ?? item.before?.summary ?? ''}</small>
+                </span>
+                <span className="ec-wb-badge" data-tone={DIFF_STATE_TONES[item.state]}>{DIFF_STATE_LABELS[item.state]}</span>
+              </div>
+            ))}
+          </div>
+        ))
+        : null}
+      {(resultViews.length > 0 && findings !== null)
+        ? resultViews.map((view) => {
+          const rows = findings.filter((finding) => finding.kind === view.findingKind)
+          return (
+            <div key={view.viewId} className="ec-wb-view-block">
+              <strong className="ec-wb-diff-kind">{view.title}（{rows.length}）</strong>
+              {rows.length === 0
+                ? <p className="ec-wb-empty">该视图暂无数据。</p>
+                : view.kind === 'table'
+                  ? (
+                    <table className="ec-wb-finding-table">
+                      <thead><tr>{view.columns!.map((column) => <th key={column.field}>{column.label}</th>)}</tr></thead>
+                      <tbody>
+                        {rows.map((finding) => (
+                          <tr key={finding.key}>
+                            {view.columns!.map((column) => {
+                              const value = finding.fields?.[column.field]
+                              return <td key={column.field}>{value === undefined ? '' : String(value)}</td>
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )
+                  : (
+                    <ul className="ec-wb-metric-list">
+                      {view.metrics!.map((metric) => {
+                        const values = rows
+                          .map((finding) => finding.fields?.[metric.field])
+                          .filter((value): value is number => typeof value === 'number')
+                        return (
+                          <li key={metric.field}>
+                            {metric.label}：{metricStat(metric.stat, values)}{metric.unit ?? ''}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  )}
+            </div>
+          )
+        })
+        : null}
+      {resultViews.length === 0 && findings !== null && findings.length > 0
+        ? (
+          <div>
+            {findings.map((finding) => (
+              <div className="ec-wb-row" key={finding.key}>
+                <span className="ec-wb-row-main">
+                  <strong>{finding.key}</strong>
+                  <small className="ec-wb-muted">{finding.summary ?? ''}{finding.severity ? ` · ${SEVERITY_LABELS[finding.severity] ?? finding.severity}` : ''}</small>
+                </span>
+              </div>
+            ))}
+          </div>
+        )
+        : null}
+    </section>
   )
 }
 
@@ -2719,7 +3378,6 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
   const [extra, setExtra] = useState<WorkbenchItem[]>([])
   const [loadingAll, setLoadingAll] = useState(false)
   const [loadError, setLoadError] = useState('')
-  const autoLoadTried = useRef(false)
 
   const projects = data.projects ?? []
   const runs = data.runs?.items ?? []
@@ -2739,7 +3397,7 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
   const total = Math.max(data.works?.total ?? 0, all.length)
   const complete = all.length >= total
 
-  const rows: WorkRow[] = all.map((work) => ({
+  const toRow = (work: WorkbenchItem): WorkRow => ({
     workId: work.workId,
     title: work.title,
     state: work.state,
@@ -2749,9 +3407,64 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
     appId: work.appId,
     appVersion: work.appVersion,
     appName: appLabel(work.appId, work.appVersion),
-  }))
-  const visible = selectWorkRows(rows, { query, state: stateFilter, sort })
-  const byId = new Map(all.map((work) => [work.workId, work]))
+  })
+  const rows: WorkRow[] = all.map(toRow)
+  // E4-3: a search is a server-side query over the whole catalogue, cursor-paginated — it never
+  // depends on which bootstrap page happened to be loaded.
+  const serverQuery = query.trim()
+  const [server, setServer] = useState<{ rows: WorkRow[]; items: WorkbenchItem[]; cursor: string | null } | null>(null)
+  const [serverBusy, setServerBusy] = useState(false)
+  const [serverError, setServerError] = useState('')
+  const serverState = stateFilter === 'active' ? 'ACTIVE' : stateFilter === 'archived' ? 'ARCHIVED' : undefined
+  useEffect(() => {
+    if (!serverQuery) { setServer(null); setServerError(''); return undefined }
+    const controller = new AbortController()
+    const timer = setTimeout(() => {
+      setServerBusy(true)
+      api.queryWorks(
+        { q: serverQuery, ...(serverState ? { state: serverState } : {}) },
+        controller.signal,
+      )
+        .then((page) => {
+          if (controller.signal.aborted) return
+          setServer({ rows: page.items.map(toRow), items: page.items, cursor: page.nextCursor })
+          setServerError('')
+        })
+        .catch((reason) => {
+          if (controller.signal.aborted || (reason as Error)?.name === 'AbortError') return
+          setServer(null)
+          setServerError(`服务器搜索失败：${errorText(reason)}`)
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setServerBusy(false)
+        })
+    }, 250)
+    return () => { controller.abort(); clearTimeout(timer) }
+    // toRow/serverState derive from data and stateFilter; the query string is the real trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverQuery, stateFilter])
+  const loadMore = async () => {
+    if (!server?.cursor || !serverQuery) return
+    setServerBusy(true)
+    try {
+      const page = await api.queryWorks({
+        q: serverQuery,
+        ...(serverState ? { state: serverState } : {}),
+        cursor: server.cursor,
+      })
+      setServer((prev) => (prev
+        ? { rows: [...prev.rows, ...page.items.map(toRow)], items: [...prev.items, ...page.items], cursor: page.nextCursor }
+        : prev))
+    } catch (reason) {
+      setServerError(`未能加载更多结果：${errorText(reason)}`)
+    } finally {
+      setServerBusy(false)
+    }
+  }
+  const serverMode = serverQuery.length > 0
+  const visible = serverMode && server ? server.rows : selectWorkRows(rows, { query, state: stateFilter, sort })
+  // Server hits may sit outside the bootstrap page; they must still open, so they join byId.
+  const byId = new Map([...all, ...(server?.items ?? [])].map((work) => [work.workId, work]))
   const archivedCount = all.filter((work) => work.state === 'ARCHIVED').length
   const filtering = query.trim().length > 0 || stateFilter !== 'active' || sort !== 'recent'
 
@@ -2783,14 +3496,6 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
     if (run) return { label: runStateText(run.snapshot?.state), tone: runTone(run.snapshot?.state) }
     return work.state === 'ARCHIVED' ? { label: '已归档', tone: 'muted' } : { label: '未发起运行', tone: 'muted' }
   }
-
-  // A search must cover the catalogue, not one bootstrap page: the first query over a partial list
-  // loads the rest once, so "no match" can never mean "not on this page".
-  useEffect(() => {
-    if (autoLoadTried.current || complete || loadingAll || query.trim().length === 0) return
-    autoLoadTried.current = true
-    void loadAll()
-  }, [query, complete, loadingAll])
 
   const resetFilters = () => { setQuery(''); setStateFilter('active'); setSort('recent') }
   const missing = Math.max(0, total - all.length)
@@ -2824,7 +3529,9 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
             <option value="all">全部状态</option>
           </select>
           <select className="ec-wb-select ec-wb-queue-select" aria-label="排序方式"
-            value={sort} onChange={(event) => setSort(event.target.value as 'recent' | 'title' | 'project')}>
+            value={sort} disabled={serverMode}
+            title={serverMode ? '搜索结果由服务器按最近活动排序' : undefined}
+            onChange={(event) => setSort(event.target.value as 'recent' | 'title' | 'project')}>
             <option value="recent">最近活动</option>
             <option value="title">工作名称</option>
             <option value="project">按项目</option>
@@ -2835,18 +3542,22 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
         ? (
           <div className="ec-wb-queue-empty">
             <p className="ec-wb-empty">
-              {all.length === 0
-                ? '还没有工作。用上方入口新建一项；打开工作即可直接对话。'
-                : filtering && missing > 0
-                  ? `已加载的 ${all.length} 项里没有匹配；其余 ${missing} 项尚未加载，可能就在其中。`
-                  : filtering
-                    ? '没有匹配的工作。换个关键词，或放宽状态筛选。'
-                    : `没有进行中的工作。已归档的 ${archivedCount} 项记录与成果仍可查阅。`}
+              {serverMode
+                ? (server
+                  ? '服务器全库搜索没有匹配的工作。换个关键词，或放宽状态筛选。'
+                  : serverError || '正在服务器上搜索…')
+                : all.length === 0
+                  ? '还没有工作。用上方入口新建一项；打开工作即可直接对话。'
+                  : filtering && missing > 0
+                    ? `已加载的 ${all.length} 项里没有匹配；其余 ${missing} 项尚未加载，可能就在其中。`
+                    : filtering
+                      ? '没有匹配的工作。换个关键词，或放宽状态筛选。'
+                      : `没有进行中的工作。已归档的 ${archivedCount} 项记录与成果仍可查阅。`}
             </p>
             {all.length > 0
               ? (
                 <div className="ec-wb-form-actions">
-                  {filtering && missing > 0
+                  {!serverMode && filtering && missing > 0
                     ? (
                       <button type="button" className="ec-wb-button ec-wb-primary" disabled={loadingAll}
                         onClick={() => void loadAll()}>
@@ -2864,7 +3575,7 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
           </div>
         )
         : (
-          <div className="ec-wb-table" role="table" aria-label="最近工作" aria-busy={opening !== ''}>
+          <div className="ec-wb-table" role="table" aria-label="最近工作" aria-busy={opening !== '' || serverBusy}>
             <div className="ec-wb-table-head" role="row">
               <span role="columnheader">工作</span>
               <span role="columnheader">专业应用</span>
@@ -2896,20 +3607,29 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
             })}
           </div>
         )}
+      {serverError ? <p className="ec-wb-error-text ec-wb-queue-note" role="alert">{serverError}</p> : null}
       {loadError ? <p className="ec-wb-error-text ec-wb-queue-note" role="alert">{loadError}</p> : null}
       <div className="ec-wb-queue-foot">
         <i aria-hidden="true" />
         <span aria-live="polite">
           {filtering ? `筛选出 ${visible.length} 项` : `${visible.length} 项工作`}
-          {complete ? '' : ` · 已加载 ${all.length}/${total}`}
+          {serverMode || complete ? '' : ` · 已加载 ${all.length}/${total}`}
         </span>
-        {!complete
-          ? (
-            <button type="button" className="ec-wb-text-link ec-wb-foot-right" disabled={loadingAll} onClick={() => void loadAll()}>
-              {loadingAll ? '正在加载全部工作…' : `加载全部 ${total} 项后再搜索`}
-            </button>
-          )
-          : <span className="ec-wb-foot-right">运行记录由平台持续更新</span>}
+        {serverMode
+          ? (server?.cursor
+            ? (
+              <button type="button" className="ec-wb-text-link ec-wb-foot-right" disabled={serverBusy} onClick={() => void loadMore()}>
+                {serverBusy ? '正在加载…' : '加载更多结果'}
+              </button>
+            )
+            : <span className="ec-wb-foot-right">服务器搜索：没有更多结果</span>)
+          : !complete
+            ? (
+              <button type="button" className="ec-wb-text-link ec-wb-foot-right" disabled={loadingAll} onClick={() => void loadAll()}>
+                {loadingAll ? '正在加载全部工作…' : `加载全部 ${total} 项后再搜索`}
+              </button>
+            )
+            : <span className="ec-wb-foot-right">运行记录由平台持续更新</span>}
       </div>
     </section>
   )
@@ -2934,8 +3654,8 @@ function WorksPage({ api, data, onOpenWork, onDetail, onOpenPending, onCreate, o
 }) {
   const projects = data.projects ?? []
   const works = data.works?.items ?? []
-  const pending = data.pending ?? []
-  const pendingTitles = usePendingWorkTitles(api, pending, works)
+  const todos = data.todos ?? []
+  const pendingTitles = usePendingWorkTitles(api, todos, works)
   const activeProject = projects.find((project) => project.projectId === projectId) ?? projects[0]
 
   return (
@@ -2978,16 +3698,16 @@ function WorksPage({ api, data, onOpenWork, onDetail, onOpenPending, onCreate, o
           <section className="ec-wb-card" aria-labelledby="ec-wb-pending-home">
             <div className="ec-wb-card-head">
               <h3 id="ec-wb-pending-home">需要你处理</h3>
-              <span className="ec-wb-badge" data-tone={pending.length > 0 ? 'warn' : undefined}>{pending.length}</span>
+              <span className="ec-wb-badge" data-tone={todos.length > 0 ? 'warn' : undefined}>{todos.length}</span>
             </div>
-            {pending.length === 0
+            {todos.length === 0
               ? (
                 <div className="ec-wb-pending-empty">
                   <span className="ec-wb-empty-icon" aria-hidden="true">{GLYPH_CHECK}</span>
-                  <p>目前没有等待答复的事项。<small>AI 需要你参与时，会在这里提醒。</small></p>
+                  <p>目前没有等待处理的事项。<small>AI 需要你参与时，会在这里提醒。</small></p>
                 </div>
               )
-              : <PendingList items={pending} works={works} titles={pendingTitles} onOpen={onOpenPending} />}
+              : <UnifiedTodoList items={todos} works={works} titles={pendingTitles} onOpen={onOpenPending} />}
           </section>
 
           <ReadinessPanel data={data} onOpenSettings={() => onNavigate('settings')} />
@@ -3158,39 +3878,45 @@ function PendingPage({ api, data, onOpen }: {
   onOpen(workId: string, runId: string): void
 }) {
   const works = data.works?.items ?? []
-  const pending = data.pending ?? []
-  const pendingTitles = usePendingWorkTitles(api, pending, works)
-  const projectName = (projectId: string) =>
-    (data.projects ?? []).find((project) => project.projectId === projectId)?.name ?? projectId
-  // Group by project when the Work is loaded; a Work outside the bootstrap page stays visible in
-  // its own "未加载项目" group instead of being dropped.
-  const groups = new Map<string, { name: string; items: typeof pending }>()
-  for (const item of pending) {
-    const work = works.find((candidate) => candidate.workId === item.workId)
-    const key = work?.projectId ?? '__unknown__'
-    const name = work ? projectName(work.projectId) : '未加载项目'
-    const group = groups.get(key) ?? { name, items: [] }
-    group.items.push(item)
-    groups.set(key, group)
+  const todos = data.todos ?? []
+  const pendingTitles = usePendingWorkTitles(api, todos, works)
+  // One section per source kind: the kind tells the employee which act resolves the item.
+  const groups = new Map<TodoItem['kind'], TodoItem[]>()
+  for (const item of todos) {
+    const group = groups.get(item.kind) ?? []
+    group.push(item)
+    groups.set(item.kind, group)
   }
+  const order: TodoItem['kind'][] = ['question', 'review', 'delivery-receipt']
   return (
     <div className="ec-wb-page">
       <header className="ec-wb-page-head">
-        <div><h1>待我处理</h1><p className="ec-wb-muted">平台执行器提出的问题；每项只能答复一次。按项目分组，最早的在前。</p></div>
-        <span className="ec-wb-badge">{pending.length} 项</span>
+        <div><h1>待我处理</h1><p className="ec-wb-muted">问题答复、交付复核与交付接收在同一张清单上；每项保留自己的来源与处理动作，最早的在前。</p></div>
+        <span className="ec-wb-badge">{todos.length} 项</span>
       </header>
-      {pending.length === 0
-        ? <section className="ec-wb-card"><p className="ec-wb-empty">当前没有等待答复的问题。</p></section>
+      {todos.length === 0
+        ? <section className="ec-wb-card"><p className="ec-wb-empty">当前没有待处理事项。</p></section>
         : <div className="ec-wb-stack">
-          {[...groups.entries()].map(([key, group]) => (
-            <section className="ec-wb-card" key={key} aria-labelledby={`ec-wb-pending-${key}`}>
-              <div className="ec-wb-card-head">
-                <h2 id={`ec-wb-pending-${key}`}>{group.name}</h2>
-                <span className="ec-wb-badge">{group.items.length} 项</span>
-              </div>
-              <PendingList items={group.items} works={works} titles={pendingTitles} onOpen={onOpen} />
-            </section>
-          ))}
+          {order.filter((kind) => groups.has(kind)).map((kind) => {
+            const group = groups.get(kind)!
+            return (
+              <section className="ec-wb-card" key={kind} aria-labelledby={`ec-wb-todo-${kind}`}>
+                <div className="ec-wb-card-head">
+                  <h2 id={`ec-wb-todo-${kind}`}>{TODO_KINDS[kind].label}</h2>
+                  <span className="ec-wb-badge">{group.length} 项</span>
+                </div>
+                <UnifiedTodoList items={group} works={works} titles={pendingTitles} onOpen={onOpen} />
+              </section>
+            )
+          })}
+          <section className="ec-wb-card" aria-labelledby="ec-wb-collab-note">
+            <div className="ec-wb-card-head"><h2 id="ec-wb-collab-note">协作口径</h2></div>
+            <p className="ec-wb-muted">
+              当前是单操作者部署：没有任务分配或认领，这份清单上的每一项都由你自己处理；
+              所有决定都以你的身份写入记录与审计（发起人/复核人/封存人等字段）。
+              多操作者协作在真实身份系统接入后另行实现（E4-1 门控），现在不做假界面。
+            </p>
+          </section>
         </div>}
     </div>
   )
@@ -3218,6 +3944,79 @@ function PreferencesCard() {
           </select>
         </Field>
       </div>
+    </section>
+  )
+}
+
+/** Operations panel (E3-1): measured latency distribution, outbox depth, run counts and the
+ *  deployment's doctor probe in one authorized read. There are no SLO targets yet, so the card
+ *  states that fact and shows measurements — it never renders a green "meeting target" light. */
+function OperationsCard({ api }: { api: WorkbenchApi }) {
+  const [panel, setPanel] = useState<OpsPanel | null>(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      setPanel(await api.opsPanel())
+    } catch (reason) {
+      setError(errorText(reason))
+    } finally {
+      setLoading(false)
+    }
+  }, [api])
+
+  useEffect(() => { void load() }, [load])
+
+  const topHistograms = panel
+    ? Object.entries(panel.metrics.histograms ?? {}).slice(0, 6)
+    : []
+  const outbox = panel?.status?.outbox ?? {}
+  const outboxText = Object.keys(outbox).length
+    ? Object.entries(outbox).map(([state, count]) => `${state} ${count}`).join(' · ')
+    : '无记录'
+
+  return (
+    <section className="ec-wb-card" aria-labelledby="ec-wb-ops">
+      <div className="ec-wb-card-head">
+        <h2 id="ec-wb-ops">运营面板</h2>
+        {panel ? <span className="ec-wb-badge" data-tone={panel.doctor?.ok === false ? 'warn' : 'ok'}>{panel.doctor ? (panel.doctor.ok ? 'doctor 通过' : 'doctor 有失败项') : 'doctor 未接入'}</span> : null}
+      </div>
+      <p className="ec-wb-muted">本进程实测指标（重启后清零，不跨进程聚合）。尚未定义 SLO 目标：面板展示实测分布，不冒充达标。失败告警以 doctor 检查与审计链为准。</p>
+      {error ? <p className="ec-wb-empty">{error}</p> : null}
+      {!panel && !error ? <p className="ec-wb-empty">{loading ? '读取中…' : ''}</p> : null}
+      {panel ? (
+        <>
+          <dl className="ec-wb-facts">
+            <dt>执行器</dt><dd>{panel.status?.executor ?? '未记录'}</dd>
+            <dt>Outbox</dt><dd>{outboxText}</dd>
+            <dt>doctor</dt><dd>{panel.doctorNote}</dd>
+          </dl>
+          {topHistograms.length > 0 ? (
+            <table className="ec-wb-finding-table">
+              <thead><tr><th scope="col">指标</th><th scope="col">样本</th><th scope="col">p50 ms</th><th scope="col">p95 ms</th><th scope="col">p99 ms</th><th scope="col">max ms</th></tr></thead>
+              <tbody>
+                {topHistograms.map(([name, stats]) => (
+                  <tr key={name}><td>{name}</td><td>{stats.count}</td><td>{stats.p50}</td><td>{stats.p95}</td><td>{stats.p99}</td><td>{stats.max}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          ) : <p className="ec-wb-muted">本进程尚无耗时样本。</p>}
+          {panel.doctor ? (
+            <ul className="ec-wb-muted">
+              {panel.doctor.checks.filter((check) => check.status !== 'ok').map((check) => (
+                <li key={check.name}>{check.status === 'fail' ? '✗' : '⚠'} {check.name}：{check.detail}</li>
+              ))}
+              {panel.doctor.checks.every((check) => check.status === 'ok') ? <li>全部检查 ok。</li> : null}
+            </ul>
+          ) : null}
+          <div className="ec-wb-row">
+            <button className="ec-wb-btn" type="button" onClick={() => void load()} disabled={loading}>{loading ? '读取中…' : '重新读取'}</button>
+          </div>
+        </>
+      ) : null}
     </section>
   )
 }
@@ -3314,6 +4113,10 @@ function SettingsPage({ api, data, onReload }: {
 }) {
   const catalog = data.models?.catalog
   const health = new Map((data.models?.health ?? []).map((item) => [item.selectionId, item]))
+  // Latest approval per selection (the control plane orders newest first); approval absence
+  // means "never granted" — it does not mean "not required".
+  const approvals = new Map((data.models?.approvals ?? []).map((item) => [item.selectionId, item]))
+  const quota = data.quotas
   return (
     <div className="ec-wb-page">
       <header className="ec-wb-page-head">
@@ -3354,6 +4157,15 @@ function SettingsPage({ api, data, onReload }: {
                     {fact
                       ? <small className="ec-wb-muted">健康：{fact.state === 'healthy' ? '正常' : fact.state === 'degraded' ? '降级' : fact.state === 'unavailable' ? `不可用${fact.reason ? `（${fact.reason}）` : ''}` : '未核对'} · {formatTime(fact.checkedAt)}</small>
                       : <small className="ec-wb-muted">健康：尚未探测（不代表正常）</small>}
+                    <small className="ec-wb-muted">审批：{(() => {
+                      const approval = approvals.get(entry.selectionId)
+                      if (!approval) return '从未批准（是否强制以部署配置为准）'
+                      if (approval.state === 'REVOKED') return `已撤回${approval.revokeReason ? `（${approval.revokeReason}）` : ''}`
+                      const expired = approval.expiresAt ? Date.parse(approval.expiresAt) <= Date.now() : false
+                      return expired
+                        ? `已过期（${formatTime(approval.expiresAt)}）`
+                        : `${approval.approvedBy} 批准${approval.expiresAt ? ` · 有效期至 ${formatTime(approval.expiresAt)}` : ''}`
+                    })()}</small>
                   </span>
                   <span className="ec-wb-badge" data-tone={entry.enabled && fact?.state !== 'unavailable' ? 'ok' : 'warn'}>
                     {entry.enabled ? (fact?.state === 'unavailable' ? '健康不可用' : '可用') : '不可用'}
@@ -3362,6 +4174,7 @@ function SettingsPage({ api, data, onReload }: {
                 )
               })}
           </section>
+          <OperationsCard api={api} />
           <AuditPanel api={api} />
         </div>
         <aside className="ec-wb-rail">
@@ -3371,6 +4184,38 @@ function SettingsPage({ api, data, onReload }: {
               <dt>执行器</dt><dd>{data.status?.executor ?? '未记录'}</dd>
               <dt>运行计数</dt><dd>{data.status?.runs ? Object.entries(data.status.runs).map(([state, count]) => `${state} ${count}`).join(' · ') : '未记录'}</dd>
             </dl>
+          </section>
+          <section className="ec-wb-card" aria-labelledby="ec-wb-storage">
+            <div className="ec-wb-card-head"><h2 id="ec-wb-storage">存储与恢复</h2></div>
+            {data.storage
+              ? (
+                <dl className="ec-wb-facts">
+                  <dt>控制面数据库</dt>
+                  <dd><span className="ec-wb-expert-only">{data.storage.controlStorePath}</span></dd>
+                  <dt>备份覆盖</dt>
+                  <dd>控制面 SQLite ✓ · 已封存成果 ✓ · 知识库 ✗ · 原生会话目录 ✗</dd>
+                  <dt>恢复限制标记</dt>
+                  <dd>{data.storage.recoveryRestrictionMarkers ? '已持久化' : '未持久化：恢复操作不携带限制标记，靠备份清单与摘要核对把关'}</dd>
+                </dl>
+              )
+              : <p className="ec-wb-muted">控制面未上报存储拓扑（旧版本接口），备份覆盖范围请以运维文档为准。</p>}
+            <p className="ec-wb-muted">备份不覆盖知识库与原生 DSH 会话目录——这两个缺口是事实，不是提醒。恢复前必须核对备份清单摘要，摘要不符的备份不得用于恢复。</p>
+          </section>
+          <section className="ec-wb-card" aria-labelledby="ec-wb-quotas">
+            <div className="ec-wb-card-head"><h2 id="ec-wb-quotas">预算与配额</h2></div>
+            {quota
+              ? (
+                <dl className="ec-wb-facts">
+                  <dt>并发上限 / 项目</dt>
+                  <dd>{quota.maxConcurrentRunsPerProject > 0 ? `${quota.maxConcurrentRunsPerProject} 个进行中` : '未启用（0 = 不强制）'}</dd>
+                  <dt>单日上限 / 项目</dt>
+                  <dd>{quota.maxRunsPerDayPerProject > 0 ? `${quota.maxRunsPerDayPerProject} 个 / ${quota.dayBoundary}` : '未启用（0 = 不强制）'}</dd>
+                  <dt>计数口径</dt>
+                  <dd>{quota.scope.counted}</dd>
+                </dl>
+              )
+              : <p className="ec-wb-muted">控制面未上报配额事实（旧版本接口），配额是否生效请以部署配置为准。</p>}
+            <p className="ec-wb-muted">配额只按运行记录计数：失败与取消的运行同样消耗当日额度；不绑定工作的运行不计入——这是口径声明，不是覆盖承诺。达到上限的运行会被拒绝创建，平台不会静默切换模型或项目。</p>
           </section>
         </aside>
       </div>
@@ -3650,6 +4495,18 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
   const savedViewRef = useRef<PersistedView | null | undefined>(undefined)
   if (savedViewRef.current === undefined) savedViewRef.current = hashToView(globalThis.location?.hash ?? '') ?? readPersistedView()
   const [restoring, setRestoring] = useState(() => savedViewRef.current != null)
+  // E4-6 command palette: Ctrl/⌘+K from any view, including embedded sessions.
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === 'k') {
+        event.preventDefault()
+        setPaletteOpen((value) => !value)
+      }
+    }
+    globalThis.addEventListener('keydown', onKey)
+    return () => globalThis.removeEventListener('keydown', onKey)
+  }, [])
   // Deep links: the URL hash mirrors the view coordinate (shareable/bookmarkable; refresh restores
   // from it). selfHashRef guards against treating our own writes as external navigation; lastKeyRef
   // decides push (primary change) vs replace (focus-only) so back/forward works without history spam.
@@ -3741,7 +4598,7 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
     return () => globalThis.removeEventListener?.('hashchange', onHashChange)
   }, [])
 
-  const pendingCount = (data?.pending ?? []).length
+  const pendingCount = (data?.todos ?? data?.pending ?? []).length
   // "最近打开" lists work still in use; an archived Work only appears while it is the open one.
   const recentWorks = byRecent((data?.works?.items ?? [])
     .filter((work) => work.state !== 'ARCHIVED' || work.workId === sessionWork?.workId)).slice(0, 5)
@@ -3753,6 +4610,8 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
 
   const shell = (children: ReactNode, options: { session?: boolean } = {}) => (
     <div className="ec-wb" data-density={compact ? 'compact' : 'normal'} data-expert={expert ? 'on' : 'off'}>
+      {/* E4-4 keyboard path: a skip link lets keyboard users bypass the nav rail (visible on focus). */}
+      <a className="ec-wb-skip" href="#ec-wb-content">跳到主内容</a>
       <div className="ec-wb-topbar">
         <span className="ec-wb-mark" aria-hidden="true">{BRAND_MARK}</span>
         <span className="ec-wb-wordmark">EMERALD</span>
@@ -3763,6 +4622,7 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
         </div>
         <div className="ec-wb-top-actions">
           <span className={`ec-wb-conn${error ? ' is-down' : ''}`} role="status">{error ? '平台未连接' : '平台已连接'}</span>
+          <button type="button" className="ec-wb-icon-btn" aria-label="全局搜索（Ctrl+K）" title="全局搜索（Ctrl+K）" onClick={() => setPaletteOpen(true)}>{GLYPH_SEARCH_TOP}</button>
           <button type="button" className="ec-wb-icon-btn" aria-label="刷新平台数据" title="刷新" onClick={() => void load()}>{GLYPH_REFRESH}</button>
           <button type="button" className="ec-wb-icon-btn" aria-label="紧凑布局" title="紧凑布局" aria-pressed={compact} onClick={toggleCompact}>{GLYPH_DENSITY}</button>
           <button type="button" className="ec-wb-icon-btn" aria-label="专家诊断" title="专家诊断（显示路径/会话/摘要等技术细节）" aria-pressed={expert} onClick={toggleExpert}><Glyph size={16}><path d="M8 9l-3 3 3 3M16 9l3 3-3 3M13 7l-2 10" /></Glyph></button>
@@ -3816,11 +4676,19 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
             <span className="ec-wb-nav-bottom-arrow" aria-hidden="true">›</span>
           </button>
         </nav>
-        <div className={options.session ? 'ec-wb-main ec-wb-main-session' : 'ec-wb-main'}>
+        <main id="ec-wb-content" className={options.session ? 'ec-wb-main ec-wb-main-session' : 'ec-wb-main'}>
           {networkHint || notice ? <p className="ec-wb-status" role="status" aria-live="polite">{networkHint || notice}</p> : null}
           {children}
-        </div>
+        </main>
       </div>
+      <CommandPalette
+        api={api}
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        onOpenWork={(workId) => void openWork(workId)}
+        onOpenRun={(workId, runId) => void openPendingById(workId, runId)}
+        onNavigate={selectPage}
+      />
     </div>
   )
 

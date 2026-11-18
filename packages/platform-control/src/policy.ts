@@ -8,6 +8,7 @@ export interface Principal {
 }
 export type PlatformAction =
   | 'app.register'
+  | 'app.approve'
   | 'app.revoke'
   | 'app.read'
   | 'run.create'
@@ -16,6 +17,9 @@ export type PlatformAction =
   | 'run.answer'
   | 'run.read'
   | 'run.reconcile'
+  | 'run.review'
+  | 'work.delivery'
+  | 'delivery.read'
   | 'conversation.read'
   | 'run.dispatch'
   | 'run.started'
@@ -26,6 +30,7 @@ export type PlatformAction =
   | 'model.read'
   | 'model.register'
   | 'model.preference'
+  | 'model.approve'
   | 'work.create'
   | 'work.read'
   | 'work.input'
@@ -37,12 +42,15 @@ export type PlatformAction =
   | 'work.draft'
   | 'fs.pick'
   | 'audit.read'
+  | 'metrics.read'
   | 'domain.register'
   | 'domain.read'
   | 'binding.bind'
   | 'binding.read'
   | 'submission.record'
-  | 'submission.read';
+  | 'submission.read'
+  | 'evaluation.manage'
+  | 'evaluation.read';
 export interface ResourceScope {
   appId?: string;
   modelSelectionId?: string;
@@ -58,6 +66,7 @@ export interface PlatformPolicy {
 }
 const operatorActions = new Set<PlatformAction>([
   'app.register',
+  'app.approve',
   'app.revoke',
   'app.read',
   'run.create',
@@ -66,10 +75,14 @@ const operatorActions = new Set<PlatformAction>([
   'run.answer',
   'run.read',
   'run.reconcile',
+  'run.review',
+  'work.delivery',
+  'delivery.read',
   'conversation.read',
   'model.read',
   'model.register',
   'model.preference',
+  'model.approve',
   'work.create',
   'work.read',
   'work.input',
@@ -81,12 +94,15 @@ const operatorActions = new Set<PlatformAction>([
   'work.draft',
   'fs.pick',
   'audit.read',
+  'metrics.read',
   'domain.register',
   'domain.read',
   'binding.bind',
   'binding.read',
   'submission.record',
   'submission.read',
+  'evaluation.manage',
+  'evaluation.read',
 ]);
 const serviceActions = new Set<PlatformAction>([
   'run.read',

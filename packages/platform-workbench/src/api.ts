@@ -52,6 +52,18 @@ export interface RunActivity {
   createdAt: string;
 }
 
+/** One deterministic check result (E2-1): recomputable from run records, no expert judgement. */
+export interface EvaluationRunItem {
+  evaluationRunId: string;
+  evaluationSetId: string;
+  runId: string;
+  state: 'COMPLETED';
+  results: Array<{ entryId: string; label: string; check: { kind: string }; pass: boolean; detail: string }>;
+  passed: number;
+  failed: number;
+  createdAt: string;
+}
+
 /** The transcript-shaped slice of one run record: last root-session assistant text plus the
  *  observed activity window. Never a fabricated summary — absent fields stay absent. */
 export interface RunDetail {
@@ -76,6 +88,74 @@ export interface InputBaselineItem {
   digest: string;
   createdBy: string;
   createdAt: string;
+}
+
+/** One delivery package (E1-3): a frozen manifest of a run's sealed artifacts plus the review
+ *  snapshot taken at seal time. 封存(SEAL) ≠ 交付(DELIVER) ≠ 接收(RECEIVED) are three separate,
+ *  separately audited facts; WITHDRAWN and SUPERSEDED are explicit operator acts, never silent. */
+export interface DeliveryPackageItem {
+  packageId: string;
+  workId: string;
+  runId: string;
+  state: 'SEALED' | 'DELIVERED' | 'RECEIVED' | 'WITHDRAWN' | 'SUPERSEDED';
+  manifest: {
+    runId: string;
+    appId: string;
+    appVersion: string;
+    artifacts: Array<{ name: string; digest: string; bytes: number }>;
+    review: { reviewId: string; state: ReviewItem['state']; updatedAt: string } | null;
+  };
+  packageDigest: string;
+  note?: string;
+  deliveredAt?: string;
+  deliveredNote?: string;
+  receivedAt?: string;
+  receivedNote?: string;
+  withdrawnAt?: string;
+  withdrawReason?: string;
+  supersededBy?: string;
+  sealedBy: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One app-contributed result fact with a stable business key (E1-4). */
+export interface FindingItem {
+  key: string;
+  kind: string;
+  severity?: 'info' | 'warning' | 'error';
+  summary?: string;
+  fields?: Record<string, string | number | boolean>;
+}
+
+/** Key-aligned finding diff between two runs (E1-4). Different apps or app versions answer
+ *  `comparable: false` — the platform declares that instead of guessing an alignment. */
+export interface FindingsDiff {
+  comparable: boolean;
+  reason?: string;
+  appId?: string;
+  fromRunId: string;
+  toRunId: string;
+  kinds?: Array<{
+    kind: string;
+    added: number;
+    resolved: number;
+    changed: number;
+    unchanged: number;
+    items: Array<{ key: string; state: 'added' | 'resolved' | 'changed' | 'unchanged'; before?: FindingItem; after?: FindingItem }>;
+  }>;
+}
+
+/** Declarative result view (E1-5) contributed by the app descriptor; the platform renders it
+ *  generically and never branches on which application it is. */
+export interface ResultViewDecl {
+  viewId: string;
+  title: string;
+  kind: 'table' | 'metrics';
+  findingKind: string;
+  columns?: Array<{ field: string; label: string }>;
+  metrics?: Array<{ field: string; label: string; unit?: string; stat: 'count' | 'sum' | 'avg' }>;
 }
 
 /** One durable audit entry; the export adds the SHA-256 chain links (prevDigest/digest) per line. */
@@ -226,6 +306,64 @@ export interface ModelHealthItem {
   revision: number;
 }
 
+/** Honest storage/recovery topology (E0d): what the control plane persists and what backup
+ *  covers — explicitly including what it does NOT cover. `false` never means "unknown". */
+export interface StorageFacts {
+  controlStorePath: string;
+  backupCoverage: {
+    controlStore: boolean;
+    sealedArtifacts: boolean;
+    knowledgeStore: boolean;
+    nativeSessionHomes: boolean;
+  };
+  /** Whether recovery restrictions persist as machine-readable markers. False today. */
+  recoveryRestrictionMarkers: boolean;
+}
+
+/** Model-governance record (E2-4): one catalog selection's approval lifecycle. */
+export interface ModelApprovalItem {
+  approvalId: string;
+  selectionId: string;
+  state: 'ACTIVE' | 'REVOKED';
+  approvedBy: string;
+  approvedAt: string;
+  expiresAt?: string;
+  revokedAt?: string;
+  revokeReason?: string;
+  revision: number;
+}
+
+/** Per-project run budget facts (E2-3). A cap of 0 means "not enforced", never "unlimited
+ *  headroom"; the counting boundary is stated so the panel cannot imply full coverage. */
+export interface QuotaFacts {
+  maxConcurrentRunsPerProject: number;
+  maxRunsPerDayPerProject: number;
+  scope: { counted: string; notCounted: string[] };
+  dayBoundary: string;
+}
+
+/** E3-1 operations panel payload: measurements plus the deployment's doctor probe. `slo.targets`
+ *  is null until the deployment defines targets — the panel says so instead of implying success. */
+export interface OpsPanel {
+  generatedAt: string;
+  metrics: {
+    startedAt: string;
+    counters: Record<string, number>;
+    gauges: Record<string, number>;
+    histograms: Record<string, { count: number; p50: number; p95: number; p99: number; max: number }>;
+  };
+  status?: { executor?: string; runs?: Record<string, number>; outbox?: Record<string, number>; approvals?: { active: number; revoked: number } };
+  storage?: StorageFacts;
+  quotas?: QuotaFacts;
+  doctor: {
+    ok: boolean;
+    generatedAt: string;
+    checks: Array<{ name: string; status: 'ok' | 'warn' | 'fail'; detail: string }>;
+  } | null;
+  doctorNote: string;
+  slo: { targets: null; note: string };
+}
+
 export interface WorkbenchBootstrap {
   projects: Array<{ projectId: string; name: string; code?: string }>;
   apps: Array<{
@@ -234,7 +372,7 @@ export interface WorkbenchBootstrap {
     displayName?: string;
     state: 'ACTIVE' | 'REVOKED';
     /** The release descriptor as the control plane publishes it; Listing declares its scenarios here. */
-    descriptor?: { displayName?: string; description?: string; listingTypes?: string[] };
+    descriptor?: { displayName?: string; description?: string; listingTypes?: string[]; resultViews?: ResultViewDecl[] };
   }>;
   works: { total: number; items: WorkbenchItem[] };
   runs?: { total: number; items: RunSummary[] };
@@ -248,8 +386,25 @@ export interface WorkbenchBootstrap {
     questions: number;
     runState?: string;
   }>;
-  models?: { catalog: ModelCatalog | null; preference: ModelPreference; health?: ModelHealthItem[] };
+  models?: {
+    catalog: ModelCatalog | null;
+    preference: ModelPreference;
+    health?: ModelHealthItem[];
+    approvals?: ModelApprovalItem[];
+  };
+  /** E3-4 unified todos: three sources on one read surface, each keeping its own kind and verb. */
+  todos?: Array<{
+    kind: 'question' | 'review' | 'delivery-receipt';
+    id: string;
+    runId: string | null;
+    workId: string | null;
+    createdAt: string;
+    summary: string;
+    resolveHint: string;
+  }>;
   status?: { executor?: string; runs?: Record<string, number>; outbox?: Record<string, number>; approvals?: { active: number; revoked: number } };
+  storage?: StorageFacts;
+  quotas?: QuotaFacts;
 }
 
 export class PlatformApiError extends Error {
@@ -331,6 +486,96 @@ export class WorkbenchApi {
     return this.call('GET', `/api/works${suffix}`, undefined, signal) as Promise<{ total: number; items: WorkbenchItem[] }>;
   }
 
+  /** E4-3 server-side filtered, cursor-paginated Works. The q filter matches titles server-side. */
+  queryWorks(
+    params: { projectId?: string; appId?: string; state?: 'ACTIVE' | 'ARCHIVED'; q?: string; cursor?: string | null },
+    signal?: AbortSignal,
+  ): Promise<{ items: WorkbenchItem[]; nextCursor: string | null }> {
+    const query = new URLSearchParams();
+    if (params.projectId) query.set('projectId', params.projectId);
+    if (params.appId) query.set('appId', params.appId);
+    if (params.state) query.set('state', params.state);
+    if (params.q) query.set('q', params.q);
+    if (params.cursor) query.set('cursor', params.cursor);
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return this.call('GET', `/api/works/query${suffix}`, undefined, signal) as Promise<{ items: WorkbenchItem[]; nextCursor: string | null }>;
+  }
+
+  /** E4-3 server-side filtered, cursor-paginated Runs. The q filter matches the input goal server-side. */
+  queryRuns(
+    params: { appId?: string; workId?: string; projectId?: string; state?: string; q?: string; cursor?: string | null },
+    signal?: AbortSignal,
+  ): Promise<{ items: RunSummary[]; nextCursor: string | null }> {
+    const query = new URLSearchParams();
+    if (params.appId) query.set('appId', params.appId);
+    if (params.workId) query.set('workId', params.workId);
+    if (params.projectId) query.set('projectId', params.projectId);
+    if (params.state) query.set('state', params.state);
+    if (params.q) query.set('q', params.q);
+    if (params.cursor) query.set('cursor', params.cursor);
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return this.call('GET', `/api/runs/query${suffix}`, undefined, signal) as Promise<{ items: RunSummary[]; nextCursor: string | null }>;
+  }
+
+  /** E4-6 global search: one query across works, runs, projects and apps. */
+  search(q: string, signal?: AbortSignal): Promise<Array<{
+    kind: 'work' | 'run' | 'project' | 'app';
+    id: string;
+    title: string;
+    detail: string;
+    workId?: string;
+    runId?: string;
+  }>> {
+    return this.call('GET', `/api/search?q=${encodeURIComponent(q)}`, undefined, signal) as Promise<Array<{
+      kind: 'work' | 'run' | 'project' | 'app';
+      id: string;
+      title: string;
+      detail: string;
+      workId?: string;
+      runId?: string;
+    }>>;
+  }
+
+  /** E2-1 deterministic evaluation sets: checks that need no expert gold set. */
+  listEvaluationSets(appId?: string, signal?: AbortSignal): Promise<Array<{
+    evaluationSetId: string;
+    appId: string;
+    name: string;
+    description: string;
+    state: 'ACTIVE' | 'ARCHIVED';
+    entries: Array<{ entryId: string; label: string; checks: Array<{ kind: string }> }>;
+  }>> {
+    const suffix = appId ? `?appId=${encodeURIComponent(appId)}` : '';
+    return this.call('GET', `/api/evaluations${suffix}`, undefined, signal) as Promise<Array<{
+      evaluationSetId: string;
+      appId: string;
+      name: string;
+      description: string;
+      state: 'ACTIVE' | 'ARCHIVED';
+      entries: Array<{ entryId: string; label: string; checks: Array<{ kind: string }> }>;
+    }>>;
+  }
+
+  /** Run every deterministic check of one set against one run; pure recomputation, no model. */
+  evaluateSet(evaluationSetId: string, runId: string, signal?: AbortSignal): Promise<EvaluationRunItem> {
+    return this.call(
+      'POST',
+      `/api/evaluations/${encodeURIComponent(evaluationSetId)}/evaluate`,
+      { runId },
+      signal,
+    ) as Promise<EvaluationRunItem>;
+  }
+
+  /** Recorded evaluation runs of one set, newest first. */
+  evaluationRuns(evaluationSetId: string, signal?: AbortSignal): Promise<{ items: EvaluationRunItem[] }> {
+    return this.call(
+      'GET',
+      `/api/evaluations/${encodeURIComponent(evaluationSetId)}/runs`,
+      undefined,
+      signal,
+    ) as Promise<{ items: EvaluationRunItem[] }>;
+  }
+
   /** Durable execution records for one Work, newest first as the control plane orders them. */
   workRuns(workId: string, page: { offset: number; limit: number }, signal?: AbortSignal): Promise<Page<RunSummary>> {
     return this.call(
@@ -361,9 +606,64 @@ export class WorkbenchApi {
     ) as Promise<InputBaselineItem>;
   }
 
+  /** Delivery packages of one Work, newest first; every lifecycle state stays visible. */
+  workDeliveryPackages(workId: string, page: { offset: number; limit: number }, signal?: AbortSignal): Promise<Page<DeliveryPackageItem>> {
+    return this.call(
+      'GET',
+      `/api/works/${encodeURIComponent(workId)}/delivery-packages?offset=${page.offset}&limit=${page.limit}`,
+      undefined,
+      signal,
+    ) as Promise<Page<DeliveryPackageItem>>;
+  }
+
+  /** Seal a SUCCEEDED run's artifacts into a delivery package (review snapshot frozen at seal). */
+  sealDeliveryPackage(workId: string, draft: { runId: string; note?: string }, signal?: AbortSignal): Promise<DeliveryPackageItem> {
+    return this.call(
+      'POST',
+      `/api/works/${encodeURIComponent(workId)}/delivery-packages`,
+      draft.note ? draft : { runId: draft.runId },
+      signal,
+    ) as Promise<DeliveryPackageItem>;
+  }
+
+  /** SEALED → DELIVERED: record the handover. CAS on revision keeps concurrent edits honest. */
+  deliverDeliveryPackage(packageId: string, body: { note?: string; expectedRevision: number }, signal?: AbortSignal): Promise<DeliveryPackageItem> {
+    return this.call('POST', `/api/delivery-packages/${encodeURIComponent(packageId)}/deliver`, body, signal) as Promise<DeliveryPackageItem>;
+  }
+
+  /** DELIVERED → RECEIVED: a declared counterpart fact; the platform does not verify receipt. */
+  acknowledgeDeliveryPackage(packageId: string, body: { note?: string; expectedRevision: number }, signal?: AbortSignal): Promise<DeliveryPackageItem> {
+    return this.call('POST', `/api/delivery-packages/${encodeURIComponent(packageId)}/acknowledge`, body, signal) as Promise<DeliveryPackageItem>;
+  }
+
+  /** SEALED/DELIVERED → WITHDRAWN with a mandatory reason; history stays. */
+  withdrawDeliveryPackage(packageId: string, body: { reason: string; expectedRevision: number }, signal?: AbortSignal): Promise<DeliveryPackageItem> {
+    return this.call('POST', `/api/delivery-packages/${encodeURIComponent(packageId)}/withdraw`, body, signal) as Promise<DeliveryPackageItem>;
+  }
+
+  /** Active → SUPERSEDED by another live package of the same Work; never automatic. */
+  supersedeDeliveryPackage(packageId: string, body: { supersededBy: string; expectedRevision: number }, signal?: AbortSignal): Promise<DeliveryPackageItem> {
+    return this.call('POST', `/api/delivery-packages/${encodeURIComponent(packageId)}/supersede`, body, signal) as Promise<DeliveryPackageItem>;
+  }
+
   /** Sealed and metadata-only artifacts of one execution. */
   runArtifacts(runId: string, signal?: AbortSignal): Promise<{ items: ArtifactItem[] }> {
     return this.call('GET', `/api/runs/${encodeURIComponent(runId)}/artifacts`, undefined, signal) as Promise<{ items: ArtifactItem[] }>;
+  }
+
+  /** App-contributed result facts of one succeeded run (E1-4); empty until an app contributes. */
+  runFindings(runId: string, signal?: AbortSignal): Promise<{ items: FindingItem[] }> {
+    return this.call('GET', `/api/runs/${encodeURIComponent(runId)}/findings`, undefined, signal) as Promise<{ items: FindingItem[] }>;
+  }
+
+  /** Key-aligned finding diff, `from = runId`, `to = against` (E1-4). */
+  runFindingsDiff(runId: string, against: string, signal?: AbortSignal): Promise<FindingsDiff> {
+    return this.call(
+      'GET',
+      `/api/runs/${encodeURIComponent(runId)}/findings-diff?against=${encodeURIComponent(against)}`,
+      undefined,
+      signal,
+    ) as Promise<FindingsDiff>;
   }
 
   /** The transcript-shaped slice of one run record (result text + observed activities). */
@@ -428,6 +728,12 @@ export class WorkbenchApi {
       lastSequence: last?.sequence ?? (options.after ?? 0),
       count: entries.length,
     };
+  }
+
+  /** E3-1 operations panel: measured latency distribution (p50/p95/p99), outbox depth, run
+   *  counts, doctor probe and the honest "no SLO targets defined yet" statement. */
+  opsPanel(signal?: AbortSignal): Promise<OpsPanel> {
+    return this.call('GET', '/api/ops/panel', undefined, signal) as Promise<OpsPanel>;
   }
 
   /** Record one enterprise submission intent for an already-bound native Session.

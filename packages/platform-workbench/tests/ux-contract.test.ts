@@ -23,8 +23,12 @@ test('page styles are scoped and never modify the native shell globally', () => 
   }
   const atRules = [...stripped.matchAll(/@media[^{]+\{/g)].map((match) => match[0]);
   assert.ok(atRules.length >= 3);
-  // No fixed positioning that could cover the native conversation.
-  assert.equal(/position\s*:\s*fixed/.test(stripped), false);
+  // Fixed positioning may exist only on the command-palette backdrop (E4-6): a deliberate,
+  // explicitly closable aria-modal overlay opened by the user (Ctrl/⌘+K or the search button),
+  // never on anything that would cover the native conversation on its own.
+  for (const match of stripped.matchAll(/([^{}]+)\{[^}]*position\s*:\s*fixed/g)) {
+    assert.match(match[1] ?? '', /\.ec-wb-palette-backdrop/, `fixed position outside the palette backdrop: ${(match[1] ?? '').trim()}`);
+  }
 });
 
 test('page styles use host design tokens with readable fallbacks', () => {
@@ -73,6 +77,63 @@ test('the concept draft surfaces are present in the page stylesheet', () => {
   ]) {
     assert.ok(WORKBENCH_CSS.includes(selector), `missing concept-draft surface: ${selector}`);
   }
+});
+
+// E4-4 (doable part): text tokens must meet WCAG AA (4.5:1) in BOTH themes. The stylesheet
+// declares each colour token twice — light first, then the dark override block — so token
+// occurrences are read positionally and every text/background pair is computed.
+const luminance = (hex: string): number => {
+  const channels = [0, 2, 4].map((index) => parseInt(hex.slice(1 + index, 3 + index), 16) / 255)
+    .map((value) => (value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+};
+const contrast = (foreground: string, background: string): number => {
+  const [lighter, darker] = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+  return (lighter + 0.05) / (darker + 0.05);
+};
+const tokenValues = (name: string): string[] =>
+  [...WORKBENCH_CSS.matchAll(new RegExp(`--${name}\\s*:\\s*(#[0-9a-fA-F]{6})`, 'g'))].map((match) => match[1]);
+
+test('text token pairs meet WCAG AA contrast (4.5:1) in light and dark themes (E4-4)', () => {
+  const tokens = ['ec-ink', 'ec-muted', 'ec-secondary', 'ec-primary', 'ec-green', 'ec-amber', 'ec-danger', 'ec-paper', 'ec-white', 'ec-soft', 'ec-green-weak', 'ec-amber-weak', 'ec-danger-weak'];
+  const themes: Array<Record<string, string>> = [{}, {}];
+  for (const token of tokens) {
+    const values = tokenValues(token);
+    assert.ok(values.length >= 2, `token --${token} must have light and dark values`);
+    themes[0][token] = values[0];
+    themes[1][token] = values[1];
+  }
+  const pairs: Array<[string, string, string]> = [
+    ['body text', 'ec-ink', 'ec-paper'],
+    ['card text', 'ec-ink', 'ec-white'],
+    ['secondary text', 'ec-muted', 'ec-paper'],
+    ['secondary on card', 'ec-muted', 'ec-white'],
+    ['tertiary on soft', 'ec-secondary', 'ec-soft'],
+    ['links', 'ec-primary', 'ec-paper'],
+    ['links on card', 'ec-primary', 'ec-white'],
+    ['ok badge', 'ec-green', 'ec-green-weak'],
+    ['warn badge', 'ec-amber', 'ec-amber-weak'],
+    ['error badge', 'ec-danger', 'ec-danger-weak'],
+    ['text on soft', 'ec-ink', 'ec-soft'],
+  ];
+  for (const [index, theme] of themes.entries()) {
+    for (const [label, fg, bg] of pairs) {
+      const ratio = contrast(theme[fg], theme[bg]);
+      assert.ok(
+        ratio >= 4.5,
+        `${index === 0 ? 'light' : 'dark'} ${label} (${theme[fg]} on ${theme[bg]}) is ${ratio.toFixed(2)}:1, below AA 4.5:1`,
+      );
+    }
+  }
+});
+
+test('keyboard path: skip link and palette focus affordances exist in the page source (E4-4)', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../src/client/WorkbenchPage.tsx', import.meta.url), 'utf8');
+  assert.match(source, /ec-wb-skip/, 'missing skip link');
+  assert.match(source, /aria-activedescendant/, 'palette input must follow the combobox pattern');
+  assert.match(source, /previous\?\.focus/, 'the palette must restore focus to its trigger on close');
+  assert.match(source, /id="ec-wb-content"/, 'the skip link needs a main landmark target');
 });
 
 test('the 2026-11-17 experience pass surfaces are present and scoped', () => {
