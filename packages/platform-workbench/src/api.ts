@@ -518,7 +518,7 @@ export class WorkbenchApi {
   }
 
   /** E4-6 global search: one query across works, runs, projects and apps. */
-  search(q: string, signal?: AbortSignal): Promise<Array<{
+  async search(q: string, signal?: AbortSignal): Promise<Array<{
     kind: 'work' | 'run' | 'project' | 'app';
     id: string;
     title: string;
@@ -526,18 +526,22 @@ export class WorkbenchApi {
     workId?: string;
     runId?: string;
   }>> {
-    return this.call('GET', `/api/search?q=${encodeURIComponent(q)}`, undefined, signal) as Promise<Array<{
-      kind: 'work' | 'run' | 'project' | 'app';
-      id: string;
-      title: string;
-      detail: string;
-      workId?: string;
-      runId?: string;
-    }>>;
+    // The control plane answers with a page envelope ({items}); the palette wants the bare list.
+    const page = await this.call('GET', `/api/search?q=${encodeURIComponent(q)}`, undefined, signal) as {
+      items: Array<{
+        kind: 'work' | 'run' | 'project' | 'app';
+        id: string;
+        title: string;
+        detail: string;
+        workId?: string;
+        runId?: string;
+      }>;
+    };
+    return page.items;
   }
 
   /** E2-1 deterministic evaluation sets: checks that need no expert gold set. */
-  listEvaluationSets(appId?: string, signal?: AbortSignal): Promise<Array<{
+  async listEvaluationSets(appId?: string, signal?: AbortSignal): Promise<Array<{
     evaluationSetId: string;
     appId: string;
     name: string;
@@ -546,14 +550,18 @@ export class WorkbenchApi {
     entries: Array<{ entryId: string; label: string; checks: Array<{ kind: string }> }>;
   }>> {
     const suffix = appId ? `?appId=${encodeURIComponent(appId)}` : '';
-    return this.call('GET', `/api/evaluations${suffix}`, undefined, signal) as Promise<Array<{
-      evaluationSetId: string;
-      appId: string;
-      name: string;
-      description: string;
-      state: 'ACTIVE' | 'ARCHIVED';
-      entries: Array<{ entryId: string; label: string; checks: Array<{ kind: string }> }>;
-    }>>;
+    // The control plane answers with a page envelope ({items}); unwrap to the bare list.
+    const page = await this.call('GET', `/api/evaluations${suffix}`, undefined, signal) as {
+      items: Array<{
+        evaluationSetId: string;
+        appId: string;
+        name: string;
+        description: string;
+        state: 'ACTIVE' | 'ARCHIVED';
+        entries: Array<{ entryId: string; label: string; checks: Array<{ kind: string }> }>;
+      }>;
+    };
+    return page.items;
   }
 
   /** Run every deterministic check of one set against one run; pure recomputation, no model. */
