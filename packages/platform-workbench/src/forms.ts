@@ -93,7 +93,7 @@ export interface RunInputBaseline {
 }
 
 /**
- * The envelope one platform run receives. A Listing release declares its own scenarios; the
+ * The envelope one platform run receives. A release declares its own scenarios; the
  * chosen one travels as `applicationOptions.listingType` so the Worker sees the business entry
  * instead of guessing it from the goal text. Without a scenario the input stays unchanged.
  * `inputBaseline` records which input batch this run started from; it is frozen with the input,

@@ -259,14 +259,14 @@ test('review calls use the documented paths and carry CAS facts in the body', as
   assert.equal(listed.items.length, 1);
   const requested = await api.requestReview('run1', '请复核');
   assert.equal(requested.state, 'REQUESTED');
-  const decided = await api.decideReview('r1', 'APPROVED', 1, '已核对');
+  const decided = await api.decideReview('r1', 'APPROVED', 1, { expectedManifestDigest: 'd'.repeat(64), note: '已核对' });
   assert.equal(decided.state, 'APPROVED');
 
   assert.match(seen[0].url, /\/api\/runs\/run1\/reviews$/);
   assert.equal(seen[1].method, 'POST');
   assert.deepEqual(JSON.parse(seen[1].body ?? '{}'), { note: '请复核' });
   assert.match(seen[2].url, /\/api\/reviews\/r1\/decision$/);
-  assert.deepEqual(JSON.parse(seen[2].body ?? '{}'), { decision: 'APPROVED', expectedRevision: 1, note: '已核对' });
+  assert.deepEqual(JSON.parse(seen[2].body ?? '{}'), { decision: 'APPROVED', expectedRevision: 1, expectedManifestDigest: 'd'.repeat(64), note: '已核对' });
 });
 
 test('audit export parses NDJSON lines and derives the chain head and last sequence', async () => {
@@ -328,4 +328,119 @@ test('a rerun baseline append addresses the work batch resource and carries no c
     { url: '/api/works/w%201/input-baselines', body: { sourceRef: 'D:/data/b2', digest: 'c'.repeat(64) } },
   ]);
   assert.equal('createdBy' in (seen[0].body ?? {}), false);
+});
+
+test('delivery package reads and lifecycle writes address their exact resources (E1-3)', async () => {
+  const calls: Array<{ method: string; url: string; body?: Record<string, unknown> }> = [];
+  const pkg = { packageId: 'p1', workId: 'w 1', runId: 'r1', state: 'SEALED', manifest: { runId: 'r1', appId: 'listing', appVersion: '1.0.0', artifacts: [{ name: 'a.xlsx', digest: 'a'.repeat(64), bytes: 3 }], review: null }, packageDigest: 'd'.repeat(64), sealedBy: 'op', revision: 1, createdAt: 't', updatedAt: 't' };
+  const api = new Api('', fakeFetch((url, init) => {
+    const request = init as { method?: string; body?: string } | undefined;
+    calls.push({
+      method: request?.method ?? 'GET',
+      url,
+      ...(request?.body ? { body: JSON.parse(request.body) as Record<string, unknown> } : {}),
+    });
+    const method = (init as { method?: string } | undefined)?.method ?? 'GET';
+    return { status: 200, body: method === 'GET' ? { total: 1, items: [pkg] } : pkg };
+  }));
+
+  const page = await api.workDeliveryPackages('w 1', { offset: 0, limit: 20 });
+  assert.equal(page.items[0].packageId, 'p1');
+  const sealed = await api.sealDeliveryPackage('w 1', { runId: 'r1' });
+  assert.equal(sealed.state, 'SEALED');
+  // No note → the body must not carry a note key at all (honest absence, not an empty string).
+  assert.equal('note' in (calls.find((call) => call.url.includes('delivery-packages') && call.method === 'POST')?.body ?? {}), false);
+  await api.deliverDeliveryPackage('p 1', { note: '已发项目组', expectedRevision: 1 });
+  await api.acknowledgeDeliveryPackage('p 1', { expectedRevision: 2 });
+  await api.withdrawDeliveryPackage('p 1', { reason: '对象变更', expectedRevision: 3 });
+  await api.supersedeDeliveryPackage('p 1', { supersededBy: 'p2', expectedRevision: 4 });
+
+  assert.deepEqual(calls.map((call) => `${call.method} ${call.url}`), [
+    'GET /api/works/w%201/delivery-packages?offset=0&limit=20',
+    'POST /api/works/w%201/delivery-packages',
+    'POST /api/delivery-packages/p%201/deliver',
+    'POST /api/delivery-packages/p%201/acknowledge',
+    'POST /api/delivery-packages/p%201/withdraw',
+    'POST /api/delivery-packages/p%201/supersede',
+  ]);
+  assert.deepEqual(calls[2].body, { note: '已发项目组', expectedRevision: 1 });
+  assert.deepEqual(calls[3].body, { expectedRevision: 2 });
+  assert.deepEqual(calls[4].body, { reason: '对象变更', expectedRevision: 3 });
+  assert.deepEqual(calls[5].body, { supersededBy: 'p2', expectedRevision: 4 });
+});
+
+test('a conflicting delivery-package write surfaces the control plane revision-stale code', async () => {
+  const api = new Api('', fakeFetch(() => ({ status: 409, body: { code: 'DELIVERY_PACKAGE_REVISION_STALE' } })));
+  await assert.rejects(
+    () => api.deliverDeliveryPackage('p1', { expectedRevision: 99 }),
+    (error: unknown) => error instanceof PlatformApiError && error.code === 'DELIVERY_PACKAGE_REVISION_STALE' && error.status === 409,
+  );
+});
+
+test('findings reads and the key-aligned diff address their exact resources (E1-4)', async () => {
+  const seen: string[] = [];
+  const api = new Api('', fakeFetch((url) => {
+    seen.push(url);
+    if (url.includes('findings-diff')) {
+      return { status: 200, body: { comparable: false, reason: 'APP_VERSION_MISMATCH', fromRunId: 'r1', toRunId: 'r2' } };
+    }
+    return { status: 200, body: { items: [{ key: 'K1', kind: 'issue', severity: 'warning', summary: '一条' }] } };
+  }));
+  const findings = await api.runFindings('r/1');
+  assert.equal(findings.items[0].key, 'K1');
+  const diff = await api.runFindingsDiff('r1', 'r/2');
+  assert.equal(diff.comparable, false);
+  assert.equal(diff.reason, 'APP_VERSION_MISMATCH');
+  assert.deepEqual(seen, [
+    '/api/runs/r%2F1/findings',
+    '/api/runs/r1/findings-diff?against=r%2F2',
+  ]);
+});
+
+test('catalog reads use the approved-catalog endpoint with keyset parameters (W5/R2)', async () => {
+  const seen: string[] = [];
+  const api = new Api('', fakeFetch((url) => {
+    seen.push(url);
+    if (url.includes('cursor=')) {
+      return { status: 200, body: { items: [{ appId: 'l2', appVersion: '2.0.0', displayName: 'Listing 2', releaseDigest: 'b'.repeat(64), planDigest: 'p'.repeat(64), revision: 2, updatedAt: '' }], nextCursor: null } };
+    }
+    return { status: 200, body: { items: [{ appId: 'l1', appVersion: '1.0.0', displayName: 'Listing', releaseDigest: 'a'.repeat(64), planDigest: 'p'.repeat(64), revision: 1, updatedAt: '' }], nextCursor: 'next-1' } };
+  }));
+  const page = await api.catalogSummaries('p1', { limit: 100 });
+  assert.equal(page.items.length, 1);
+  assert.equal(page.nextCursor, 'next-1');
+  const next = await api.catalogSummaries('p1', { cursor: 'next-1', limit: 50 });
+  assert.equal(next.items[0].appId, 'l2');
+  assert.match(seen[0], /\/api\/catalog\?projectId=p1&limit=100$/);
+  assert.match(seen[1], /\/api\/catalog\?projectId=p1&cursor=next-1&limit=50$/);
+});
+
+test('catalog release detail reads the full declaration of the default-pointer release (W5/R2)', async () => {
+  let seen = '';
+  const api = new Api('', fakeFetch((url) => {
+    seen = url;
+    return {
+      status: 200,
+      body: {
+        app: { appId: 'l1', appVersion: '1.0.0', state: 'ACTIVE', descriptor: { listingTypes: ['Manual', 'Report'] }, planDigest: 'p'.repeat(64), releaseDigest: 'a'.repeat(64) },
+        catalog: { appId: 'l1', appVersion: '1.0.0', releaseDigest: 'a'.repeat(64), revision: 3, updatedBy: 'pm', updatedAt: '' },
+      },
+    };
+  }));
+  const detail = await api.catalogRelease('l1', 'p1');
+  assert.equal(detail.app.descriptor?.listingTypes?.[0], 'Manual');
+  assert.equal(detail.catalog.revision, 3);
+  assert.match(seen, /\/api\/catalog\/l1\?projectId=p1$/);
+});
+
+test('a legacy review decision never sends an unexpected manifest digest (W5/R4)', async () => {
+  let body: Record<string, unknown> | undefined;
+  const api = new Api('', fakeFetch((_url, init) => {
+    body = JSON.parse(String((init as { body: string }).body));
+    return { status: 200, body: { reviewId: 'r1', runId: 'run1', state: 'REJECTED', requestedBy: 'me', reviewer: 'me', revision: 2, createdAt: '', updatedAt: '' } };
+  }));
+  await api.decideReview('r1', 'REJECTED', 1, { note: '旧记录，仅绑定 Run' });
+  assert.ok(body);
+  assert.deepEqual(body, { decision: 'REJECTED', expectedRevision: 1, note: '旧记录，仅绑定 Run' });
+  assert.equal('expectedManifestDigest' in body, false);
 });

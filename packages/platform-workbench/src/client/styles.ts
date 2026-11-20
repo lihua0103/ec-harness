@@ -185,10 +185,33 @@ export const WORKBENCH_CSS = `
 .ec-wb .ec-wb-hero-actions { display: flex; align-items: center; gap: 8px; padding-bottom: 2px; flex-wrap: wrap; }
 .ec-wb .ec-wb-chip { font-size: 10px; color: #5c7278; padding-right: 7px; white-space: nowrap; }
 .ec-wb .ec-wb-hero-cta { min-height: 32px; padding: 0 13px; font-size: 11px; }
-/* Continue-first home: a compact functional header, not a dominant greeting hero — the works queue
-   leads the stack so returning employees resume work immediately. */
-.ec-wb-page-home .ec-wb-hero { min-height: 0; }
-.ec-wb-page-home .ec-wb-hero h1 { font-size: 18px; }
+/* Flagship home: the attention slip is the only visually emphatic surface. */
+.ec-wb .ec-wb-home-header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; padding-block: 12px 17px; border-bottom: 1px solid var(--ec-line); }
+.ec-wb .ec-wb-home-header h1 { font-size: clamp(24px, 3vw, 32px); }
+.ec-wb .ec-wb-home-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.ec-wb .ec-wb-home-actions select { width: auto; max-width: min(240px, 100%); }
+.ec-wb .ec-wb-home-actions :is(button, select), .ec-wb .ec-wb-home-slip button { min-height: 36px; font-size: 13px; }
+.ec-wb .ec-wb-home-priority, .ec-wb .ec-wb-home-context section { min-width: 0; }
+.ec-wb .ec-wb-home-priority h2, .ec-wb .ec-wb-home-context h2 { font-size: 17px; margin-block: 0 9px; }
+.ec-wb .ec-wb-home-slip { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; background: var(--ec-white); border: 1px solid var(--ec-line); border-inline-start: 3px solid var(--ec-primary); border-radius: 6px; padding: 14px 16px; }
+.ec-wb .ec-wb-home-slip[data-failed="true"] { border-inline-start-color: var(--ec-amber); }
+.ec-wb .ec-wb-home-slip > div { flex: 1 1 210px; min-width: 0; overflow-wrap: anywhere; }
+.ec-wb .ec-wb-home-slip strong { display: block; color: var(--ec-ink); font-size: 17px; margin-block: 3px; }
+.ec-wb .ec-wb-home-slip span { color: var(--ec-primary); font-size: 12px; font-weight: 650; }
+.ec-wb .ec-wb-home-slip[data-failed="true"] span { color: var(--ec-amber); }
+.ec-wb .ec-wb-home-slip p, .ec-wb .ec-wb-home-context .ec-wb-muted { color: var(--ec-muted); font-size: 13px; line-height: 1.5; }
+.ec-wb .ec-wb-home-context { border-inline-start: 1px solid var(--ec-line); padding-inline-start: 16px; }
+.ec-wb .ec-wb-home-context section + section { border-top: 1px solid var(--ec-line); padding-block-start: 14px; }
+.ec-wb .ec-wb-page-home .ec-wb-queue { box-shadow: none; }
+.ec-wb .ec-wb-page-home .ec-wb-work-row .ec-wb-work-tail .ec-wb-button { opacity: 1; white-space: normal; }
+.ec-wb .ec-wb-page-home :focus-visible { outline: 2px solid var(--ec-primary); outline-offset: 2px; }
+@media (max-width: 900px) {
+  .ec-wb .ec-wb-page-home .ec-wb-home-grid { grid-template-columns: minmax(0, 1fr); align-items: start; }
+  .ec-wb .ec-wb-home-context { border-inline-start: 0; border-top: 1px solid var(--ec-line); padding: 14px 0 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ec-wb .ec-wb-page-home * { transition: none; }
+}
 .ec-wb .ec-wb-home-grid { display: grid; grid-template-columns: minmax(0, 1fr) 282px; gap: var(--ec-gap); align-items: start; }
 /* The home canvas fills the screen like the reviewed draft: the queue and the project panel take
    the remaining height instead of leaving a dead band under a short list. */
@@ -289,6 +312,13 @@ export const WORKBENCH_CSS = `
 }
 .ec-wb .ec-wb-project-row strong, .ec-wb .ec-wb-run-row strong, .ec-wb .ec-wb-artifact-row strong { display: block; font-size: 10px; font-weight: 620; overflow-wrap: anywhere; }
 .ec-wb .ec-wb-project-row small, .ec-wb .ec-wb-run-row small, .ec-wb .ec-wb-artifact-row small { display: block; font-size: 9px; color: #5c7278; margin-top: 2px; }
+/* Rail rows are read at a glance, not scanned: give the run name a readable size and a
+   visible selected state instead of relying on a 6px dot. */
+.ec-wb .ec-wb-run-row { border-radius: 8px; padding: 10px 8px; margin: 0 -8px; }
+.ec-wb .ec-wb-run-row strong { font-size: 12px; }
+.ec-wb .ec-wb-run-row small { font-size: 10.5px; }
+.ec-wb button.ec-wb-run-row[aria-current="true"] { background: var(--ec-green-weak); }
+.ec-wb button.ec-wb-run-row[aria-current="true"] strong { color: var(--ec-primary); }
 .ec-wb .ec-wb-row-tail { margin-left: auto; color: #9eadaf; font-size: 14px; flex: none; }
 .ec-wb button.ec-wb-project-link {
   margin-top: 1px; padding: 8px 0 0; border: 0; border-top: 1px solid var(--ec-line-soft);
@@ -361,6 +391,10 @@ export const WORKBENCH_CSS = `
 .ec-wb .ec-wb-row-button:hover { background: #fbfdfc; }
 .ec-wb .ec-wb-row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ec-wb .ec-wb-row-main strong { font-size: 11px; font-weight: 620; color: var(--ec-ink); overflow-wrap: anywhere; }
+/* The rail's run rows carry the primary label the employee reads; the generic row-main size
+   (used by dense tables elsewhere) is too small there. */
+.ec-wb .ec-wb-run-row .ec-wb-row-main strong { font-size: 12px; }
+.ec-wb .ec-wb-run-row .ec-wb-row-main small { font-size: 10.5px; }
 .ec-wb .ec-wb-row-actions { display: flex; align-items: center; gap: 8px; flex: none; flex-wrap: wrap; }
 /* Works-list rows answer hover with their 详情 action; the state badge stays visible. Touch
    devices (no hover) and keyboard focus always keep the action reachable. */
@@ -540,16 +574,22 @@ export const WORKBENCH_CSS = `
 .ec-wb .ec-wb-pill[data-tone="muted"] { background: #eef3f4; color: #4f676d; }
 .ec-wb .ec-wb-pill[data-tone="muted"]::before { background: #a8b6b9; }
 .ec-wb .ec-wb-console-actions { display: flex; align-items: center; gap: 8px; flex: none; flex-wrap: wrap; }
-.ec-wb .ec-wb-console-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 264px; gap: 14px; padding: 14px 24px 12px; overflow: hidden; }
+.ec-wb .ec-wb-console-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) clamp(288px, 21vw, 360px); gap: 16px; padding: 14px 24px 12px; overflow: hidden; }
 .ec-wb .ec-wb-console-thread { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.ec-wb .ec-wb-console-rail { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 12px; padding-right: 2px; }
-.ec-wb .ec-wb-fact-line { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 10px; padding: 6px 0; border-bottom: 1px solid #eff3f4; }
+.ec-wb .ec-wb-console-rail { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 14px; padding-right: 2px; }
+.ec-wb .ec-wb-fact-line { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 11.5px; padding: 7px 0; border-bottom: 1px solid #eff3f4; }
 .ec-wb .ec-wb-fact-line:last-of-type { border-bottom: 0; }
 .ec-wb .ec-wb-fact-line span:first-child { color: #5c7278; flex: none; }
 .ec-wb .ec-wb-fact-line span:last-child { color: #40606a; text-align: right; overflow-wrap: anywhere; }
 /* The upstream conversation factory owns its own scroll body and composer; the thread column
    only gives it a definite height, so the enterprise rail never grows the page scroll. */
 .ec-wb .ec-wb-session-conversation { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* Embedded conversation View tabs: the seat the native session header alone provides upstream.
+   Rendered only when more than one View is registered (对话 / 轨迹). */
+.ec-wb .ec-wb-session-view-tabs { flex: none; display: flex; align-items: center; gap: 2px; padding: 6px 12px 0; border-bottom: 1px solid var(--ec-line); background: var(--ec-white); }
+.ec-wb .ec-wb-session-view-tab { border: 0; background: transparent; padding: 7px 12px 6px; font: inherit; font-size: 12.5px; color: #5c7278; border-bottom: 2px solid transparent; cursor: pointer; border-radius: 6px 6px 0 0; }
+.ec-wb .ec-wb-session-view-tab:hover { color: var(--ec-primary); background: #f4faf7; }
+.ec-wb .ec-wb-session-view-tab-active { color: var(--ec-primary); border-bottom-color: var(--ec-primary); font-weight: 640; }
 
 /* Run transcript (selected run in the console center): the run's own scrollable history. */
 .ec-wb .ec-wb-transcript { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
@@ -572,7 +612,7 @@ export const WORKBENCH_CSS = `
 @media (min-width: 1600px) {
   .ec-wb .ec-wb-home-grid { grid-template-columns: minmax(0, 1fr) 310px; }
   .ec-wb .ec-wb-detail { grid-template-columns: minmax(0, 1fr) 330px; }
-  .ec-wb .ec-wb-console-body { grid-template-columns: minmax(0, 1fr) 290px; }
+  .ec-wb .ec-wb-console-body { grid-template-columns: minmax(0, 1fr) 340px; }
 }
 @media (max-width: 1200px) {
   .ec-wb { --ec-nav-w: 184px; }
@@ -638,8 +678,6 @@ export const WORKBENCH_CSS = `
   .ec-wb .ec-wb-console-head > div:first-child { flex: 1 1 100%; min-width: 0; }
   .ec-wb .ec-wb-console-actions { flex-wrap: wrap; gap: 7px; width: 100%; min-width: 0; }
   .ec-wb .ec-wb-console-actions > .ec-wb-button { flex: 1 1 auto; min-width: 0; }
-  .ec-wb .ec-wb-segmented { width: 100%; max-width: 100%; }
-  .ec-wb .ec-wb-segmented button { flex: 1 1 0; min-width: 0; }
   .ec-wb .ec-wb-mode-banner { flex-direction: column; align-items: flex-start; gap: 4px; }
   .ec-wb .ec-wb-bind-steps li { font-size: 11px; }
   .ec-wb .ec-wb-session-tools { width: 100%; }
@@ -662,14 +700,16 @@ export const WORKBENCH_CSS = `
    from the same tokens, so the dark block below re-inks them without duplicate rules. */
 .ec-wb .ec-wb-freshness { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--ec-muted); }
 .ec-wb .ec-wb-freshness button { border: 0; background: none; color: var(--ec-primary); font: inherit; cursor: pointer; text-decoration: underline; }
-.ec-wb .ec-wb-segmented { display: inline-flex; border: 1px solid var(--ec-line); border-radius: var(--ec-radius-sm); overflow: hidden; background: var(--ec-soft); }
-.ec-wb .ec-wb-segmented button { border: 0; background: transparent; color: var(--ec-secondary); padding: 5px 10px; font: inherit; font-size: 12px; cursor: pointer; }
-.ec-wb .ec-wb-segmented button[aria-pressed="true"] { background: var(--ec-white); color: var(--ec-ink); box-shadow: var(--ec-shadow-1); }
-.ec-wb .ec-wb-segmented button:focus-visible { outline: 2px solid var(--dsw-focus-ring-color, var(--ec-focus)); outline-offset: -2px; }
 .ec-wb .ec-wb-mode-banner { display: flex; justify-content: space-between; gap: 12px; align-items: center; border: 1px solid var(--ec-amber-line); background: var(--ec-amber-weak); color: var(--ec-amber); border-radius: var(--ec-radius-sm); padding: 6px 10px; font-size: 12px; }
 .ec-wb .ec-wb-mode-banner button { border: 0; background: none; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
 .ec-wb .ec-wb-console-center { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; }
-.ec-wb .ec-wb-console-center > .ec-wb-console-thread, .ec-wb .ec-wb-console-center > .ec-wb-transcript { flex: 1; min-height: 0; }
+.ec-wb .ec-wb-console-center > .ec-wb-console-thread { flex: 1; min-height: 0; }
+/* A run's transcript in the rail keeps a bounded window; the rail itself scrolls. The card is
+   inked like a reading surface so it reads as a record, not one more list row. */
+.ec-wb .ec-wb-rail-record { background: #fbfdfc; border-color: #cfe2db; box-shadow: var(--ec-shadow-1), inset 3px 0 0 var(--ec-primary); gap: 8px; }
+.ec-wb .ec-wb-rail-record .ec-wb-transcript { max-height: 340px; }
+.ec-wb .ec-wb-rail-record .ec-wb-transcript-item { padding: 8px 10px 9px; }
+.ec-wb .ec-wb-rail-record .ec-wb-transcript-item p { font-size: 12px; line-height: 1.6; }
 .ec-wb .ec-wb-bind-steps { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0 0 8px; padding: 0; }
 .ec-wb .ec-wb-bind-steps li { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ec-muted); border: 1px solid var(--ec-line); border-radius: 999px; padding: 2px 9px; }
 .ec-wb .ec-wb-bind-steps li[data-state="done"] { color: var(--ec-primary); border-color: var(--ec-line-strong); }

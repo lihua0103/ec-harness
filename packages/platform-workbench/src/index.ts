@@ -215,3 +215,5 @@ export function apply(ctx: Context): void {
     },
   }), 'ec-platform-workbench control proxy')
 }
+
+export * from './knowledge-seeds.js';

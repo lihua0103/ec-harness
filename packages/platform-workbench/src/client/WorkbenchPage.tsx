@@ -44,6 +44,8 @@ import {
   WorkbenchApi,
   type ArtifactItem,
   type AuditEntryItem,
+  type CatalogReleaseDetail,
+  type CatalogSummary,
   type DeliveryPackageItem,
   type EvaluationRunItem,
   type FindingItem,
@@ -65,6 +67,7 @@ import {
   type WorkbenchItem,
   type WorkspaceItem,
 } from '../api.js'
+import { homePriority, latestHomeRuns } from '../home-priority.js'
 import { artifactDownloadPath, formatBytes, monogram, pageWindow, relativeTime, runTone, selectWorkRows, summarizeArtifacts, type WorkRow } from '../reports.js'
 import { buildAnswers, chosenModel, modelChoices, runInput, type NativeQuestion } from '../forms.js'
 import type { WorkContext } from '../work-context.js'
@@ -72,6 +75,8 @@ import { bindingDraft, selectBindingDomain } from '../work-context.js'
 import type { SubmissionWatchOptions } from './submission-observer.js'
 import { workPointers } from './pointers.js'
 import { clearPersistedView, hashToView, readPersistedView, viewKey, viewToHash, writePersistedView, type PersistedView } from './view-state.js'
+import { EmbeddedConversationViews, EmbeddedViewsProvider, useEmbeddedViewElection } from './embedded-views.js'
+import { KnowledgeBasisCard } from './run-insights.js'
 import {
   availableTimeZones,
   formatDate,
@@ -121,8 +126,15 @@ export type WorkbenchPageProps =
   & PropsRenderSlots<'workbench.session'>
   & InjectFace<WorkbenchPageInjected>
 
-/** Props of the embedded-session host entry: session-maybe standard seats plus the factory seat. */
-type WorkbenchSessionHostProps = PropsRuntime<'workbench.session'> & PropsRenderFactories
+/** Props of the embedded-session host entry: session-maybe standard seats, the factory seat, and
+ *  the registered conversation View roster (a hooks source from this entry's inject face). */
+type WorkbenchSessionHostProps = PropsRuntime<'workbench.session'> & PropsRenderFactories & {
+  useConversationViewIds: <S>(select: (ids: readonly string[]) => S) => S
+}
+
+/** The `views` local slot of the `conversation.content` factory: our embedded occurrence renders
+ *  the host-elected View (see `embedded-views.tsx`), the seat the native header does not provide. */
+const EMBEDDED_CONTENT_SLOTS = { views: EmbeddedConversationViews }
 
 /**
  * Host the upstream conversation factory inside the enterprise shell. The page scopes this entry
@@ -134,10 +146,12 @@ type WorkbenchSessionHostProps = PropsRuntime<'workbench.session'> & PropsRender
  * opened, or summary-blank).
  */
 export function EmbeddedSessionHost({
-  sessionId, useSession, useSessions, useConversation, renderFactorySlot,
+  sessionId, useSession, useSessions, useConversation, renderFactorySlot, useConversationViewIds,
 }: WorkbenchSessionHostProps) {
   const session = useSession(s => s)
   const conversation = useConversation(s => s)
+  const viewIds = useConversationViewIds(ids => ids)
+  const election = useEmbeddedViewElection(sessionId, viewIds)
   const shellPhase = session === undefined || conversation === undefined
     ? 'blank'
     : conversationPhase(session, conversation)
@@ -147,9 +161,32 @@ export function EmbeddedSessionHost({
   const hero = sessionId === undefined
     || (shellPhase === 'blank' && (openState === 'open' || summaryBlank === true))
   const phase = settling ? 'settling' : hero ? 'hero' : 'active'
+  // The View tab strip the native session header would host. Without it, a tool-call 「查看」 action
+  // (Trajectory View) leaves the embedded conversation with no way back — the tab is that way.
+  const tabStrip = election.tabs.length > 1
+    ? (
+      <div className="ec-wb-session-view-tabs" role="tablist" aria-label={t('session.viewTabs')}>
+        {election.tabs.map(tab => (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={tab.id === election.selected}
+            className={tab.id === election.selected ? 'ec-wb-session-view-tab ec-wb-session-view-tab-active' : 'ec-wb-session-view-tab'}
+            onClick={() => election.select(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+    )
+    : null
   return (
     <div className="ec-wb-session-conversation" data-ec-embedded-session={sessionId ?? undefined}>
-      {renderFactorySlot('conversation.content', { variant: 'embedded', phase, hero })}
+      {tabStrip}
+      <EmbeddedViewsProvider selected={election.selected}>
+        {renderFactorySlot('conversation.content', { variant: 'embedded', phase, hero }, { slots: EMBEDDED_CONTENT_SLOTS })}
+      </EmbeddedViewsProvider>
     </div>
   )
 }
@@ -524,10 +561,6 @@ const BRAND_MARK = (
 )
 
 /** Today's date as the home eyebrow; the platform records no "business day", so this is local time. */
-function todayLabel(now: number): string {
-  return formatDate(now)
-}
-
 /** Display name of the model a new run would use, or '' when the platform registered none. */
 function defaultModelLabel(models: WorkbenchBootstrap['models']): string {
   const selected = chosenModel(models?.catalog, models?.preference)
@@ -731,10 +764,11 @@ function usePendingWorkTitles(
 
 /** E3-4 unified todos keep their source kind and their own resolution verb — the list never
  *  blurs a review decision or a receipt into "a question to answer". */
-const TODO_KINDS: Record<'question' | 'review' | 'delivery-receipt', { label: string; verb: string }> = {
+const TODO_KINDS: Record<'question' | 'review' | 'delivery-receipt' | 'model-approval', { label: string; verb: string }> = {
   question: { label: '问题答复', verb: '回答' },
   review: { label: '交付复核', verb: '决定' },
   'delivery-receipt': { label: '交付接收', verb: '确认接收' },
+  'model-approval': { label: '模型审批', verb: '去审批' },
 }
 type TodoItem = NonNullable<WorkbenchBootstrap['todos']>[number]
 
@@ -910,16 +944,17 @@ function NewWorkForm({ api, data, initialProjectId, initialAppKey, onCreated, on
   onCancel(): void
 }) {
   const projects = data.projects ?? []
-  const apps = (data.apps ?? []).filter((app) => app.state === 'ACTIVE')
+  // 获准目录（W5/R2）：表单只列出当前项目获准创建的发布。控制面按默认指针、策略与审批
+  // 过滤，浏览器不自行决定版本；bootstrap 的应用摘要只是展示信息，不再是创建清单。
+  const [catalog, setCatalog] = useState<CatalogSummary[]>([])
+  const [catalogState, setCatalogState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [catalogError, setCatalogError] = useState('')
   const [projectId, setProjectId] = useState(() =>
     projects.some((project) => project.projectId === initialProjectId) ? initialProjectId ?? '' : projects[0]?.projectId ?? '')
   const [workspaceId, setWorkspaceId] = useState('')
   const [spaces, setSpaces] = useState<WorkspaceItem[] | null>(null)
   const [spacesError, setSpacesError] = useState('')
-  const [appKey, setAppKey] = useState(() =>
-    apps.some((app) => `${app.appId}|${app.appVersion}` === initialAppKey)
-      ? initialAppKey ?? ''
-      : apps[0] ? `${apps[0].appId}|${apps[0].appVersion}` : '')
+  const [appKey, setAppKey] = useState(initialAppKey ?? '')
   const [title, setTitle] = useState('')
   const [goal, setGoal] = useState('')
   const [busy, setBusy] = useState(false)
@@ -951,14 +986,51 @@ function NewWorkForm({ api, data, initialProjectId, initialAppKey, onCreated, on
   // The launch panel above stays usable while the form is open: changing its project or a quick
   // target retargets this form without discarding what the employee already typed.
   useEffect(() => { if (initialProjectId) setProjectId(initialProjectId) }, [initialProjectId])
-  useEffect(() => { if (initialAppKey) setAppKey(initialAppKey) }, [initialAppKey])
 
   useEffect(() => { void loadSpaces(projectId) }, [projectId, loadSpaces])
+
+  // 获准目录随项目读取；换项目重读。循环取全所有目录页，创建清单不被单页截断；
+  // 撤权后这里直接报错，不显示缓存的旧目录（R2/R4）。
+  const loadCatalog = useCallback(async (id: string) => {
+    if (!id) { setCatalog([]); setCatalogState('ready'); return }
+    setCatalogState('loading')
+    try {
+      const items: CatalogSummary[] = []
+      let cursor: string | null = null
+      for (;;) {
+        const page = await api.catalogSummaries(id, { cursor, limit: 100 })
+        items.push(...page.items)
+        cursor = page.nextCursor
+        if (!cursor) break
+      }
+      setCatalog(items)
+      setCatalogState('ready')
+      setCatalogError('')
+    } catch (reason) {
+      setCatalog([])
+      setCatalogState('error')
+      setCatalogError(errorText(reason))
+    }
+  }, [api])
+  useEffect(() => { void loadCatalog(projectId) }, [projectId, loadCatalog])
+
+  // 目录就绪后校验当前选择：快速目标的发布不在获准目录里就回落到第一项，绝不提交未获准的版本。
+  useEffect(() => {
+    if (catalogState !== 'ready') return
+    setAppKey((previous) => {
+      const wanted = initialAppKey && catalog.some((app) => `${app.appId}|${app.appVersion}` === initialAppKey)
+        ? initialAppKey
+        : previous
+      return catalog.some((app) => `${app.appId}|${app.appVersion}` === wanted)
+        ? wanted
+        : catalog[0] ? `${catalog[0].appId}|${catalog[0].appVersion}` : ''
+    })
+  }, [catalog, catalogState, initialAppKey])
   // A project with no directory cannot proceed, so its registration form opens by itself; the
   // employee can still close it once the project actually has one.
   useEffect(() => { if (spaces && spaces.length === 0) setSpaceFormOpen(true) }, [spaces])
 
-  const selectedApp = apps.find((app) => `${app.appId}|${app.appVersion}` === appKey)
+  const selectedApp = catalog.find((app) => `${app.appId}|${app.appVersion}` === appKey)
   const canSubmit = !!projectId && !!workspaceId && !!selectedApp && title.trim().length > 0 && !busy
   const projectOptions = [
     ...projects,
@@ -1117,18 +1189,22 @@ function NewWorkForm({ api, data, initialProjectId, initialAppKey, onCreated, on
           : null}
         {step === 1
           ? (
-            <Field label="应用" hint={selectedApp?.descriptor?.listingTypes?.length ? `该应用声明场景：${selectedApp.descriptor.listingTypes.join(' / ')}；场景在发起运行时选择` : '应用来自平台已发布目录；员工的日常问答不使用应用也可以进行。'}>
-              {apps.length === 0
-                ? <p className="ec-wb-empty">当前没有可用的应用发布；请联系平台管理员登记。</p>
-                : (
-                  <select className="ec-wb-select" value={appKey} onChange={(event) => setAppKey(event.target.value)}>
-                    {apps.map((app) => (
-                      <option key={`${app.appId}@${app.appVersion}`} value={`${app.appId}|${app.appVersion}`}>
-                        {app.descriptor?.displayName ?? app.displayName ?? app.appId} @{app.appVersion}
-                      </option>
-                    ))}
-                  </select>
-                )}
+            <Field label="应用" hint={selectedApp?.listingTypes?.length ? `该应用声明场景：${selectedApp.listingTypes.join(' / ')}；场景在发起运行时选择` : '应用来自平台获准目录；员工的日常问答不使用应用也可以进行。'}>
+              {catalogState === 'loading'
+                ? <p className="ec-wb-muted" role="status">正在读取获准目录…</p>
+                : catalogState === 'error'
+                  ? <ErrorBox message={`无法读取获准目录：${catalogError}`} onRetry={() => void loadCatalog(projectId)} />
+                  : catalog.length === 0
+                    ? <p className="ec-wb-empty">当前项目没有获准的应用发布；请联系平台管理员登记。</p>
+                    : (
+                      <select className="ec-wb-select" value={appKey} onChange={(event) => setAppKey(event.target.value)}>
+                        {catalog.map((app) => (
+                          <option key={`${app.appId}@${app.appVersion}`} value={`${app.appId}|${app.appVersion}`}>
+                            {app.displayName} @{app.appVersion}
+                          </option>
+                        ))}
+                      </select>
+                    )}
             </Field>
           )
           : null}
@@ -1182,7 +1258,7 @@ function NewWorkForm({ api, data, initialProjectId, initialAppKey, onCreated, on
           ? (
             <dl className="ec-wb-facts">
               <dt>项目</dt><dd>{projectOptions.find((project) => project.projectId === projectId)?.name ?? '未选择'}</dd>
-              <dt>应用</dt><dd>{selectedApp ? `${selectedApp.descriptor?.displayName ?? selectedApp.displayName ?? selectedApp.appId} @${selectedApp.appVersion}` : '未选择'}</dd>
+              <dt>应用</dt><dd>{selectedApp ? `${selectedApp.displayName} @${selectedApp.appVersion}` : '未选择'}</dd>
               <dt>工作目录</dt><dd>{spaces?.find((space) => space.workspaceId === workspaceId)?.directory ?? '未选择'}</dd>
               <dt>标题</dt><dd>{title.trim() || '未填写'}</dd>
               <dt>目标</dt><dd>{goal.trim() || '未填写（可在对话中补充）'}</dd>
@@ -1357,7 +1433,7 @@ function RunLauncher({ api, workId, catalog, preference, hasWorkspace, listingTy
   catalog: ModelCatalog | null | undefined
   preference: ModelPreference | null | undefined
   hasWorkspace: boolean
-  /** Scenarios the released application declares (Listing: Manual / Medical / PK / Report). */
+  /** Scenarios the released application declares; options come from the release descriptor. */
   listingTypes?: string[]
   /** The Work's current QUEUED/STARTING/RUNNING run; the platform allows one at a time. */
   activeRunId?: string | null
@@ -1408,8 +1484,8 @@ function RunLauncher({ api, workId, catalog, preference, hasWorkspace, listingTy
       {listingTypes && listingTypes.length > 0
         ? (
           <label className="ec-wb-field">
-            <span className="ec-wb-field-label">Listing 场景</span>
-            <select className="ec-wb-select" aria-label="Listing 场景" value={listingType} disabled={busy}
+            <span className="ec-wb-field-label">业务场景</span>
+            <select className="ec-wb-select" aria-label="业务场景" value={listingType} disabled={busy}
               onChange={(event) => setListingType(event.target.value)}>
               {listingTypes.map((type) => <option key={type} value={type}>{type}</option>)}
             </select>
@@ -1639,6 +1715,9 @@ function ReviewPanel({ api, run, onChanged }: {
 
   const open = items.find((item) => item.state === 'REQUESTED')
   const latestDecision = [...items].reverse().find((item) => item.state === 'APPROVED' || item.state === 'REJECTED')
+  // 复核目标清单（W4）：绑定记录来自请求时冻结的服务端清单；legacy 记录没有 deliverable，
+  // 界面如实标注「未绑定具体成果版本」，不冒充已绑定。
+  const target = open?.deliverable ?? latestDecision?.deliverable
   const state = run.snapshot?.state
   const canRequest = state === 'SUCCEEDED' && !open
 
@@ -1665,7 +1744,10 @@ function ReviewPanel({ api, run, onChanged }: {
     setError('')
     setNotice('')
     try {
-      await api.decideReview(open.reviewId, decision, open.revision, note.trim() || undefined)
+      await api.decideReview(open.reviewId, decision, open.revision, {
+        expectedManifestDigest: open.deliverable?.manifestDigest,
+        note: note.trim() || undefined,
+      })
       setNote('')
       setNotice(decision === 'APPROVED' ? '复核已通过。' : '复核已驳回。')
       await load()
@@ -1689,8 +1771,14 @@ function ReviewPanel({ api, run, onChanged }: {
         <dt>运行状态</dt><dd>{runStateText(state)}</dd>
         <dt>复核状态</dt>
         <dd>{open ? '待复核' : latestDecision ? (latestDecision.state === 'APPROVED' ? `已通过 · ${latestDecision.reviewer ?? ''}` : `已驳回 · ${latestDecision.reviewer ?? ''}`) : '未发起'}</dd>
+        <dt>目标清单</dt>
+        <dd>{!open && !latestDecision
+          ? '未发起'
+          : target
+            ? <>已绑定 {target.manifest.artifacts.length} 项封存工件<span className="ec-wb-expert-only"> · 清单摘要 {target.manifestDigest.slice(0, 12)}…</span></>
+            : '未绑定具体成果版本（旧记录）'}</dd>
       </dl>
-      <p className="ec-wb-muted">运行成功、成果封存与业务复核是三件不同的事；复核记录绑定本次运行，不改变运行状态，也不代替交付批准。</p>
+      <p className="ec-wb-muted">运行成功、成果封存与业务复核是三件不同的事；复核记录绑定本次运行，不改变运行状态，也不代替交付批准。决定按复核绑定的成果清单提交，清单不一致的决定不会被服务端接受。</p>
       {state !== 'SUCCEEDED' && !open
         ? <p className="ec-wb-empty">只有成功的运行可以发起复核。</p>
         : null}
@@ -1855,14 +1943,31 @@ function EvaluationCard({ api, run }: { api: WorkbenchApi; run: RunSummary | nul
  *  run, and the current recognition — three separate lines, never collapsed into "最新". The
  *  recognition line reads the newest succeeded run's reviews and refuses to show approval that
  *  has not actually been read from the control plane. */
-function DeliveryPointerCard({ api, baselines, runs, reviewsError }: {
+function DeliveryPointerCard({ api, workId, runs, reviewsError }: {
   api: WorkbenchApi
-  baselines: Page<InputBaselineItem>
+  workId: string
   runs: Page<RunSummary>
   reviewsError?: string
 }) {
+  const [baselines, setBaselines] = useState<Page<InputBaselineItem> | null>(null)
+  const [baselinesError, setBaselinesError] = useState('')
   const [reviews, setReviews] = useState<ReviewItem[] | null>(null)
   const candidateRunId = runs.items.find((run) => run.snapshot?.state === 'SUCCEEDED')?.runId ?? null
+
+  // 输入基线自含加载：工作台右栏没有详情页的批次状态，指针卡自己读；读不到就如实说明，不冒充「无批次」。
+  useEffect(() => {
+    let live = true
+    setBaselines(null)
+    void (async () => {
+      try {
+        const page = await api.workInputBaselines(workId, { offset: 0, limit: BASELINE_PAGE })
+        if (live) { setBaselines(page); setBaselinesError('') }
+      } catch (reason) {
+        if (live) { setBaselines(null); setBaselinesError(errorText(reason)) }
+      }
+    })()
+    return () => { live = false }
+  }, [api, workId])
 
   useEffect(() => {
     if (!candidateRunId) { setReviews(null); return undefined }
@@ -1880,7 +1985,7 @@ function DeliveryPointerCard({ api, baselines, runs, reviewsError }: {
     return () => { live = false }
   }, [api, candidateRunId])
 
-  const pointers = workPointers(baselines.items, runs.items, reviews)
+  const pointers = workPointers(baselines?.items ?? [], runs.items, reviews)
   const delivery = pointers.delivery
   const deliveryDetail = reviewsError
     ? `复核结论读取失败：${reviewsError}。在读取到结论之前不显示认可。`
@@ -1892,13 +1997,15 @@ function DeliveryPointerCard({ api, baselines, runs, reviewsError }: {
       <dl className="ec-wb-facts">
         <dt>输入基线</dt>
         <dd>
-          {pointers.baseline
-            ? <>第 {pointers.baseline.revision} 批 · {pointers.baseline.sourceRef}
-              {pointers.baseline.digestChanged === true ? '（与上一批不同）' : ''}
-              {pointers.baseline.digestChanged === false ? '（与上一批摘要相同）' : ''}
-              <small className="ec-wb-muted"> · {formatTime(pointers.baseline.createdAt)}</small>
-            </>
-            : '尚未登记输入批次'}
+          {baselines === null
+            ? (baselinesError ? `输入批次读取失败：${baselinesError}` : '正在读取输入批次…')
+            : pointers.baseline
+              ? <>第 {pointers.baseline.revision} 批 · {pointers.baseline.sourceRef}
+                {pointers.baseline.digestChanged === true ? '（与上一批不同）' : ''}
+                {pointers.baseline.digestChanged === false ? '（与上一批摘要相同）' : ''}
+                <small className="ec-wb-muted"> · {formatTime(pointers.baseline.createdAt)}</small>
+              </>
+              : '尚未登记输入批次'}
         </dd>
         <dt>最近运行</dt>
         <dd>
@@ -2003,6 +2110,128 @@ function RerunForm({ api, workId, catalog, preference, hasWorkspace, activeRunId
   )
 }
 
+/** 输入批次卡（自含加载）：批次只追加，不覆盖旧基线；换批重跑表单随卡片出现。
+ *  工作详情页与工作台右栏共用同一张卡，避免两份批次状态各自漂移。 */
+function InputBaselinesCard({ api, workId, catalog, preference, hasWorkspace, activeRunId, allowRerun, onCreated }: {
+  api: WorkbenchApi
+  workId: string
+  catalog: ModelCatalog | null | undefined
+  preference: ModelPreference | null | undefined
+  hasWorkspace: boolean
+  activeRunId?: string | null
+  allowRerun?: boolean
+  onCreated(runId: string): void
+}) {
+  const [baselines, setBaselines] = useState<Page<InputBaselineItem>>({ total: 0, items: [] })
+  const [baselinesOffset, setBaselinesOffset] = useState(0)
+  const [baselinesError, setBaselinesError] = useState('')
+
+  const load = useCallback(async (offset: number) => {
+    setBaselinesError('')
+    try {
+      const page = await api.workInputBaselines(workId, { offset, limit: BASELINE_PAGE })
+      setBaselines(page)
+      setBaselinesOffset(offset)
+    } catch (reason) {
+      setBaselinesError(errorText(reason))
+    }
+  }, [api, workId])
+  useEffect(() => { void load(0) }, [load])
+
+  return (
+    <section className="ec-wb-card" aria-labelledby="ec-wb-baselines">
+      <div className="ec-wb-card-head"><h2 id="ec-wb-baselines">输入批次</h2><span className="ec-wb-badge">{baselines.total}</span></div>
+      <p className="ec-wb-muted">批次只追加，不覆盖旧基线；旧执行始终对应它当时的输入摘要。</p>
+      {baselinesError
+        ? <ErrorBox message={`无法读取输入批次：${baselinesError}`} onRetry={() => void load(baselinesOffset)} />
+        : baselines.items.length === 0
+          ? <p className="ec-wb-empty">尚未登记输入批次。</p>
+          : (
+            <div>
+              {baselines.items.map((baseline, index) => (
+                <div className="ec-wb-row" key={baseline.baselineId}>
+                  <span className="ec-wb-row-main">
+                    <strong>第 {baseline.revision} 批 · {baseline.sourceRef}</strong>
+                    <small className="ec-wb-muted">{formatTime(baseline.createdAt)}
+                      {index > 0 && baseline.digest !== baselines.items[index - 1]?.digest ? ' · 与上一批不同' : ''}
+                      {index > 0 && baseline.digest === baselines.items[index - 1]?.digest ? ' · 与上一批摘要相同' : ''}
+                      <span className="ec-wb-expert-only"> · <span className="ec-wb-digest">{baseline.digest.slice(0, 12)}…</span></span>
+                    </small>
+                  </span>
+                </div>
+              ))}
+              <Pager total={baselines.total} offset={baselinesOffset} limit={BASELINE_PAGE} busy={false} onOffset={(offset) => void load(offset)} />
+            </div>
+          )}
+      {allowRerun
+        ? (
+          <RerunForm
+            api={api}
+            workId={workId}
+            catalog={catalog}
+            preference={preference}
+            hasWorkspace={hasWorkspace}
+            activeRunId={activeRunId}
+            onCreated={(runId) => { void load(0); onCreated(runId) }}
+          />
+        )
+        : null}
+    </section>
+  )
+}
+
+/** 本次执行输入卡（自含加载）：该运行实际接收的冻结输入，由控制面分页裁定。
+ *  工作详情页与工作台右栏共用同一张卡。 */
+function RunInputsCard({ api, runId, refreshToken }: {
+  api: WorkbenchApi
+  runId: string | null
+  refreshToken?: number
+}) {
+  const [inputs, setInputs] = useState<Page<InputCommitItem>>({ total: 0, items: [] })
+  const [inputsOffset, setInputsOffset] = useState(0)
+  const [inputsError, setInputsError] = useState('')
+
+  const load = useCallback(async (offset: number) => {
+    if (!runId) return
+    setInputsError('')
+    try {
+      const page = await api.runInputs(runId, { offset, limit: INPUT_PAGE })
+      setInputs(page)
+      setInputsOffset(offset)
+    } catch (reason) {
+      setInputs({ total: 0, items: [] })
+      setInputsError(errorText(reason))
+    }
+  }, [api, runId])
+
+  useEffect(() => { void load(0) }, [load, refreshToken])
+
+  return (
+    <section className="ec-wb-card" aria-labelledby="ec-wb-run-inputs">
+      <div className="ec-wb-card-head"><h2 id="ec-wb-run-inputs">本次执行输入</h2><span className="ec-wb-badge">{inputs.total}</span></div>
+      {!runId
+        ? <p className="ec-wb-empty">选择一个运行后可查看该次执行接收的输入。</p>
+        : inputsError
+          ? <ErrorBox message={`无法读取执行输入：${inputsError}`} onRetry={() => void load(inputsOffset)} />
+          : inputs.items.length === 0
+            ? <p className="ec-wb-empty">该运行没有输入记录。</p>
+            : (
+              <div>
+                {inputs.items.map((commit) => (
+                  <div className="ec-wb-row" key={commit.commitId}>
+                    <span className="ec-wb-row-main">
+                      <strong>#{commit.sequence}</strong>
+                      <small className="ec-wb-muted">{inputStateLabel(commit.state)}<span className="ec-wb-expert-only"> · <span className="ec-wb-digest">{commit.contentDigest.slice(0, 12)}…</span></span></small>
+                    </span>
+                  </div>
+                ))}
+                <Pager total={inputs.total} offset={inputsOffset} limit={INPUT_PAGE} busy={false} onOffset={(offset) => void load(offset)} />
+              </div>
+            )}
+    </section>
+  )
+}
+
 function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOpenSession, onBindSession, onReload }: {
   api: WorkbenchApi
   data: WorkbenchBootstrap
@@ -2029,18 +2258,15 @@ function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOp
   const [artifactsError, setArtifactsError] = useState('')
   const [artifactsLoading, setArtifactsLoading] = useState(false)
   const [artifactsOffset, setArtifactsOffset] = useState(0)
-  const [inputs, setInputs] = useState<Page<InputCommitItem>>({ total: 0, items: [] })
-  const [inputsOffset, setInputsOffset] = useState(0)
-  const [inputsError, setInputsError] = useState('')
-  const [baselines, setBaselines] = useState<Page<InputBaselineItem>>({ total: 0, items: [] })
-  const [baselinesOffset, setBaselinesOffset] = useState(0)
-  const [baselinesError, setBaselinesError] = useState('')
   const [interactionToken, setInteractionToken] = useState(0)
   const [archiveBusy, setArchiveBusy] = useState(false)
   const [archiveNotice, setArchiveNotice] = useState('')
   const [bindBusy, setBindBusy] = useState(false)
   const [lastLoadedAt, setLastLoadedAt] = useState<number | null>(null)
   const [bindingError, setBindingError] = useState('')
+  // 获准目录的发布声明（W5/R2）：按需读取，不进任何缓存；读不到就报错，不显示旧声明。
+  const [decl, setDecl] = useState<{ listingTypes: string[]; resultViews: ResultViewDecl[] } | null>(null)
+  const [declError, setDeclError] = useState('')
 
   const loadContext = useCallback(async () => {
     try {
@@ -2071,17 +2297,6 @@ function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOp
     }
   }, [api, workId, initialRunId])
 
-  const loadBaselines = useCallback(async (offset: number) => {
-    setBaselinesError('')
-    try {
-      const page = await api.workInputBaselines(workId, { offset, limit: BASELINE_PAGE })
-      setBaselines(page)
-      setBaselinesOffset(offset)
-    } catch (reason) {
-      setBaselinesError(errorText(reason))
-    }
-  }, [api, workId])
-
   const loadArtifacts = useCallback(async (runId: string) => {
     setArtifactsError('')
     setArtifactsLoading(true)
@@ -2110,31 +2325,40 @@ function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOp
     }
   }, [])
 
-  const loadInputs = useCallback(async (runId: string, offset: number) => {
-    setInputsError('')
-    try {
-      const page = await api.runInputs(runId, { offset, limit: INPUT_PAGE })
-      setInputs(page)
-      setInputsOffset(offset)
-    } catch (reason) {
-      setInputs({ total: 0, items: [] })
-      setInputsError(errorText(reason))
-    }
-  }, [api])
-
   useEffect(() => { void loadContext() }, [loadContext])
   useEffect(() => { void loadRuns(0) }, [loadRuns])
-  useEffect(() => { void loadBaselines(0) }, [loadBaselines])
+
+  // 发布声明按需读取（W5/R2）：bootstrap 应用摘要不再携带 descriptor；详情页自己读
+  // /api/catalog/:appId，撤权或下架后读取失败时如实报错，绝不显示缓存的旧声明。
+  useEffect(() => {
+    if (!context) { setDecl(null); setDeclError(''); return undefined }
+    let live = true
+    setDecl(null)
+    void (async () => {
+      try {
+        const detail = await api.catalogRelease(context.app.appId, context.work.projectId)
+        if (!live) return
+        setDecl({
+          listingTypes: Array.isArray(detail.app.descriptor?.listingTypes) ? detail.app.descriptor.listingTypes : [],
+          resultViews: Array.isArray(detail.app.descriptor?.resultViews) ? detail.app.descriptor.resultViews : [],
+        })
+        setDeclError('')
+      } catch (reason) {
+        if (!live) return
+        setDecl(null)
+        setDeclError(errorText(reason))
+      }
+    })()
+    return () => { live = false }
+  }, [api, context])
+
   useEffect(() => {
     if (selectedRunId) {
       void loadArtifacts(selectedRunId)
-      void loadInputs(selectedRunId, 0)
     } else {
       setArtifacts([])
-      setInputs({ total: 0, items: [] })
-      setInputsOffset(0)
     }
-  }, [selectedRunId, loadArtifacts, loadInputs])
+  }, [selectedRunId, loadArtifacts])
   useEffect(() => { heading.current?.focus() }, [])
 
   const selectedRun = runs.items.find((run) => run.runId === selectedRunId) ?? null
@@ -2142,10 +2366,8 @@ function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOp
   const visibleArtifacts = artifacts.slice(artifactWindow.offset, artifactWindow.offset + ARTIFACT_PAGE)
   const artifactSummary = summarizeArtifacts(artifacts)
   const boundSessionId = context?.binding?.sessionId ?? context?.sessionId ?? null
-  const appDescriptor = context
-    ? data.apps.find((app) => app.appId === context.app.appId && app.appVersion === context.app.appVersion)?.descriptor
-    : undefined
-  const listingTypes = Array.isArray(appDescriptor?.listingTypes) ? appDescriptor.listingTypes : []
+  const listingTypes = decl?.listingTypes ?? []
+  const resultViews = decl?.resultViews ?? []
   const activeRun = runs.items.find((run) => {
     const state = run.snapshot?.state
     return state === 'QUEUED' || state === 'STARTING' || state === 'RUNNING'
@@ -2217,7 +2439,6 @@ function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOp
   const onRunCreated = async (runId: string) => {
     setSelectedRunId(runId)
     await loadRuns(0)
-    await loadBaselines(0)
     setInteractionToken((value) => value + 1)
   }
 
@@ -2252,7 +2473,7 @@ function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOp
             <span className="ec-wb-badge" data-tone={context?.work.state === 'ARCHIVED' ? 'muted' : 'ok'}>
               {context?.work.state === 'ARCHIVED' ? '已归档' : '使用中'}
             </span>
-            <Freshness at={lastLoadedAt} busy={runsLoading} onRefresh={() => { void loadContext(); void loadRuns(runsOffset); void loadBaselines(baselinesOffset) }} />
+            <Freshness at={lastLoadedAt} busy={runsLoading} onRefresh={() => { void loadContext(); void loadRuns(runsOffset) }} />
             <button type="button" className="ec-wb-button ec-wb-primary" onClick={openBound} disabled={!boundSessionId}>{bindBusy ? '正在创建对话…' : t('action.enterChat')}</button>
             <button type="button" className="ec-wb-button" onClick={() => void onReload()}>{t('action.refresh')}</button>
             <button type="button" className="ec-wb-button" disabled={archiveBusy || context?.work.state === 'ARCHIVED'} onClick={() => void archive()}>
@@ -2263,10 +2484,11 @@ function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOp
         <p className="ec-wb-status" role="status" aria-live="polite">{notice}{archiveNotice ? ` ${archiveNotice}` : ''}</p>
 
         {contextError ? <ErrorBox message={`无法读取工作上下文：${contextError}`} onRetry={() => void loadContext()} /> : null}
+        {declError ? <p className="ec-wb-muted" role="status">发布声明读取失败：{declError}。场景与结果视图暂不可选；不显示缓存的旧声明。</p> : null}
 
         <div className="ec-wb-detail">
           <div className="ec-wb-stack">
-            <DeliveryPointerCard api={api} baselines={baselines} runs={runs} />
+            <DeliveryPointerCard api={api} workId={workId} runs={runs} />
             {context && context.work.state !== 'ARCHIVED'
               ? (
                 <section className="ec-wb-card" aria-labelledby="ec-wb-bind">
@@ -2373,7 +2595,7 @@ function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOp
                 <ResultViewsCard
                   api={api}
                   run={selectedRun}
-                  resultViews={Array.isArray(appDescriptor?.resultViews) ? appDescriptor.resultViews : []}
+                  resultViews={resultViews}
                   comparableRunIds={runs.items
                     .filter((candidate) => candidate.runId !== selectedRun.runId && candidate.snapshot?.state === 'SUCCEEDED')
                     .map((candidate) => ({ runId: candidate.runId, label: `运行 ${candidate.runId.slice(0, 8)} · ${formatTime(candidate.createdAt)}` }))}
@@ -2457,67 +2679,18 @@ function WorkDetail({ api, data, workId, initialRunId, projectName, onBack, onOp
 
             <DeliveryPackagesCard api={api} workId={workId} runs={runs} workArchived={context?.work.state === 'ARCHIVED'} />
 
-            <section className="ec-wb-card" aria-labelledby="ec-wb-baselines">
-              <div className="ec-wb-card-head"><h2 id="ec-wb-baselines">输入批次</h2><span className="ec-wb-badge">{baselines.total}</span></div>
-              <p className="ec-wb-muted">批次只追加，不覆盖旧基线；旧执行始终对应它当时的输入摘要。</p>
-              {baselinesError
-                ? <ErrorBox message={`无法读取输入批次：${baselinesError}`} onRetry={() => void loadBaselines(baselinesOffset)} />
-                : baselines.items.length === 0
-                  ? <p className="ec-wb-empty">尚未登记输入批次。</p>
-                  : (
-                    <div>
-                      {baselines.items.map((baseline, index) => (
-                        <div className="ec-wb-row" key={baseline.baselineId}>
-                          <span className="ec-wb-row-main">
-                            <strong>第 {baseline.revision} 批 · {baseline.sourceRef}</strong>
-                            <small className="ec-wb-muted">{formatTime(baseline.createdAt)}
-                              {index > 0 && baseline.digest !== baselines.items[index - 1]?.digest ? ' · 与上一批不同' : ''}
-                              {index > 0 && baseline.digest === baselines.items[index - 1]?.digest ? ' · 与上一批摘要相同' : ''}
-                              <span className="ec-wb-expert-only"> · <span className="ec-wb-digest">{baseline.digest.slice(0, 12)}…</span></span>
-                            </small>
-                          </span>
-                        </div>
-                      ))}
-                      <Pager total={baselines.total} offset={baselinesOffset} limit={BASELINE_PAGE} busy={false} onOffset={(offset) => void loadBaselines(offset)} />
-                    </div>
-                  )}
-              {context && context.work.state !== 'ARCHIVED'
-                ? (
-                  <RerunForm
-                    api={api}
-                    workId={workId}
-                    catalog={data.models?.catalog}
-                    preference={data.models?.preference}
-                    hasWorkspace={!!context.workspace}
-                    activeRunId={activeRun?.runId ?? null}
-                    onCreated={(runId) => void onRunCreated(runId)}
-                  />
-                )
-                : null}
-            </section>
+            <InputBaselinesCard
+              api={api}
+              workId={workId}
+              catalog={data.models?.catalog}
+              preference={data.models?.preference}
+              hasWorkspace={!!context?.workspace}
+              activeRunId={activeRun?.runId ?? null}
+              allowRerun={context?.work.state !== 'ARCHIVED'}
+              onCreated={(runId) => void onRunCreated(runId)}
+            />
 
-            <section className="ec-wb-card" aria-labelledby="ec-wb-run-inputs">
-              <div className="ec-wb-card-head"><h2 id="ec-wb-run-inputs">本次执行输入</h2><span className="ec-wb-badge">{inputs.total}</span></div>
-              {!selectedRun
-                ? <p className="ec-wb-empty">选择一个运行后可查看该次执行接收的输入。</p>
-                : inputsError
-                  ? <ErrorBox message={`无法读取执行输入：${inputsError}`} onRetry={() => void loadInputs(selectedRun.runId, inputsOffset)} />
-                  : inputs.items.length === 0
-                    ? <p className="ec-wb-empty">该运行没有输入记录。</p>
-                    : (
-                      <div>
-                        {inputs.items.map((commit) => (
-                          <div className="ec-wb-row" key={commit.commitId}>
-                            <span className="ec-wb-row-main">
-                              <strong>#{commit.sequence}</strong>
-                              <small className="ec-wb-muted">{inputStateLabel(commit.state)}<span className="ec-wb-expert-only"> · <span className="ec-wb-digest">{commit.contentDigest.slice(0, 12)}…</span></span></small>
-                            </span>
-                          </div>
-                        ))}
-                        <Pager total={inputs.total} offset={inputsOffset} limit={INPUT_PAGE} busy={false} onOffset={(offset) => void loadInputs(selectedRun.runId, offset)} />
-                      </div>
-                    )}
-            </section>
+            <RunInputsCard api={api} runId={selectedRun?.runId ?? null} refreshToken={interactionToken} />
           </aside>
         </div>
       </div>
@@ -2976,14 +3149,13 @@ function RunEvents({ api, runId, token }: { api: WorkbenchApi; runId: string; to
   )
 }
 
-function WorkConsole({ api, workId, title, modelLabel, models, onBack, onDetail, onReload, initialRunId, onFocusRun, children }: {
+function WorkConsole({ api, workId, title, modelLabel, models, onBack, onReload, initialRunId, onFocusRun, children }: {
   api: WorkbenchApi
   workId: string
   title: string
   modelLabel: string
   models?: WorkbenchBootstrap['models']
   onBack(): void
-  onDetail(): void
   /** Refresh the shell bootstrap so the home counters reflect a run this console just changed. */
   onReload(): Promise<void>
   /** Run to focus on open — a refresh restore re-enters the run the employee had selected. */
@@ -3003,6 +3175,15 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onDetail,
   const [token, setToken] = useState(0)
   const [lastLoadedAt, setLastLoadedAt] = useState<number | null>(null)
   const [downloadNotice, setDownloadNotice] = useState('')
+  // W5 纵向切片：启动/问答/成果/复核都在右栏完成；「详情」是右栏内的展开而不是跳转页——
+  // 跳转会卸载原生会话，违背 R4「原生会话不卸载」。
+  const [runsLimit, setRunsLimit] = useState(5)
+  const [detailOpen, setDetailOpen] = useState(false)
+  const [showAllArtifacts, setShowAllArtifacts] = useState(false)
+  const [draftSeed, setDraftSeed] = useState('')
+  const [interactionToken, setInteractionToken] = useState(0)
+  const [decl, setDecl] = useState<{ listingTypes: string[]; resultViews: ResultViewDecl[] } | null>(null)
+  const [declError, setDeclError] = useState('')
   // SSE drives live run updates when connected; the 15s poll is the fallback. A ref lets the
   // mount-time interval read the latest liveness without re-subscribing.
   const sseLiveRef = useRef(false)
@@ -3011,7 +3192,7 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onDetail,
     try {
       const [resolved, page] = await Promise.all([
         api.workContext(workId),
-        api.workRuns(workId, { offset: 0, limit: 5 }),
+        api.workRuns(workId, { offset: 0, limit: runsLimit }),
       ])
       setContext(resolved)
       setRuns(page.items)
@@ -3027,7 +3208,7 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onDetail,
     } catch (reason) {
       setError(errorText(reason))
     }
-  }, [api, workId])
+  }, [api, workId, runsLimit])
 
   useEffect(() => { void load() }, [load, token])
   useEffect(() => {
@@ -3080,7 +3261,33 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onDetail,
     return () => { live = false }
   }, [api, selectedRunId, token])
 
+  // 发布声明按需读取（W5/R2）：与详情页同一规则——不缓存，撤权后如实报错，不显示旧声明。
+  useEffect(() => {
+    if (!context) { setDecl(null); setDeclError(''); return undefined }
+    let live = true
+    setDecl(null)
+    void (async () => {
+      try {
+        const detail = await api.catalogRelease(context.app.appId, context.work.projectId)
+        if (!live) return
+        setDecl({
+          listingTypes: Array.isArray(detail.app.descriptor?.listingTypes) ? detail.app.descriptor.listingTypes : [],
+          resultViews: Array.isArray(detail.app.descriptor?.resultViews) ? detail.app.descriptor.resultViews : [],
+        })
+        setDeclError('')
+      } catch (reason) {
+        if (!live) return
+        setDecl(null)
+        setDeclError(errorText(reason))
+      }
+    })()
+    return () => { live = false }
+  }, [api, context])
+
   const selectedRun = runs.find((run) => run.runId === selectedRunId) ?? null
+  // A run that is executing right now is a fact the employee must see even while they read live
+  // chat; recording it on the rail keeps "暂无" from contradicting the run history below it.
+  const activeRun = runs.find((run) => ['QUEUED', 'STARTING', 'RUNNING'].includes(String(run.snapshot?.state))) ?? null
   // Inspecting a run record shows that run's own frozen model, resolved to its catalog display name
   // — not the shell default, which only describes future live chat.
   const runModelLabel = selectedRun?.model
@@ -3099,6 +3306,13 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onDetail,
         ? { label: 'AI 对话', tone: 'muted' }
         : { label: '尚无运行记录', tone: 'muted' }
   const summary = summarizeArtifacts(artifacts)
+
+  /** 复核/问答/运行任一变化后同时刷新运行事实与登记面板；onReload 同步首页计数。 */
+  const refreshAll = useCallback(() => {
+    setToken((value) => value + 1)
+    setInteractionToken((value) => value + 1)
+    void onReload()
+  }, [onReload])
 
   return (
     <div className="ec-wb-console">
@@ -3119,17 +3333,10 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onDetail,
         </div>
         <div className="ec-wb-console-actions">
           <Freshness at={lastLoadedAt} onRefresh={() => setToken((value) => value + 1)} />
-          <div className="ec-wb-segmented" role="group" aria-label="中心内容">
-            <button type="button" aria-pressed={!selectedRun}
-              onClick={() => { setSelectedRunId(null); onFocusRun?.(null) }}>{t('label.liveChat')}</button>
-            <button type="button" aria-pressed={!!selectedRun} disabled={runs.length === 0}
-              title={runs.length === 0 ? '这项工作还没有运行记录' : undefined}
-              onClick={() => {
-                const target = selectedRunId ?? runs[0]?.runId ?? null
-                if (target) { setSelectedRunId(target); onFocusRun?.(target) }
-              }}>{t('label.runRecord')}</button>
-          </div>
-          <button type="button" className="ec-wb-button" onClick={onDetail}>{t('action.viewDetail')}</button>
+          <button type="button" className="ec-wb-button" aria-expanded={detailOpen} aria-controls="ec-wb-console-detail"
+            onClick={() => setDetailOpen((value) => !value)}>
+            {detailOpen ? '收起详情' : '详情'}
+          </button>
           <button type="button" className="ec-wb-button ec-wb-stop"
             disabled={!selectedRun || !!control.busy || terminal || state === 'UNKNOWN'}
             onClick={() => void control.act('cancel')}>
@@ -3139,22 +3346,23 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onDetail,
       </header>
 
       <div className="ec-wb-console-body">
-        {/* The center shows exactly one thing, and says which. A selected run shows its record;
-            with none selected the bound native conversation streams as usual. The switch above is
-            the explicit control — clicking a rail row is a shortcut, never the only way back. */}
+        {/* The center is always this Work's native conversation — history, live output and the
+            composer. Inspecting a run updates the rail only; it never unmounts the conversation. */}
         <div className="ec-wb-console-center">
-          {selectedRun
+          {activeRun
             ? (
-              <>
-                <div className="ec-wb-mode-banner" role="status">
-                  <span>{t('hint.viewingRunRecord')} · 运行 {selectedRun.runId.slice(0, 8)} · {runStateText(selectedRun.snapshot?.state)}</span>
-                  <button type="button" onClick={() => { setSelectedRunId(null); onFocusRun?.(null) }}>{t('hint.returnToChat')}</button>
-                </div>
-                <RunTranscript api={api} runId={selectedRun.runId} token={token} onRetryError={() => setToken((value) => value + 1)} />
-                <RunEvents api={api} runId={selectedRun.runId} token={token} />
-              </>
+              <div className="ec-wb-mode-banner" role="status">
+                <span>
+                  运行 {activeRun.runId.slice(0, 8)} {runStateText(activeRun.snapshot?.state)}
+                  ；实时对话只显示本工作的 AI 对话，运行活动在运行记录中。
+                </span>
+                <button type="button" onClick={() => { setSelectedRunId(activeRun.runId); onFocusRun?.(activeRun.runId) }}>
+                  在侧栏查看
+                </button>
+              </div>
             )
-            : <div className="ec-wb-console-thread">{children}</div>}
+            : null}
+          <div className="ec-wb-console-thread">{children}</div>
         </div>
         <aside className="ec-wb-console-rail" aria-label="运行信息">
           {error ? <ErrorBox message={`无法读取运行信息：${error}`} onRetry={() => setToken((value) => value + 1)} /> : null}
@@ -3169,7 +3377,25 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onDetail,
               <div className="ec-wb-fact-line"><span>开始时间</span><span>{selectedRun ? formatTime(selectedRun.createdAt) : '暂无'}</span></div>
               <div className="ec-wb-fact-line"><span>{selectedRun ? '运行模型' : '默认模型'}</span><span>{selectedRun ? runModelLabel : (modelLabel || '尚未登记')}</span></div>
               <div className="ec-wb-fact-line"><span>工作空间</span><span>{context?.workspace ? <>{context.workspace.name}<span className="ec-wb-expert-only"> · {context.workspace.directory}</span></> : '未选择'}</span></div>
+              {!selectedRun && activeRun
+                ? (
+                  <div className="ec-wb-fact-line">
+                    <span>活动运行</span>
+                    <span>{activeRun.runId.slice(0, 8)} · {runStateText(activeRun.snapshot?.state)}</span>
+                  </div>
+                )
+                : null}
             </div>
+            {!selectedRun && activeRun
+              ? (
+                <div className="ec-wb-form-actions">
+                  <button type="button" className="ec-wb-button"
+                    onClick={() => { setSelectedRunId(activeRun.runId); onFocusRun?.(activeRun.runId) }}>
+                    查看运行记录
+                  </button>
+                </div>
+              )
+              : null}
             {selectedRun && (terminal || state === 'UNKNOWN')
               ? (
                 <div className="ec-wb-form-actions">
@@ -3188,6 +3414,78 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onDetail,
             {control.notice ? <p className="ec-wb-muted" role="status">{control.notice}</p> : null}
           </section>
 
+          {/* The selected run's own record sits directly under its facts: selecting a run reveals
+              it without hunting down the rail. The center stays the native conversation. */}
+          {selectedRun
+            ? (
+              <>
+                <section className="ec-wb-card ec-wb-rail-record" aria-labelledby="ec-wb-console-record">
+                  <div className="ec-wb-card-head">
+                    <h3 id="ec-wb-console-record">运行记录 {selectedRun.runId.slice(0, 8)}</h3>
+                    <button type="button" className="ec-wb-link"
+                      onClick={() => { setSelectedRunId(null); onFocusRun?.(null) }}>收起</button>
+                  </div>
+                  <RunTranscript api={api} runId={selectedRun.runId} token={token} onRetryError={() => setToken((value) => value + 1)} />
+                </section>
+                <RunEvents api={api} runId={selectedRun.runId} token={token} />
+                <KnowledgeBasisCard api={api} runId={selectedRun.runId} />
+              </>
+            )
+            : null}
+
+          {declError ? <p className="ec-wb-muted" role="status">发布声明读取失败：{declError}。场景与结果视图暂不可选；不显示缓存的旧声明。</p> : null}
+
+          {/* W5 纵向切片——复核在右栏完成：面板先读复核记录携带的目标清单，决定随清单提交。 */}
+          {selectedRun
+            ? <ReviewPanel api={api} run={selectedRun} onChanged={refreshAll} />
+            : null}
+
+          {/* W5——问答回复在右栏完成；答复登记不当作引擎接收，未知不自动重投。 */}
+          {selectedRun
+            ? (
+              <InteractionPanel
+                api={api}
+                runId={selectedRun.runId}
+                refreshToken={interactionToken}
+                onChanged={refreshAll}
+              />
+            )
+            : null}
+
+          {selectedRun
+            ? (
+              <ResultViewsCard
+                api={api}
+                run={selectedRun}
+                resultViews={decl?.resultViews ?? []}
+                comparableRunIds={runs
+                  .filter((candidate) => candidate.runId !== selectedRun.runId && candidate.snapshot?.state === 'SUCCEEDED')
+                  .map((candidate) => ({ runId: candidate.runId, label: `运行 ${candidate.runId.slice(0, 8)} · ${formatTime(candidate.createdAt)}` }))}
+              />
+            )
+            : null}
+
+          <DeliveryPackagesCard api={api} workId={workId} runs={{ total: runsTotal, items: runs }} workArchived={archived} />
+
+          {!archived
+            ? (
+              <>
+                <DraftPanel api={api} workId={workId} onUseDraft={setDraftSeed} />
+                <RunLauncher
+                  api={api}
+                  workId={workId}
+                  catalog={models?.catalog}
+                  preference={models?.preference}
+                  hasWorkspace={!!context?.workspace && !archived}
+                  listingTypes={decl?.listingTypes ?? []}
+                  activeRunId={activeRun?.runId ?? null}
+                  initialText={draftSeed}
+                  onCreated={(runId) => { setSelectedRunId(runId); onFocusRun?.(runId); refreshAll() }}
+                />
+              </>
+            )
+            : null}
+
           <section className="ec-wb-card" aria-labelledby="ec-wb-console-artifacts">
             <div className="ec-wb-card-head">
               <h3 id="ec-wb-console-artifacts">文件成果</h3>
@@ -3205,7 +3503,7 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onDetail,
                     <>
                       <p className="ec-wb-muted">已封存 {summary.sealed} 项，共 {formatBytes(summary.bytes)}。</p>
                       <div>
-                        {artifacts.slice(0, 5).map((artifact) => (
+                        {artifacts.slice(0, showAllArtifacts ? artifacts.length : 5).map((artifact) => (
                           <div className="ec-wb-artifact-row" key={artifact.name}>
                             <span className="ec-wb-file-dot" aria-hidden="true">{(artifact.name.split('.').pop() ?? 'f').slice(0, 1)}</span>
                             <span className="ec-wb-row-main">
@@ -3222,7 +3520,14 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onDetail,
                           </div>
                         ))}
                       </div>
-                      {artifacts.length > 5 ? <button type="button" className="ec-wb-text-link" onClick={onDetail}>查看全部 {artifacts.length} 项</button> : null}
+                      {artifacts.length > (showAllArtifacts ? 0 : 5)
+                        ? (
+                          <button type="button" className="ec-wb-text-link" aria-expanded={showAllArtifacts}
+                            onClick={() => setShowAllArtifacts((value) => !value)}>
+                            {showAllArtifacts ? '收起' : `查看全部 ${artifacts.length} 项`}
+                          </button>
+                        )
+                        : null}
                     </>
                   )}
             {downloadNotice ? <p className="ec-wb-error-text" role="alert">{downloadNotice}</p> : null}
@@ -3254,8 +3559,39 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onDetail,
                   </span>
                 </button>
               ))}
-            {runsTotal > runs.length ? <button type="button" className="ec-wb-text-link" onClick={onDetail}>查看全部 {runsTotal} 次运行</button> : null}
+            {runsTotal > runs.length && runsLimit < 100
+              ? <button type="button" className="ec-wb-text-link" onClick={() => setRunsLimit(100)}>查看全部 {runsTotal} 次运行</button>
+              : null}
+            {runsLimit > 5
+              ? <button type="button" className="ec-wb-text-link" onClick={() => setRunsLimit(5)}>收起</button>
+              : null}
+            {runsTotal > runsLimit
+              ? <p className="ec-wb-muted">已显示最近 {runs.length} 次运行；其余 {runsTotal - runs.length} 次更早的运行未列出。</p>
+              : null}
           </section>
+
+          {/* 详情在右栏内展开（R4）：打开/切换/收起都不导航、不卸载原生会话；展开的是
+              工作上下文事实（指针、输入批次、执行输入），不是另一个页面。 */}
+          <div id="ec-wb-console-detail" role="region" aria-label="工作详情" hidden={!detailOpen}>
+            {detailOpen
+              ? (
+                <>
+                  <DeliveryPointerCard api={api} workId={workId} runs={{ total: runsTotal, items: runs }} />
+                  <InputBaselinesCard
+                    api={api}
+                    workId={workId}
+                    catalog={models?.catalog}
+                    preference={models?.preference}
+                    hasWorkspace={!!context?.workspace && !archived}
+                    activeRunId={activeRun?.runId ?? null}
+                    allowRerun={!archived}
+                    onCreated={(runId) => { setSelectedRunId(runId); onFocusRun?.(runId); refreshAll() }}
+                  />
+                  <RunInputsCard api={api} runId={selectedRun?.runId ?? null} refreshToken={token} />
+                </>
+              )
+              : null}
+          </div>
         </aside>
       </div>
     </div>
@@ -3266,107 +3602,6 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onDetail,
 
 /** The home launch entry. Quick targets are the applications this employee actually used most
  *  recently (falling back to the published catalogue), never a hard-coded product list. */
-function LaunchPanel({ data, projectId, onProjectChange, onStart }: {
-  data: WorkbenchBootstrap
-  projectId: string
-  onProjectChange(projectId: string): void
-  onStart(appKey?: string): void
-}) {
-  const projects = data.projects ?? []
-  const apps = (data.apps ?? []).filter((app) => app.state === 'ACTIVE')
-  const labelOf = (appId: string, appVersion: string) => {
-    const app = apps.find((candidate) => candidate.appId === appId && candidate.appVersion === appVersion)
-    return app?.descriptor?.displayName ?? app?.displayName ?? appId
-  }
-  const used: string[] = []
-  for (const work of byRecent(data.works?.items ?? [])) {
-    const key = `${work.appId}|${work.appVersion}`
-    if (!used.includes(key) && apps.some((app) => `${app.appId}|${app.appVersion}` === key)) used.push(key)
-  }
-  const quick = (used.length > 0 ? used : apps.map((app) => `${app.appId}|${app.appVersion}`)).slice(0, 3)
-  const modelLabel = defaultModelLabel(data.models)
-
-  return (
-    <section className="ec-wb-card ec-wb-launch" aria-labelledby="ec-wb-launch-entry">
-      <div className="ec-wb-launch-intro">
-        <div className="ec-wb-launch-title">
-          <span className="ec-wb-orb" aria-hidden="true">{GLYPH_SPARK}</span>
-          <div>
-            <div className="ec-wb-launch-label">AI 工作入口</div>
-            <h2 id="ec-wb-launch-entry">你现在想完成什么？</h2>
-            <p className="ec-wb-launch-desc">说明目标即可，AI 会使用已发布的专业应用与工具。</p>
-          </div>
-        </div>
-        {quick.length > 0
-          ? (
-            <div className="ec-wb-quick">
-              <span>{used.length > 0 ? '最近使用' : '可用应用'}</span>
-              {quick.map((key) => {
-                const [appId, appVersion] = key.split('|')
-                return (
-                  <button type="button" className="ec-wb-quick-target" key={key} onClick={() => onStart(key)}>
-                    <b aria-hidden="true">↗</b>{labelOf(appId, appVersion)}
-                  </button>
-                )
-              })}
-            </div>
-          )
-          : <p className="ec-wb-muted">当前没有可用的应用发布；应用中心会显示平台已登记的应用。</p>}
-      </div>
-      <div className="ec-wb-launch-controls">
-        <span className="ec-wb-field-label">选择工作项目</span>
-        {projects.length === 0
-          ? <p className="ec-wb-empty">尚未创建项目。请先在「项目空间」登记。</p>
-          : (
-            <select className="ec-wb-select" aria-label="选择工作项目" value={projectId}
-              onChange={(event) => onProjectChange(event.target.value)}>
-              {projects.map((project) => <option key={project.projectId} value={project.projectId}>{project.name}</option>)}
-            </select>
-          )}
-        <div className="ec-wb-model-row"><span>默认模型</span><strong>{modelLabel ?? '尚未登记'}</strong></div>
-        <button type="button" className="ec-wb-launch-go" disabled={projects.length === 0} onClick={() => onStart()}>
-          新建工作 <span aria-hidden="true">↗</span>
-        </button>
-      </div>
-    </section>
-  )
-}
-
-/** What the platform can actually do right now. Every line is a recorded fact: an unpublished
- *  catalogue or an unconfigured executor is shown as pending, never as ready. */
-function ReadinessPanel({ data, onOpenSettings }: { data: WorkbenchBootstrap; onOpenSettings(): void }) {
-  const apps = (data.apps ?? []).filter((app) => app.state === 'ACTIVE').length
-  const models = modelChoices(data.models?.catalog, data.models?.preference).filter((choice) => choice.available).length
-  const executor = data.status?.executor
-  const executorReady = typeof executor === 'string' && executor.length > 0 && executor !== 'not-configured'
-  const ready = apps > 0 && models > 0 && executorReady
-  const lines: Array<{ tone: 'ok' | 'pending'; text: string }> = [
-    { tone: apps > 0 ? 'ok' : 'pending', text: apps > 0 ? `应用目录已加载 · ${apps} 个可用` : '尚无可用的应用发布' },
-    { tone: models > 0 ? 'ok' : 'pending', text: models > 0 ? `模型目录可选择 · ${models} 个可用` : '模型目录尚未登记' },
-    { tone: executorReady ? 'ok' : 'pending', text: executorReady ? `Worker 执行器 ${executor}` : 'Worker 执行器尚未配置' },
-  ]
-  return (
-    <section className="ec-wb-card" aria-labelledby="ec-wb-readiness">
-      <div className="ec-wb-readiness-top">
-        <h3 id="ec-wb-readiness">运行就绪</h3>
-        <span className="ec-wb-state-tag" data-tone={ready ? 'ok' : 'warn'}>{ready ? '可以发起运行' : '执行器待配置'}</span>
-      </div>
-      <p className="ec-wb-muted">开始运行前，平台将确认当前环境能力。</p>
-      <div className="ec-wb-checks">
-        {lines.map((line) => (
-          <div className="ec-wb-checkline" key={line.text}>
-            <span className="ec-wb-tick" data-tone={line.tone} aria-hidden="true">{line.tone === 'ok' ? GLYPH_CHECK : '…'}</span>
-            {line.text}
-          </div>
-        ))}
-      </div>
-      <button type="button" className="ec-wb-readiness-link" onClick={onOpenSettings}>
-        <span>查看平台状态</span><span aria-hidden="true">›</span>
-      </button>
-    </section>
-  )
-}
-
 /** One page of the full Works list. The control plane caps a page, so "load all" keeps asking
  *  until it has every record instead of searching a silently truncated set. */
 const WORKS_PAGE = 100
@@ -3375,10 +3610,12 @@ const WORKS_LOAD_CAP = 5000
 /** The Works queue: live search over title/project/application, a state filter and three orders,
  *  one row per Work with its latest recorded run state. A Work with no run record says so instead
  *  of implying progress, and a partially loaded catalogue is labelled as partial. */
-function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
+function WorksQueue({ api, data, projectId, latest, onOpenWork, onDetail, opening }: {
   api: WorkbenchApi
   data: WorkbenchBootstrap
-  onOpenWork(workId: string): void
+  projectId: string
+  latest: ReadonlyMap<string, RunSummary>
+  onOpenWork(workId: string, runId?: string): void
   onDetail(work: WorkbenchItem): void
   opening: string
 }) {
@@ -3390,12 +3627,10 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
   const [loadError, setLoadError] = useState('')
 
   const projects = data.projects ?? []
-  const runs = data.runs?.items ?? []
-  const now = Date.now()
   const projectName = (id: string) => projects.find((project) => project.projectId === id)?.name ?? id
   const appLabel = (appId: string, appVersion: string) => {
     const app = (data.apps ?? []).find((candidate) => candidate.appId === appId && candidate.appVersion === appVersion)
-    return app?.descriptor?.displayName ?? app?.displayName ?? appId
+    return app?.displayName ?? appId
   }
 
   // Bootstrap records are fresher than anything loaded earlier, so they win on id; records only
@@ -3427,12 +3662,15 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
   const [serverError, setServerError] = useState('')
   const serverState = stateFilter === 'active' ? 'ACTIVE' : stateFilter === 'archived' ? 'ARCHIVED' : undefined
   useEffect(() => {
-    if (!serverQuery) { setServer(null); setServerError(''); return undefined }
+    setServer(null)
+    setServerError('')
+    setServerBusy(Boolean(serverQuery || projectId))
+    if (!serverQuery && !projectId) return undefined
     const controller = new AbortController()
     const timer = setTimeout(() => {
       setServerBusy(true)
       api.queryWorks(
-        { q: serverQuery, ...(serverState ? { state: serverState } : {}) },
+        { q: serverQuery, projectId, ...(serverState ? { state: serverState } : {}) },
         controller.signal,
       )
         .then((page) => {
@@ -3443,7 +3681,7 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
         .catch((reason) => {
           if (controller.signal.aborted || (reason as Error)?.name === 'AbortError') return
           setServer(null)
-          setServerError(`服务器搜索失败：${errorText(reason)}`)
+          setServerError(`${t('home.loadError')}: ${errorText(reason)}`)
         })
         .finally(() => {
           if (!controller.signal.aborted) setServerBusy(false)
@@ -3452,27 +3690,33 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
     return () => { controller.abort(); clearTimeout(timer) }
     // toRow/serverState derive from data and stateFilter; the query string is the real trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serverQuery, stateFilter])
+  }, [api, serverQuery, projectId, stateFilter])
+  const nextPage = useRef<AbortController | null>(null)
+  useEffect(() => () => nextPage.current?.abort(), [api, serverQuery, projectId, stateFilter])
   const loadMore = async () => {
-    if (!server?.cursor || !serverQuery) return
+    if (!server?.cursor || serverBusy) return
+    const request = new AbortController()
+    nextPage.current?.abort()
+    nextPage.current = request
     setServerBusy(true)
     try {
       const page = await api.queryWorks({
-        q: serverQuery,
+        q: serverQuery, projectId,
         ...(serverState ? { state: serverState } : {}),
         cursor: server.cursor,
-      })
+      }, request.signal)
+      if (request.signal.aborted) return
       setServer((prev) => (prev
         ? { rows: [...prev.rows, ...page.items.map(toRow)], items: [...prev.items, ...page.items], cursor: page.nextCursor }
         : prev))
     } catch (reason) {
-      setServerError(`未能加载更多结果：${errorText(reason)}`)
+      if (!request.signal.aborted) setServerError(`${t('home.loadError')}: ${errorText(reason)}`)
     } finally {
-      setServerBusy(false)
+      if (!request.signal.aborted) setServerBusy(false)
     }
   }
-  const serverMode = serverQuery.length > 0
-  const visible = serverMode && server ? server.rows : selectWorkRows(rows, { query, state: stateFilter, sort })
+  const serverMode = serverQuery.length > 0 || Boolean(projectId)
+  const visible = serverMode ? (server?.rows ?? []) : selectWorkRows(rows, { query, state: stateFilter, sort })
   // Server hits may sit outside the bootstrap page; they must still open, so they join byId.
   const byId = new Map([...all, ...(server?.items ?? [])].map((work) => [work.workId, work]))
   const archivedCount = all.filter((work) => work.state === 'ARCHIVED').length
@@ -3492,19 +3736,19 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
       }
       setExtra([...collected.values()])
       if (offset >= WORKS_LOAD_CAP && offset < total) {
-        setLoadError(`工作数量超过单次加载上限 ${WORKS_LOAD_CAP} 项，已加载前 ${offset} 项；请用搜索缩小范围。`)
+        setLoadError(`${t('home.limit')} (${offset}/${total})`)
       }
     } catch (reason) {
-      setLoadError(`未能加载全部工作：${errorText(reason)}`)
+      setLoadError(`${t('home.loadError')}: ${errorText(reason)}`)
     } finally {
       setLoadingAll(false)
     }
   }
 
   const stateOf = (work: WorkbenchItem): { label: string; tone: string } => {
-    const run = runs.find((candidate) => candidate.workId === work.workId)
+    const run = latest.get(work.workId)
     if (run) return { label: runStateText(run.snapshot?.state), tone: runTone(run.snapshot?.state) }
-    return work.state === 'ARCHIVED' ? { label: '已归档', tone: 'muted' } : { label: '未发起运行', tone: 'muted' }
+    return work.state === 'ARCHIVED' ? { label: t('home.archived'), tone: 'muted' } : { label: t('home.noRun'), tone: 'muted' }
   }
 
   const resetFilters = () => { setQuery(''); setStateFilter('active'); setSort('recent') }
@@ -3514,8 +3758,7 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
     <section className="ec-wb-card ec-wb-queue" aria-labelledby="ec-wb-queue">
       <div className="ec-wb-queue-head">
         <div>
-          <h2 id="ec-wb-queue">继续最近的工作</h2>
-          <p className="ec-wb-muted">所有运行进度与工作成果都留在项目空间中。</p>
+          <h2 id="ec-wb-queue">{t('home.recent')}</h2>
         </div>
         <div className="ec-wb-queue-tools">
           <div className="ec-wb-search">
@@ -3523,28 +3766,28 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
             <input
               className="ec-wb-input ec-wb-search-input"
               type="search"
-              aria-label="搜索工作、项目或应用"
-              placeholder="搜索工作、项目或应用"
+              aria-label={t('home.search')}
+              placeholder={t('home.search')}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
             />
             {query
-              ? <button type="button" className="ec-wb-search-clear" aria-label="清除搜索" onClick={() => setQuery('')}>×</button>
+              ? <button type="button" className="ec-wb-search-clear" aria-label={t('home.clearSearch')} onClick={() => setQuery('')}>×</button>
               : null}
           </div>
-          <select className="ec-wb-select ec-wb-queue-select" aria-label="按状态筛选"
+          <select className="ec-wb-select ec-wb-queue-select" aria-label={t('home.filter')}
             value={stateFilter} onChange={(event) => setStateFilter(event.target.value as 'active' | 'archived' | 'all')}>
-            <option value="active">进行中</option>
-            <option value="archived">已归档{archivedCount > 0 ? ` (${archivedCount})` : ''}</option>
-            <option value="all">全部状态</option>
+            <option value="active">{t('home.active')}</option>
+            <option value="archived">{t('home.archived')}{archivedCount > 0 ? ` (${archivedCount})` : ''}</option>
+            <option value="all">{t('home.allStates')}</option>
           </select>
-          <select className="ec-wb-select ec-wb-queue-select" aria-label="排序方式"
+          <select className="ec-wb-select ec-wb-queue-select" aria-label={t('home.sort')}
             value={sort} disabled={serverMode}
-            title={serverMode ? '搜索结果由服务器按最近活动排序' : undefined}
+            title={serverMode ? t('home.serverSort') : undefined}
             onChange={(event) => setSort(event.target.value as 'recent' | 'title' | 'project')}>
-            <option value="recent">最近活动</option>
-            <option value="title">工作名称</option>
-            <option value="project">按项目</option>
+            <option value="recent">{t('home.activity')}</option>
+            <option value="title">{t('home.name')}</option>
+            <option value="project">{t('home.byProject')}</option>
           </select>
         </div>
       </div>
@@ -3554,15 +3797,15 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
             <p className="ec-wb-empty">
               {serverMode
                 ? (server
-                  ? '服务器全库搜索没有匹配的工作。换个关键词，或放宽状态筛选。'
-                  : serverError || '正在服务器上搜索…')
+                  ? t('home.noMatches')
+                  : serverError ? t('home.loadError') : t('home.querying'))
                 : all.length === 0
-                  ? '还没有工作。用上方入口新建一项；打开工作即可直接对话。'
+                  ? t('home.empty')
                   : filtering && missing > 0
-                    ? `已加载的 ${all.length} 项里没有匹配；其余 ${missing} 项尚未加载，可能就在其中。`
+                    ? `${t('home.partial')} (${all.length}/${total})`
                     : filtering
-                      ? '没有匹配的工作。换个关键词，或放宽状态筛选。'
-                      : `没有进行中的工作。已归档的 ${archivedCount} 项记录与成果仍可查阅。`}
+                      ? t('home.noMatches')
+                      : t('home.noActive')}
             </p>
             {all.length > 0
               ? (
@@ -3571,13 +3814,13 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
                     ? (
                       <button type="button" className="ec-wb-button ec-wb-primary" disabled={loadingAll}
                         onClick={() => void loadAll()}>
-                        {loadingAll ? '正在加载…' : `加载其余 ${missing} 项后再搜索`}
+                        {loadingAll ? t('home.loading') : `${t('home.more')} (${missing})`}
                       </button>
                     )
                     : null}
-                  {filtering ? <button type="button" className="ec-wb-button" onClick={resetFilters}>清除筛选</button> : null}
+                  {filtering ? <button type="button" className="ec-wb-button" onClick={resetFilters}>{t('home.reset')}</button> : null}
                   {stateFilter === 'active' && archivedCount > 0
-                    ? <button type="button" className="ec-wb-button" onClick={() => setStateFilter('archived')}>查看已归档 {archivedCount} 项</button>
+                    ? <button type="button" className="ec-wb-button" onClick={() => setStateFilter('archived')}>{t('home.archived')} ({archivedCount})</button>
                     : null}
                 </div>
               )
@@ -3585,32 +3828,33 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
           </div>
         )
         : (
-          <div className="ec-wb-table" role="table" aria-label="最近工作" aria-busy={opening !== '' || serverBusy}>
+          <div className="ec-wb-table" role="table" aria-label={t('home.recent')} aria-busy={opening !== '' || serverBusy}>
             <div className="ec-wb-table-head" role="row">
-              <span role="columnheader">工作</span>
-              <span role="columnheader">专业应用</span>
-              <span role="columnheader">运行状态</span>
-              <span role="columnheader">最近活动</span>
-              <span role="columnheader"><span className="ec-wb-sr">操作</span></span>
+              <span role="columnheader">{t('home.work')}</span>
+              <span role="columnheader">{t('home.app')}</span>
+              <span role="columnheader">{t('home.run')}</span>
+              <span role="columnheader">{t('home.activity')}</span>
+              <span role="columnheader"><span className="ec-wb-sr">{t('home.actions')}</span></span>
             </div>
             {visible.map((row) => {
               const work = byId.get(row.workId)
               if (!work) return null
               const state = stateOf(work)
+              const failedRun = work.state === 'ACTIVE' && latest.get(work.workId)?.snapshot?.state === 'FAILED' ? latest.get(work.workId) : undefined
               return (
                 <div className="ec-wb-work-row" role="row" key={row.workId}>
                   <span className="ec-wb-work-name" role="cell">
                     <span className="ec-wb-work-icon" aria-hidden="true">{monogram(row.title)}</span>
-                    <button type="button" className="ec-wb-work-open" onClick={() => onOpenWork(row.workId)}>
+                    <button type="button" className="ec-wb-work-open" disabled={Boolean(opening)} onClick={() => onOpenWork(row.workId)}>
                       <strong>{row.title}</strong>
                       <small>{row.projectName}</small>
                     </button>
                   </span>
                   <span className="ec-wb-app-cell" role="cell">{row.appName}</span>
                   <span role="cell"><span className="ec-wb-state" data-tone={state.tone}>{state.label}</span></span>
-                  <span className="ec-wb-updated" role="cell">{relativeTime(row.updatedAt, now)}</span>
+                  <span className="ec-wb-updated" role="cell">{formatTime(row.updatedAt)}</span>
                   <span className="ec-wb-work-tail" role="cell">
-                    <button type="button" className="ec-wb-button" onClick={() => onDetail(work)}>详情</button>
+                    <button type="button" className="ec-wb-button" disabled={Boolean(opening)} onClick={() => failedRun ? onOpenWork(work.workId, failedRun.runId) : onDetail(work)}>{failedRun ? t('home.failure') : t('home.details')}</button>
                   </span>
                 </div>
               )
@@ -3622,24 +3866,24 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
       <div className="ec-wb-queue-foot">
         <i aria-hidden="true" />
         <span aria-live="polite">
-          {filtering ? `筛选出 ${visible.length} 项` : `${visible.length} 项工作`}
-          {serverMode || complete ? '' : ` · 已加载 ${all.length}/${total}`}
+          {t('home.shown')}: {visible.length}
+          {serverMode || complete ? '' : ` / ${t('home.loaded')}: ${all.length}/${total}`}
         </span>
         {serverMode
           ? (server?.cursor
             ? (
               <button type="button" className="ec-wb-text-link ec-wb-foot-right" disabled={serverBusy} onClick={() => void loadMore()}>
-                {serverBusy ? '正在加载…' : '加载更多结果'}
+                {serverBusy ? t('home.loading') : t('home.more')}
               </button>
             )
-            : <span className="ec-wb-foot-right">服务器搜索：没有更多结果</span>)
+            : server ? <span className="ec-wb-foot-right">{t('home.end')}</span> : null)
           : !complete
             ? (
               <button type="button" className="ec-wb-text-link ec-wb-foot-right" disabled={loadingAll} onClick={() => void loadAll()}>
-                {loadingAll ? '正在加载全部工作…' : `加载全部 ${total} 项后再搜索`}
+                {loadingAll ? t('home.loading') : `${t('home.more')} (${missing})`}
               </button>
             )
-            : <span className="ec-wb-foot-right">运行记录由平台持续更新</span>}
+            : null}
       </div>
     </section>
   )
@@ -3648,7 +3892,7 @@ function WorksQueue({ api, data, onOpenWork, onDetail, opening }: {
 function WorksPage({ api, data, onOpenWork, onDetail, onOpenPending, onCreate, onReload, creating, opening, projectId, onProjectChange, initialAppKey, onCreated, onCancelCreate, onNavigate }: {
   api: WorkbenchApi
   data: WorkbenchBootstrap
-  onOpenWork(workId: string): void
+  onOpenWork(workId: string, runId?: string): void
   onDetail(work: WorkbenchItem, runId?: string): void
   onOpenPending(workId: string, runId: string): void
   onCreate(appKey?: string): void
@@ -3665,21 +3909,25 @@ function WorksPage({ api, data, onOpenWork, onDetail, onOpenPending, onCreate, o
   const projects = data.projects ?? []
   const works = data.works?.items ?? []
   const todos = data.todos ?? []
+  const [scope, setScope] = useState('')
+  const selectedScope = projects.some((project) => project.projectId === scope) ? scope : ''
+  const scopedProjects = selectedScope ? projects.filter((project) => project.projectId === selectedScope) : projects
   const pendingTitles = usePendingWorkTitles(api, todos, works)
-  const activeProject = projects.find((project) => project.projectId === projectId) ?? projects[0]
+  const activeProject = projects.find((project) => project.projectId === (selectedScope || projectId)) ?? projects[0]
+  const latest = latestHomeRuns(data.runs?.items ?? [])
+  const priority = homePriority(selectedScope ? works.filter((work) => work.projectId === selectedScope) : works, latest, todos)
 
   return (
     <div className="ec-wb-page ec-wb-page-home">
-      <header className="ec-wb-hero">
-        <div>
-          <div className="ec-wb-eyebrow">{todayLabel(Date.now())}</div>
-          <h1>今天，研究工作进展如何？</h1>
-          <p>从手头的项目继续，或让 AI 从一个清晰目标开始协作。</p>
-        </div>
-        <div className="ec-wb-hero-actions">
-          {activeProject ? <span className="ec-wb-chip">工作区 · {activeProject.name}</span> : null}
-          <button type="button" className="ec-wb-button" onClick={() => onNavigate('projects')}>项目空间</button>
-          <button type="button" className="ec-wb-button ec-wb-primary ec-wb-hero-cta" onClick={() => onCreate()}>＋ 新建工作</button>
+      <header className="ec-wb-home-header">
+        <h1>{t('nav.works')}</h1>
+        <div className="ec-wb-home-actions">
+          <select className="ec-wb-select" aria-label={t('home.projectFilter')} value={selectedScope}
+            disabled={creating} onChange={(event) => setScope(event.target.value)}>
+            <option value="">{t('home.allProjects')}</option>
+            {projects.map((project) => <option key={project.projectId} value={project.projectId}>{project.name}</option>)}
+          </select>
+          {!creating ? <button type="button" className="ec-wb-button ec-wb-primary" onClick={() => onCreate()}>{t('home.new')}</button> : null}
         </div>
       </header>
 
@@ -3698,61 +3946,53 @@ function WorksPage({ api, data, onOpenWork, onDetail, onOpenPending, onCreate, o
               />
             )
             : null}
-          {opening ? <p className="ec-wb-muted" role="status">正在打开工作…</p> : null}
-          {/* Continue-first: returning employees see their works before the new-work launcher. */}
-          <WorksQueue api={api} data={data} onOpenWork={onOpenWork} onDetail={onDetail} opening={opening} />
-          <LaunchPanel data={data} projectId={activeProject?.projectId ?? ''} onProjectChange={onProjectChange} onStart={onCreate} />
+          {opening ? <p className="ec-wb-muted" role="status">{t('home.opening')}</p> : null}
+          {priority ? (
+            <section className="ec-wb-home-priority" aria-labelledby="ec-wb-home-priority">
+              <h2 id="ec-wb-home-priority">{t('home.priority')}</h2>
+              <div className="ec-wb-home-slip" data-failed={priority.kind === 'failed'}>
+                <div>
+                  <span>{t(priority.kind === 'failed' ? 'status.FAILED' : 'nav.pending')}</span>
+                  <strong>{priority.work.title}</strong>
+                  <p>{t(priority.kind === 'failed' ? 'home.failedHint' : 'home.todoHint')}</p>
+                </div>
+                <button type="button" className="ec-wb-button" disabled={Boolean(opening)} onClick={() => {
+                  if (priority.kind === 'failed') onOpenWork(priority.work.workId, priority.runId)
+                  else onOpenPending(priority.work.workId, priority.runId)
+                }}>{t(priority.kind === 'failed' ? 'home.failure' : 'home.openTodo')}</button>
+              </div>
+            </section>
+          ) : null}
+          <WorksQueue key={selectedScope} api={api} data={data} projectId={selectedScope} latest={latest}
+            onOpenWork={onOpenWork} onDetail={onDetail} opening={opening} />
         </div>
 
-        <aside className="ec-wb-rail" aria-label="待处理、运行就绪与项目">
-          <section className="ec-wb-card" aria-labelledby="ec-wb-pending-home">
+        <aside className="ec-wb-rail ec-wb-home-context" aria-label={t('home.context')}>
+          <section aria-labelledby="ec-wb-projects-home">
             <div className="ec-wb-card-head">
-              <h3 id="ec-wb-pending-home">需要你处理</h3>
-              <span className="ec-wb-badge" data-tone={todos.length > 0 ? 'warn' : undefined}>{todos.length}</span>
+              <h2 id="ec-wb-projects-home">{t('nav.projects')}</h2>
+              <button type="button" className="ec-wb-text-link" onClick={() => onNavigate('projects')}>{t('home.allProjects')}</button>
             </div>
-            {todos.length === 0
-              ? (
-                <div className="ec-wb-pending-empty">
-                  <span className="ec-wb-empty-icon" aria-hidden="true">{GLYPH_CHECK}</span>
-                  <p>目前没有等待处理的事项。<small>AI 需要你参与时，会在这里提醒。</small></p>
-                </div>
-              )
-              : <UnifiedTodoList items={todos} works={works} titles={pendingTitles} onOpen={onOpenPending} />}
+            {scopedProjects.length === 0 ? <p className="ec-wb-muted">{t('home.noProjects')}</p> : scopedProjects.slice(0, 4).map((project) => (
+              <button type="button" className="ec-wb-project-row" key={project.projectId}
+                onClick={() => { onProjectChange(project.projectId); onNavigate('projects') }}>
+                <span className="ec-wb-row-main"><strong>{project.name}</strong>{project.code ? <small>{project.code}</small> : null}</span>
+                <span className="ec-wb-row-tail" aria-hidden="true">›</span>
+              </button>
+            ))}
           </section>
-
-          <ReadinessPanel data={data} onOpenSettings={() => onNavigate('settings')} />
-
-          <section className="ec-wb-card" aria-labelledby="ec-wb-projects-home">
+          <section aria-labelledby="ec-wb-pending-home">
             <div className="ec-wb-card-head">
-              <h3 id="ec-wb-projects-home">我的项目</h3>
-              <button type="button" className="ec-wb-text-link" onClick={() => onNavigate('projects')}>查看全部</button>
+              <h2 id="ec-wb-pending-home">{t('nav.pending')}</h2>
+              {data.todos ? <span className="ec-wb-badge">{todos.length}</span> : null}
             </div>
-            {projects.length === 0
-              ? <p className="ec-wb-empty">尚未创建项目。登记项目后即可组织工作与空间。</p>
-              : projects.slice(0, 4).map((project) => (
-                <button type="button" className="ec-wb-project-row" key={project.projectId}
-                  onClick={() => { onProjectChange(project.projectId); onNavigate('projects') }}>
-                  <span className="ec-wb-monogram" aria-hidden="true">{monogram(project.name)}</span>
-                  <span className="ec-wb-row-main">
-                    <strong>{project.name}</strong>
-                    <small>{works.filter((work) => work.projectId === project.projectId && work.state !== 'ARCHIVED').length} 项工作{project.code ? ` · ${project.code}` : ''}</small>
-                  </span>
-                  <span className="ec-wb-row-tail" aria-hidden="true">›</span>
-                </button>
-              ))}
-            <button type="button" className="ec-wb-project-link" onClick={() => onNavigate('projects')}>＋　创建项目空间</button>
+            {!data.todos ? <p className="ec-wb-muted">{t('home.todosUnavailable')}</p> : todos.length === 0
+              ? <p className="ec-wb-muted">{t('home.noTodos')}</p>
+              : <UnifiedTodoList items={todos.slice(0, 4)} works={works} titles={pendingTitles} onOpen={onOpenPending} />}
+            {todos.length > 4 ? <button type="button" className="ec-wb-text-link" onClick={() => onNavigate('pending')}>{t('home.allTodos')}</button> : null}
           </section>
         </aside>
       </div>
-
-      <footer className="ec-wb-canvas-foot">
-        <span>{data.status?.executor ? '平台连接正常' : '平台状态未记录'}</span>
-        <span className="ec-wb-sep" aria-hidden="true" />
-        <span>专业应用 {(data.apps ?? []).filter((app) => app.state === 'ACTIVE').length}</span>
-        <span className="ec-wb-sep" aria-hidden="true" />
-        <span>项目空间 {projects.length}</span>
-        <button type="button" className="ec-wb-foot-link" onClick={() => onNavigate('settings')}>模型与平台设置　›</button>
-      </footer>
     </div>
   )
 }
@@ -3871,7 +4111,7 @@ function AppsPage({ data }: { data: WorkbenchBootstrap }) {
             <article className={`ec-wb-app-card${app.state === 'ACTIVE' ? '' : ' is-revoked'}`} key={`${app.appId}@${app.appVersion}`}>
               <span className="ec-wb-app-icon" aria-hidden="true">◈</span>
               <div className="ec-wb-row-main">
-                <strong>{app.descriptor?.displayName ?? app.displayName ?? app.appId}</strong>
+                <strong>{app.displayName ?? app.appId}</strong>
                 <small className="ec-wb-muted">{app.appId} @ {app.appVersion}</small>
               </div>
               <span className="ec-wb-badge" data-tone={app.state === 'ACTIVE' ? 'ok' : 'muted'}>{app.state === 'ACTIVE' ? '可用' : '已撤销'}</span>
@@ -4340,6 +4580,20 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
     if (!silent) setNotice('')
     try {
       const context = await api.workContext(workId)
+      // 历史只读入口（W5/R4）：归档工作不再挂载原生会话——打开即只读详情页，记录与成果照常
+      // 可查，不新建对话，也不会把归档工作送回带运行待办的控制台。
+      if (context.work.state === 'ARCHIVED') {
+        if (!silent) setNotice('这项工作已归档，已打开只读详情。')
+        openDetail({
+          workId,
+          title: context.work.title,
+          projectId: context.work.projectId,
+          appId: context.app.appId,
+          appVersion: context.app.appVersion,
+          state: 'ARCHIVED',
+        }, options?.focusRunId)
+        return
+      }
       const sessionId = context.binding?.sessionId ?? context.sessionId
       if (!sessionId) {
         if (!silent) setNotice('正在为这项工作创建对话，已打开详情页。')
@@ -4474,23 +4728,13 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
     }
   }
 
-  /** Leave the console for the Work's detail page, keeping the run the console had focused so
-   *  成果版本/输入批次 open filled instead of asking the employee to pick the run again. */
-  const openDetailFromConsole = async (workId: string) => {
-    try {
-      const work = await resolveWork(workId)
-      setSessionWork(null)
-      openDetail(work, focusRunId)
-    } catch (reason) {
-      setNotice(`无法打开工作详情：${errorText(reason)}`)
-    }
-  }
-
-  /** Open the page that answers one pending question, focusing that run. */
+  /** 「查看详情」不再从控制台清空 Session（W5/R4：该路径已移除）——控制台的详情是右栏内展开。
+   *  待处理入口按工作状态分流：使用中的工作进控制台（原生会话保持挂载），归档工作进只读详情。 */
   const openPendingById = async (workId: string, runId: string) => {
     try {
       const work = await resolveWork(workId)
-      openDetail(work, runId)
+      if (work.state === 'ARCHIVED') openDetail(work, runId)
+      else void openWork(workId, { focusRunId: runId })
     } catch (reason) {
       setNotice(`无法打开待处理问题：${errorText(reason)}`)
     }
@@ -4636,14 +4880,14 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
           <button type="button" className="ec-wb-icon-btn" aria-label="刷新平台数据" title="刷新" onClick={() => void load()}>{GLYPH_REFRESH}</button>
           <button type="button" className="ec-wb-icon-btn" aria-label="紧凑布局" title="紧凑布局" aria-pressed={compact} onClick={toggleCompact}>{GLYPH_DENSITY}</button>
           <button type="button" className="ec-wb-icon-btn" aria-label="专家诊断" title="专家诊断（显示路径/会话/摘要等技术细节）" aria-pressed={expert} onClick={toggleExpert}><Glyph size={16}><path d="M8 9l-3 3 3 3M16 9l3 3-3 3M13 7l-2 10" /></Glyph></button>
-          <button type="button" className="ec-wb-icon-btn" aria-label="平台设置" title="平台设置" onClick={() => selectPage('settings')}>{GLYPH_SETTINGS}</button>
+          <button type="button" className="ec-wb-icon-btn" aria-label={navLabel('settings', preferences.locale)} title={navLabel('settings', preferences.locale)} onClick={() => selectPage('settings')}>{GLYPH_SETTINGS}</button>
         </div>
       </div>
       <div className="ec-wb-shell">
-        <nav className="ec-wb-nav" aria-label="企业导航">
+        <nav className="ec-wb-nav" aria-label={t('home.navLandmark')}>
           {/* Brand lives once, in the top bar; the rail starts with the primary action. */}
           <button type="button" className="ec-wb-nav-new" onClick={() => { selectPage('works'); startCreate() }}>
-            <span className="ec-wb-nav-plus" aria-hidden="true">＋</span>新建工作
+            <span className="ec-wb-nav-plus" aria-hidden="true">＋</span>{t('home.newLabel')}
           </button>
           <div className="ec-wb-nav-items">
             {PLATFORM_NAV.map((item) => (
@@ -4661,10 +4905,10 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
               </button>
             ))}
           </div>
-          <div className="ec-wb-nav-caption">最近打开</div>
+          <div className="ec-wb-nav-caption">{t('home.recentOpened')}</div>
           <div className="ec-wb-recent">
             {recentWorks.length === 0
-              ? <p className="ec-wb-nav-empty">还没有工作记录。新建工作后，最近打开会出现在这里。</p>
+              ? <p className="ec-wb-nav-empty">{t('home.noRecent')}</p>
               : recentWorks.map((work) => (
                 <button
                   type="button"
@@ -4680,7 +4924,7 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
           <button type="button" className="ec-wb-nav-bottom" onClick={() => selectPage('settings')}>
             <span className="ec-wb-nav-bottom-mark" aria-hidden="true"><Glyph size={13}>{SETTINGS_PATHS}</Glyph></span>
             <span>
-              <strong>平台设置</strong>
+              <strong>{navLabel('settings', preferences.locale)}</strong>
               <span className="ec-wb-nav-bottom-sub">{executorLabel}</span>
             </span>
             <span className="ec-wb-nav-bottom-arrow" aria-hidden="true">›</span>
@@ -4735,7 +4979,6 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
         modelLabel={defaultModelLabel(data.models)}
         models={data.models}
         onBack={closeSessionView}
-        onDetail={() => void openDetailFromConsole(sessionWork.workId)}
         onReload={load}
         {...(focusRunId ? { initialRunId: focusRunId } : {})}
         onFocusRun={(runId) => setFocusRunId(runId ?? undefined)}
@@ -4783,7 +5026,7 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
         <WorksPage
           api={api}
           data={data}
-          onOpenWork={(workId) => void openWork(workId)}
+          onOpenWork={(workId, runId) => void openWork(workId, runId ? { focusRunId: runId } : undefined)}
           onDetail={openDetail}
           onOpenPending={(workId, runId) => void openPendingById(workId, runId)}
           onCreate={startCreate}

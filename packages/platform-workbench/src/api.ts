@@ -69,6 +69,18 @@ export interface EvaluationRunItem {
 export interface RunDetail {
   result: { finalResponse: string; sessionId?: string; at: string } | null;
   activities?: RunActivity[];
+  /** KA11/M1-03：Run 创建时绑定的知识快照；未绑定时缺省，工作台据此如实显示“未绑定”。 */
+  knowledge?: RunKnowledgeBinding;
+}
+
+/** The read-only knowledge snapshot a run was created with (never a live lookup). */
+export interface RunKnowledgeBinding {
+  snapshotDigest: string;
+  total: number;
+  pluginId: string;
+  projectId?: string;
+  boundAt: string;
+  records?: Array<{ knowledgeId: string; revision: number; contentDigest: string }>;
 }
 
 export interface InputCommitItem {
@@ -282,8 +294,11 @@ export interface InteractionItem {
   answer?: unknown;
 }
 
-/** Business review of one succeeded execution. Technical success, sealed artifacts and this
- *  review are independent facts. */
+/** One business review of one succeeded execution. Technical success, sealed artifacts and this
+ *  review are independent facts. A bound record additionally carries the server-frozen deliverable
+ *  manifest (W4/R5): decisions must echo `deliverable.manifestDigest`, so an approval can never
+ *  silently migrate to a different deliverable. Records without `deliverable` are legacy
+ *  run-only reviews — they stay decidable by revision alone and are labelled as unbound. */
 export interface ReviewItem {
   reviewId: string;
   runId: string;
@@ -291,9 +306,45 @@ export interface ReviewItem {
   requestedBy: string;
   reviewer?: string;
   note?: string;
+  deliverable?: {
+    manifestDigest: string;
+    manifest: { runId: string; artifacts: Array<{ name: string; digest: string; bytes: number }> };
+  };
   revision: number;
   createdAt: string;
   updatedAt: string;
+}
+
+/** One creatable release in a project's approved catalog (W2/R2): a bounded summary the control
+ *  plane only returns when this release is the app's ACTIVE default pointer and passes the policy
+ *  and approval gates. Never carries the descriptor, result views or input schema — the detail
+ *  read (`catalogRelease`) serves the full declaration after a release has been selected. */
+export interface CatalogSummary {
+  appId: string;
+  appVersion: string;
+  displayName: string;
+  releaseDigest: string;
+  planDigest: string;
+  listingTypes?: string[];
+  revision: number;
+  updatedAt: string;
+}
+
+/** The full declaration of one approved release, resolved through the server-owned default
+ *  pointer (W2): the browser never picks a version for itself. `app.descriptor` is the optional
+ *  declaration (scenarios, result views, input schema) the bounded catalog omits. */
+export interface CatalogReleaseDetail {
+  app: {
+    appId: string;
+    appVersion: string;
+    state: 'ACTIVE' | 'REVOKED';
+    descriptor?: { displayName?: string; description?: string; listingTypes?: string[]; resultViews?: ResultViewDecl[]; inputSchema?: unknown };
+    requiredCapabilities?: string[];
+    runtimeBundleDigest?: string;
+    planDigest: string;
+    releaseDigest: string;
+  };
+  catalog: { appId: string; appVersion: string; releaseDigest: string; revision: number; updatedBy: string; updatedAt: string };
 }
 
 /** Last recorded model health fact for one catalog selection. Absence means "not probed", never
@@ -371,8 +422,11 @@ export interface WorkbenchBootstrap {
     appVersion: string;
     displayName?: string;
     state: 'ACTIVE' | 'REVOKED';
-    /** The release descriptor as the control plane publishes it; Listing declares its scenarios here. */
-    descriptor?: { displayName?: string; description?: string; listingTypes?: string[]; resultViews?: ResultViewDecl[] };
+    /** Bounded availability digests (W2/R2): the bootstrap never ships descriptor, result views
+     *  or input schema. The approved per-project catalog and its detail read serve those. */
+    listingTypes?: string[];
+    planDigest?: string;
+    releaseDigest?: string;
   }>;
   works: { total: number; items: WorkbenchItem[] };
   runs?: { total: number; items: RunSummary[] };
@@ -392,9 +446,9 @@ export interface WorkbenchBootstrap {
     health?: ModelHealthItem[];
     approvals?: ModelApprovalItem[];
   };
-  /** E3-4 unified todos: three sources on one read surface, each keeping its own kind and verb. */
+  /** E3-4 unified todos: distinct sources on one read surface, each keeping its own kind and verb. */
   todos?: Array<{
-    kind: 'question' | 'review' | 'delivery-receipt';
+    kind: 'question' | 'review' | 'delivery-receipt' | 'model-approval';
     id: string;
     runId: string | null;
     workId: string | null;
@@ -468,6 +522,32 @@ export class WorkbenchApi {
     const suffix = query.toString() ? `?${query.toString()}` : '';
     const raw = await this.call('GET', `/api/works/${encodeURIComponent(workId)}/context${suffix}`, undefined, signal);
     return parseWorkContext(raw);
+  }
+
+  /** The project's approved, creatable releases (W2/R2): only ACTIVE default-pointer releases
+   *  that pass the policy and approval gates, keyset-paginated. The formal create flow is
+   *  catalog → detail → POST /api/works with the pointer's own appVersion. */
+  catalogSummaries(
+    projectId: string,
+    params: { cursor?: string | null; limit?: number } = {},
+    signal?: AbortSignal,
+  ): Promise<{ items: CatalogSummary[]; nextCursor: string | null }> {
+    const query = new URLSearchParams();
+    query.set('projectId', projectId);
+    if (params.cursor) query.set('cursor', params.cursor);
+    if (params.limit !== undefined) query.set('limit', String(params.limit));
+    return this.call('GET', `/api/catalog?${query.toString()}`, undefined, signal) as Promise<{ items: CatalogSummary[]; nextCursor: string | null }>;
+  }
+
+  /** The full declaration of one approved release, resolved through the server-owned default
+   *  pointer for the given project — never a browser-chosen version. */
+  catalogRelease(appId: string, projectId: string, signal?: AbortSignal): Promise<CatalogReleaseDetail> {
+    return this.call(
+      'GET',
+      `/api/catalog/${encodeURIComponent(appId)}?projectId=${encodeURIComponent(projectId)}`,
+      undefined,
+      signal,
+    ) as Promise<CatalogReleaseDetail>;
   }
 
   /** Works visible to the caller. Paging is explicit so a large catalogue is never silently cut. */
@@ -677,10 +757,15 @@ export class WorkbenchApi {
   /** The transcript-shaped slice of one run record (result text + observed activities). */
   runDetail(runId: string, signal?: AbortSignal): Promise<RunDetail> {
     return this.call('GET', `/api/runs/${encodeURIComponent(runId)}`, undefined, signal).then((record) => {
-      const source = record as { result?: RunDetail['result']; activities?: RunActivity[] };
+      const source = record as {
+        result?: RunDetail['result'];
+        activities?: RunActivity[];
+        knowledge?: RunKnowledgeBinding;
+      };
       return {
         ...(source.result !== undefined ? { result: source.result } : { result: null }),
         ...(source.activities !== undefined ? { activities: source.activities } : {}),
+        ...(source.knowledge !== undefined ? { knowledge: source.knowledge } : {}),
       };
     }) as Promise<RunDetail>;
   }
@@ -879,18 +964,21 @@ export class WorkbenchApi {
     return this.call('POST', `/api/runs/${encodeURIComponent(runId)}/reviews`, note ? { note } : {}, signal) as Promise<ReviewItem>;
   }
 
-  /** Record a review decision with CAS on the review revision. */
+  /** Record a review decision with CAS on the review revision (W4/R5). A bound record requires
+   *  `expectedManifestDigest` — echo the digest the record froze; a legacy run-only record must
+   *  not send one (the server rejects a digest it cannot bind). */
   decideReview(
     reviewId: string,
     decision: 'APPROVED' | 'REJECTED',
     expectedRevision: number,
-    note?: string,
+    target: { expectedManifestDigest?: string; note?: string } = {},
     signal?: AbortSignal,
   ): Promise<ReviewItem> {
     return this.call('POST', `/api/reviews/${encodeURIComponent(reviewId)}/decision`, {
       decision,
       expectedRevision,
-      ...(note ? { note } : {}),
+      ...(target.expectedManifestDigest ? { expectedManifestDigest: target.expectedManifestDigest } : {}),
+      ...(target.note ? { note: target.note } : {}),
     }, signal) as Promise<ReviewItem>;
   }
 

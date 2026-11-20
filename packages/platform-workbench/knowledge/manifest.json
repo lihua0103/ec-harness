@@ -2,11 +2,18 @@
   "schemaVersion": 2,
   "pluginId": "ec-platform-workbench",
   "owner": "工作台负责人",
-  "source": "docs/WORKBENCH-ENTERPRISE-RENOVATION-PLAN-2026-11-17.md",
+  "source": "src/knowledge-seeds.ts",
   "taxonomy": {
     "topics": ["operate", "recover", "governance", "release"]
   },
-  "seeds": [],
+  "seeds": [
+    { "knowledgeId": "platform-workbench.session.binding", "topics": ["operate"] },
+    { "knowledgeId": "platform-workbench.run.pointer", "topics": ["operate", "governance"] },
+    { "knowledgeId": "platform-workbench.delivery.lifecycle", "topics": ["governance", "release"] },
+    { "knowledgeId": "platform-workbench.diff.incomparable", "topics": ["governance", "recover"] },
+    { "knowledgeId": "platform-workbench.identity.honest", "topics": ["governance"] },
+    { "knowledgeId": "platform-workbench.audit.provenance", "topics": ["governance", "recover"] }
+  ],
   "validators": [],
   "capabilities": [
     { "tool": "platform_workbench_snapshot", "topics": ["operate", "release"] },
@@ -42,7 +49,10 @@
     "id": "ec-platform-workbench.golden",
     "version": "1",
     "cases": [
-      { "query": "workbench snapshot", "expectEmpty": true }
+      { "query": "下载不等于接收", "expect": ["platform-workbench.delivery.lifecycle"] },
+      { "query": "APP_VERSION_MISMATCH", "expect": ["platform-workbench.diff.incomparable"] },
+      { "query": "单操作者", "expect": ["platform-workbench.identity.honest"] },
+      { "query": "完全不存在的黄金集探针词", "expect": [], "expectEmpty": true }
     ]
   },
   "corpus": {

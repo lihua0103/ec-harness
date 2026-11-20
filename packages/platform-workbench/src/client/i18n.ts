@@ -76,8 +76,58 @@ type CopyKey =
   | 'action.refresh' | 'action.back' | 'action.open' | 'action.create' | 'action.next' | 'action.previous' | 'action.cancel'
   | 'action.openSession' | 'action.viewDetail' | 'action.stop' | 'action.enterChat' | 'action.archive'
   | 'review.title' | 'review.request' | 'review.approve' | 'review.reject'
-  | 'label.lastUpdated' | 'label.language' | 'label.timeZone' | 'label.liveChat' | 'label.runRecord'
-  | 'hint.viewingRunRecord' | 'hint.returnToChat' | 'hint.creatingConversation'
+  | 'label.lastUpdated' | 'label.language' | 'label.timeZone'
+  | 'home.recent'
+  | 'home.search'
+  | 'home.clearSearch'
+  | 'home.filter'
+  | 'home.active'
+  | 'home.archived'
+  | 'home.allStates'
+  | 'home.sort'
+  | 'home.activity'
+  | 'home.name'
+  | 'home.byProject'
+  | 'home.reset'
+  | 'home.work'
+  | 'home.app'
+  | 'home.run'
+  | 'home.actions'
+  | 'home.more'
+  | 'home.loading'
+  | 'home.serverSort'
+  | 'home.noMatches'
+  | 'home.querying'
+  | 'home.empty'
+  | 'home.noActive'
+  | 'home.end'
+  | 'home.new'
+  | 'home.newLabel'
+  | 'home.recentOpened'
+  | 'home.noRecent'
+  | 'home.navLandmark'
+  | 'home.projectFilter'
+  | 'home.allProjects'
+  | 'home.failure'
+  | 'home.details'
+  | 'home.noRun'
+  | 'home.opening'
+  | 'home.priority'
+  | 'home.failedHint'
+  | 'home.todoHint'
+  | 'home.openTodo'
+  | 'home.context'
+  | 'home.noProjects'
+  | 'home.todosUnavailable'
+  | 'home.noTodos'
+  | 'home.allTodos'
+  | 'home.loadError'
+  | 'home.limit'
+  | 'home.partial'
+  | 'home.shown'
+  | 'home.loaded'
+  | 'hint.creatingConversation'
+  | 'session.viewTabs'
   | 'status.QUEUED' | 'status.STARTING' | 'status.RUNNING' | 'status.WAITING_FOR_USER'
   | 'status.FINALIZING' | 'status.CANCELLING' | 'status.SUCCEEDED' | 'status.FAILED'
   | 'status.CANCELLED' | 'status.UNKNOWN';
@@ -97,6 +147,55 @@ const STATUS_KEYS: Record<string, CopyKey> = {
 
 const COPY: Record<Locale, Partial<Record<CopyKey, string>>> = {
   'zh-CN': {
+    'home.recent': "最近工作",
+    'home.search': "按标题搜索工作",
+    'home.clearSearch': "清除搜索",
+    'home.filter': "按状态筛选",
+    'home.active': "进行中",
+    'home.archived': "已归档",
+    'home.allStates': "全部状态",
+    'home.sort': "排序方式",
+    'home.activity': "最近活动",
+    'home.name': "工作名称",
+    'home.byProject': "按项目",
+    'home.reset': "重置工作筛选",
+    'home.work': "工作",
+    'home.app': "专业应用",
+    'home.run': "最近已知运行",
+    'home.actions': "操作",
+    'home.more': "加载更多",
+    'home.loading': "正在加载…",
+    'home.serverSort': "结果按最近活动排序",
+    'home.noMatches': "没有匹配的工作。换个关键词，或放宽筛选。",
+    'home.querying': "正在读取工作…",
+    'home.empty': "还没有工作。新建一项即可开始。",
+    'home.noActive': "没有进行中的工作。",
+    'home.end': "没有更多结果",
+    'home.new': "＋ 新建工作",
+    'home.newLabel': "新建工作",
+    'home.recentOpened': "最近打开",
+    'home.noRecent': "还没有工作记录。新建工作后，最近打开会出现在这里。",
+    'home.navLandmark': "企业导航",
+    'home.projectFilter': "按项目筛选",
+    'home.allProjects': "所有项目",
+    'home.failure': "查看失败",
+    'home.details': "详情",
+    'home.noRun': "暂无运行状态",
+    'home.opening': "正在打开工作…",
+    'home.priority': "优先处理",
+    'home.failedHint': "打开工作，查看最近已知运行的失败详情。",
+    'home.todoHint': "这项工作有一条待你处理的事项。",
+    'home.openTodo': "查看待办",
+    'home.context': "项目与待办",
+    'home.noProjects': "尚未创建项目。",
+    'home.todosUnavailable': "暂未获取待办。",
+    'home.noTodos': "没有待你处理的事项。",
+    'home.allTodos': "查看全部待办",
+    'home.loadError': "无法读取工作列表",
+    'home.limit': "已达到加载上限，请缩小搜索范围",
+    'home.partial': "已加载的工作中没有匹配项",
+    'home.shown': "显示",
+    'home.loaded': "已加载",
     'nav.works': '我的工作',
     'nav.sessions': '历史会话',
     'nav.projects': '项目空间',
@@ -111,6 +210,7 @@ const COPY: Record<Locale, Partial<Record<CopyKey, string>>> = {
     'action.previous': '上一步',
     'action.cancel': '取消',
     'action.openSession': '打开会话',
+    'session.viewTabs': '会话视图',
     'action.viewDetail': '查看工作详情',
     'action.stop': '请求停止',
     'action.enterChat': '进入对话',
@@ -132,13 +232,58 @@ const COPY: Record<Locale, Partial<Record<CopyKey, string>>> = {
     'label.lastUpdated': '最后更新',
     'label.language': '界面语言',
     'label.timeZone': '时区',
-    'label.liveChat': '实时对话',
-    'label.runRecord': '运行记录',
-    'hint.viewingRunRecord': '当前查看的是运行记录，不是实时对话。',
-    'hint.returnToChat': '回到实时对话',
     'hint.creatingConversation': '正在为本工作创建专属对话…',
   },
   'en-US': {
+    'home.recent': "Recent work",
+    'home.search': "Search work titles",
+    'home.clearSearch': "Clear search",
+    'home.filter': "Filter by status",
+    'home.active': "Active",
+    'home.archived': "Archived",
+    'home.allStates': "All statuses",
+    'home.sort': "Sort work",
+    'home.activity': "Last activity",
+    'home.name': "Work name",
+    'home.byProject': "By project",
+    'home.reset': "Reset work filters",
+    'home.work': "Work",
+    'home.app': "Application",
+    'home.run': "Latest known run",
+    'home.actions': "Actions",
+    'home.more': "Load more",
+    'home.loading': "Loading…",
+    'home.serverSort': "Results are sorted by recent activity",
+    'home.noMatches': "No matching work. Change your search or filters.",
+    'home.querying': "Loading work…",
+    'home.empty': "No work yet. Create work to get started.",
+    'home.noActive': "No active work.",
+    'home.end': "No more results",
+    'home.new': "+ New work",
+    'home.newLabel': "New work",
+    'home.recentOpened': "Recently opened",
+    'home.noRecent': "No work yet. Create work and it will show up here.",
+    'home.navLandmark': "Enterprise navigation",
+    'home.projectFilter': "Filter by project",
+    'home.allProjects': "All projects",
+    'home.failure': "View failure",
+    'home.details': "Details",
+    'home.noRun': "No run status available",
+    'home.opening': "Opening work…",
+    'home.priority': "Priority work",
+    'home.failedHint': "Open this work to see details of its latest known failed run.",
+    'home.todoHint': "This work has an item that needs your attention.",
+    'home.openTodo': "View to-do",
+    'home.context': "Projects and to-dos",
+    'home.noProjects': "No projects yet.",
+    'home.todosUnavailable': "To-dos are unavailable.",
+    'home.noTodos': "Nothing needs your attention.",
+    'home.allTodos': "View all to-dos",
+    'home.loadError': "Could not load work",
+    'home.limit': "Load limit reached. Narrow your search.",
+    'home.partial': "No match in loaded work",
+    'home.shown': "Shown",
+    'home.loaded': "Loaded",
     'nav.works': 'My work',
     'nav.sessions': 'Conversations',
     'nav.projects': 'Projects',
@@ -153,6 +298,7 @@ const COPY: Record<Locale, Partial<Record<CopyKey, string>>> = {
     'action.previous': 'Previous',
     'action.cancel': 'Cancel',
     'action.openSession': 'Open conversation',
+    'session.viewTabs': 'Conversation views',
     'action.viewDetail': 'Work details',
     'action.stop': 'Request stop',
     'action.enterChat': 'Open conversation',
@@ -174,10 +320,6 @@ const COPY: Record<Locale, Partial<Record<CopyKey, string>>> = {
     'label.lastUpdated': 'Last updated',
     'label.language': 'Language',
     'label.timeZone': 'Time zone',
-    'label.liveChat': 'Live chat',
-    'label.runRecord': 'Run record',
-    'hint.viewingRunRecord': 'You are viewing a run record, not the live conversation.',
-    'hint.returnToChat': 'Back to live chat',
     'hint.creatingConversation': 'Creating a dedicated conversation for this work…',
   },
 };

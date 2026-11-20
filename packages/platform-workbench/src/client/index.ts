@@ -155,8 +155,34 @@ export function apply(ctx: ClientContext): void {
 
   // The embedded-session entry: hosts the upstream conversation factory (embedded variant) and
   // resolves the retained main view through the renderer's root session-maybe scope — no
-  // host-side SessionProvider.
-  ctx.slots.inject('workbench.session', () => ctx.slots.register({ name: 'workbench.session' }, EmbeddedSessionHost))
+  // host-side SessionProvider. Its inject face publishes the registered conversation View roster
+  // (a hooks source) so the embedded area can offer the View tabs the native session header hosts.
+  // A hooks source is a uSES store: getSnapshot must return the SAME reference until the roster
+  // really changes, or every render re-subscribes and React aborts with "Maximum update depth".
+  let cachedViewIds: readonly string[] = Object.freeze([])
+  const computeViewIds = (): readonly string[] => ctx.slots.entries('conversation.view')
+    .map((entry) => ({
+      id: typeof entry.options.id === 'string' ? entry.options.id : '',
+      order: typeof entry.options.order === 'number' ? entry.options.order : 0,
+    }))
+    .filter((view) => view.id !== '')
+    .sort((left, right) => left.order - right.order)
+    .map((view) => view.id)
+  const conversationViewIds = {
+    getSnapshot: (): readonly string[] => {
+      const next = computeViewIds()
+      const unchanged = next.length === cachedViewIds.length
+        && next.every((id, index) => id === cachedViewIds[index])
+      if (!unchanged) cachedViewIds = Object.freeze(next)
+      return cachedViewIds
+    },
+    subscribe: (listener: () => void): (() => void) =>
+      ctx.slots.subscribe('conversation.view', listener),
+  }
+  ctx.slots.inject('workbench.session', () => ctx.slots.register({
+    name: 'workbench.session',
+    inject: () => ({ hooks: { conversationViewIds } }),
+  }, EmbeddedSessionHost))
 
   // One collapsed-sidebar entry so the platform page is still reachable from the native rail.
   ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({

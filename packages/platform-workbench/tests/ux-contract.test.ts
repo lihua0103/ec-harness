@@ -139,9 +139,28 @@ test('keyboard path: skip link and palette focus affordances exist in the page s
   assert.match(source, /id="ec-wb-content"/, 'the skip link needs a main landmark target');
 });
 
+// The center is always the Work's native conversation; inspecting a run updates the rail only.
+// A run record must never unmount the native thread or its composer.
+test('the work console keeps the native conversation and puts run records in the rail', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../src/client/WorkbenchPage.tsx', import.meta.url), 'utf8');
+  assert.match(source, /const activeRun = runs\.find/, 'console must derive the active run');
+  assert.match(source, /活动运行/, 'rail must show the active run while none is selected');
+  assert.match(source, /实时对话只显示本工作的 AI 对话，运行活动在运行记录中/, 'the console must explain where run activity lives');
+  assert.doesNotMatch(source, /aria-label="中心内容"/, 'there must be no live-chat / run-record mode switch');
+  const center = source.slice(
+    source.indexOf('<div className="ec-wb-console-center">'),
+    source.indexOf('<aside className="ec-wb-console-rail"'),
+  );
+  assert.match(center, /ec-wb-console-thread/, 'the center must always render the native thread');
+  assert.doesNotMatch(center, /RunTranscript/, 'the run record must not replace the native thread');
+  const rail = source.slice(source.indexOf('<aside className="ec-wb-console-rail"'));
+  assert.match(rail, /<RunTranscript /, 'the run transcript lives in the rail');
+});
+
 test('the 2026-11-17 experience pass surfaces are present and scoped', () => {
   for (const selector of [
-    '.ec-wb .ec-wb-segmented',
+    '.ec-wb .ec-wb-rail-record',
     '.ec-wb .ec-wb-mode-banner',
     '.ec-wb .ec-wb-console-center',
     '.ec-wb .ec-wb-bind-steps',
@@ -152,10 +171,10 @@ test('the 2026-11-17 experience pass surfaces are present and scoped', () => {
   ]) {
     assert.ok(WORKBENCH_CSS.includes(selector), `missing experience surface: ${selector}`);
   }
-  // The explicit live-chat / run-record switch must keep a keyboard-visible focus ring.
+  // The rail's record card bounds its transcript window instead of growing the rail unbounded.
   assert.ok(
-    WORKBENCH_CSS.includes('.ec-wb .ec-wb-segmented button:focus-visible'),
-    'segmented control keeps a focus-visible ring',
+    WORKBENCH_CSS.includes('.ec-wb .ec-wb-rail-record .ec-wb-transcript'),
+    'the rail record keeps a bounded transcript window',
   );
 });
 
