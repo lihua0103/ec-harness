@@ -4,6 +4,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { ToolExecution } from '@deepseek-ai/dsh-tools';
 import type {} from '@deepseek-ai/dsh-skill';
 import type {} from '@deepseek-ai/dsh-user-questions';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 const string_type = { type: 'string' as const };
 import { ListingService, type Item } from './service.js';
@@ -34,6 +35,12 @@ export function apply(ctx: Context): void {
   const knowledge = ctx.clinicalKnowledge;
   const unregister = knowledge.registerContribution(listingKnowledgeContribution);
   ctx.effect(() => unregister);
+  // M2-01：注册本插件的知识智能体定义（随包发布锁定版本；卸载撤销注册并保留历史）。
+  ctx.effect(() =>
+    knowledge.registerAgentManifest(
+      JSON.parse(readFileSync(new URL('../knowledge/manifest.json', import.meta.url), 'utf8')),
+    ),
+  );
   // Activation requires this installed suite; model JSON cannot register or replace validators.
   ctx.effect(() => knowledge.registerValidator(LISTING_PLUGIN_ID, listingMethodSuite));
   // A seed problem must degrade one capability, not kill plugin assembly; status reports it either way.
@@ -603,3 +610,6 @@ export function apply(ctx: Context): void {
     }),
   );
 }
+
+// KA15 黄金集需要的自持知识导出（平台种子单一来源仍是 knowledge-seeds.ts）。
+export { listingSeeds, listingKnowledgeContribution, LISTING_PLUGIN_ID, LISTING_SEED_VERSION } from './knowledge-seeds.js';

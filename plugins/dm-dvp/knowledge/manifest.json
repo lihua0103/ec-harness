@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 2,
+  "pluginId": "dm-dvp",
+  "owner": "dm-dvp 维护者",
+  "source": "src/knowledge-seeds.ts",
+  "taxonomy": {
+    "topics": [
+      "template",
+      "writer",
+      "firewhen",
+      "render",
+      "protocol",
+      "extraction",
+      "uat",
+      "boundary",
+      "cases",
+      "design",
+      "change-mark"
+    ]
+  },
+  "seeds": [
+    { "knowledgeId": "dm-dvp.template.discipline", "topics": ["template", "writer"] },
+    { "knowledgeId": "dm-dvp.firewhen.dialect", "topics": ["firewhen", "render"], "claims": 5, "validator": "dm-dvp.methods-suite" },
+    { "knowledgeId": "dm-dvp.protocol.extraction", "topics": ["protocol", "extraction"] },
+    { "knowledgeId": "dm-dvp.uat.boundaries", "topics": ["uat", "boundary"], "claims": 1, "validator": "dm-dvp.methods-suite" },
+    { "knowledgeId": "dm-dvp.cases.design", "topics": ["cases", "design"] },
+    { "knowledgeId": "dm-dvp.changemark.format", "topics": ["template", "change-mark"], "claims": 2, "validator": "dm-dvp.methods-suite" }
+  ],
+  "validators": [
+    { "id": "dm-dvp.methods-suite", "version": "1.1.0", "covers": ["dm-dvp.changemark.format", "dm-dvp.firewhen.dialect", "dm-dvp.uat.boundaries"] }
+  ],
+  "capabilities": [
+    { "tool": "dm_dvp_overview", "topics": ["template"] },
+    { "tool": "dm_dvp_parse_workbook", "topics": ["template"] },
+    { "tool": "dm_dvp_validate_rules", "topics": ["template", "firewhen"] },
+    { "tool": "dm_dvp_read_protocol", "topics": ["protocol", "extraction"] },
+    { "tool": "dm_dvp_render_checks", "topics": ["firewhen", "render"] },
+    { "tool": "dm_dvp_suggest_cases", "topics": ["cases", "design"] },
+    { "tool": "dm_dvp_write_workbook", "topics": ["template", "writer", "uat", "boundary"] },
+    { "tool": "dm_dvp_methods", "topics": ["template", "firewhen", "protocol", "uat", "cases", "change-mark"] }
+  ],
+  "noMethodKnowledge": [
+    { "tool": "dm_dvp_status", "reason": "状态与种子导入报告，无方法语义" }
+  ],
+  "agent": {
+    "id": "dm-dvp.agent",
+    "version": "1.0.0",
+    "owner": "dm-dvp 维护者",
+    "topics": ["template", "writer", "firewhen", "render", "protocol", "extraction", "uat", "boundary", "cases", "design", "change-mark"],
+    "tools": [
+      { "tool": "dm_dvp_methods", "topics": ["template", "firewhen", "protocol", "uat", "cases", "change-mark"] },
+      { "tool": "dm_dvp_validate_rules", "topics": ["template", "firewhen"] },
+      { "tool": "dm_dvp_render_checks", "topics": ["firewhen", "render"] },
+      { "tool": "dm_dvp_write_workbook", "topics": ["template", "writer", "uat", "boundary"] },
+      { "tool": "dm_dvp_suggest_cases", "topics": ["cases", "design"] }
+    ],
+    "noMethodTools": [
+      { "tool": "dm_dvp_status", "reason": "状态与种子导入报告，无方法语义" }
+    ]
+  },
+  "feedback": {
+    "events": ["run.failed", "qc.completed", "program.revised", "business.clarified"],
+    "projectionVersion": "1"
+  },
+  "goldenSet": {
+    "id": "dm-dvp.golden",
+    "version": "1",
+    "cases": [
+      { "query": "fire when", "expect": ["dm-dvp.firewhen.dialect"] },
+      { "query": "NEEDS_OCR", "expect": ["dm-dvp.protocol.extraction"] },
+      { "query": "TEST CASE", "expect": ["dm-dvp.uat.boundaries"] },
+      { "query": "完全不存在的黄金集探针词", "expect": [], "expectEmpty": true }
+    ]
+  },
+  "scope": { "projects": "all" }
+}

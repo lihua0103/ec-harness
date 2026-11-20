@@ -9,14 +9,26 @@
     "./cordis": "./lib/cordis.js",
     "./src/*": "./src/*"
   },
-  "files": ["lib", "cordis.patch.yml", "README.md"],
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "knowledge"
+  ],
   "description": "Shared persistent experience service and its Cordis bundle; no business-plugin or model-provider dependency.",
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
-  "engines": { "node": ">=24.9.0" },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=24.9.0"
+  },
   "scripts": {
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",
-    "verify": "npm run typecheck && npm run build"
+    "verify": "npm run typecheck && npm run build && node --test \"tests/*.test.mjs\"",
+    "verify:golden": "node --test tests/golden.test.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.1.0",

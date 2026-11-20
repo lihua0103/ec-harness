@@ -1,6 +1,6 @@
 {
   "name": "@ec-clinical/dsh-dm-listing",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "临床 Listing：Medical / Manual / Report / PK；真实项目只读工作流、合成执行验证与候选交付，生成物需业务审核。",
   "type": "module",
   "main": "./lib/index.js",

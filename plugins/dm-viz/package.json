@@ -9,9 +9,22 @@
     "./package.json": "./package.json",
     "./application.json": "./application.json"
   },
-  "files": ["lib", "application.json", "cordis.patch.yml", "README.md"],
-  "engines": { "node": ">=24.9.0", "dsh": "0.2.2-rc.1" },
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "files": [
+    "lib",
+    "knowledge",
+    "application.json",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": "0.2.2-rc.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "scripts": {
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",
@@ -33,5 +46,9 @@
     "tsx": "4.23.13"
   },
   "license": "UNLICENSED",
-  "packageManager": "pnpm@11.28.5"
+  "packageManager": "pnpm@11.28.5",
+  "dependencies": {
+    "fast-xml-parser": "5.11.1",
+    "yauzl": "3.4.0"
+  }
 }

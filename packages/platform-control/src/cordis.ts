@@ -6,9 +6,12 @@ import { PlatformControlService, type ControlStatus } from './service.js';
 import { PlatformError } from './registry.js';
 import { AuthorizationError, LocalOperatorPolicy, type Principal } from './policy.js';
 import { RunError } from '../../platform-runtime/src/run.js';
-import { resolveStorePath, validateConfig, type Config } from './config.js';
+import { resolve } from 'node:path';
+import { resolveKnowledgeStorePath, resolveControlHome, resolveStorePath, validateConfig, type Config } from './config.js';
+import { readSnapshot } from '../../platform-knowledge/src/snapshot-readonly.js';
 import { publicCatalog } from './models.js';
 import { DshProfileExecutor } from './worker.js';
+import { ChildProcessWorkerExecutor } from './child-worker.js';
 import { RunScheduler } from './scheduler.js';
 import type { AppState, AppReleaseDraft, WorkState } from './store.js';
 
@@ -52,17 +55,76 @@ export function apply(ctx: Context, config: Config = {}): void {
     resolveStorePath(validated),
     null,
     validated.allowedApps ? new LocalOperatorPolicy({ allowedApps: validated.allowedApps }) : undefined,
-    { requireArtifacts: validated.requireArtifacts },
+    {
+      requireArtifacts: validated.requireArtifacts,
+      requireReleaseApproval: validated.requireReleaseApproval,
+      requireModelHealth: validated.requireModelHealth,
+      requireModelApproval: validated.requireModelApproval,
+      ...(validated.quotas !== undefined ? { quotas: validated.quotas } : {}),
+      ...(validated.maxConcurrentRuns !== undefined ? { maxConcurrentRuns: validated.maxConcurrentRuns } : {}),
+    },
   );
   if (validated.worker) {
     // Persist exit evidence in launch_attempts so it survives control-process restarts.
+    const evidence = {
+      record: (launchId: string, proven: boolean) => service.recordExitEvidence(launchId, proven),
+      read: (launchId: string) => service.readExitEvidence(launchId),
+    };
     service.setExecutor(
-      new DshProfileExecutor(validated.worker, undefined, {
-        record: (launchId, proven) => service.recordExitEvidence(launchId, proven),
-        read: (launchId) => service.readExitEvidence(launchId),
-      }),
+      validated.worker.mode === 'child-process'
+        ? new ChildProcessWorkerExecutor(validated.worker, evidence)
+        : new DshProfileExecutor(validated.worker, undefined, evidence),
     );
   }
+  // KA11：Run 创建时绑定知识快照（默认路径 = DSH_HOME/platform/knowledge.sqlite，与知识 bundle 一致）。
+  // 控制面只读知识库（摘要与服务端逐字节一致）；知识库唯一写者仍是 KnowledgeService。
+  const knowledgeStorePath =
+    resolveKnowledgeStorePath(validated) ?? resolve(resolveControlHome(), 'platform', 'knowledge.sqlite');
+  if (knowledgeStorePath) {
+    service.setKnowledgeSnapshotSource((app, projectId) => {
+      const pluginId = app.draft.descriptor.knowledgePluginId;
+      if (!pluginId) return undefined;
+      const snapshot = readSnapshot(knowledgeStorePath, { pluginId, projectId });
+      if (!snapshot) return undefined;
+      return {
+        snapshotDigest: snapshot.snapshotDigest,
+        total: snapshot.total,
+        pluginId,
+        projectId,
+        boundAt: new Date().toISOString(),
+        // 实际修订集合（M1-02）：Run 可据此重放固定知识，而不只是一个完整性摘要。
+        records: snapshot.records.map((record) => ({
+          knowledgeId: record.knowledgeId,
+          revision: record.revision,
+          contentDigest: record.contentDigest,
+        })),
+      };
+    });
+  }
+  // KA12/M2-02：把终端运行事实投影为“待分析”事件——不是候选，也不改写 Run 状态。
+  // 知识智能体随后按同一 eventId 提出候选；重复投递由知识服务按 (eventId, contributor, version) 去重。
+  service.setKnowledgeCaptureSink((event) => {
+    if (event.kind !== 'run.failed' && event.kind !== 'run.unknown') return;
+    if (!event.pluginId || !event.projectId) return;
+    const knowledge = ctx.get('clinicalKnowledge') as
+      | { captureFromProjection: (context: { pluginId: string; projectId: string }, input: unknown) => unknown }
+      | undefined;
+    if (!knowledge) return;
+    knowledge.captureFromProjection(
+      { pluginId: event.pluginId, projectId: event.projectId },
+      {
+        event: {
+          eventId: event.runId,
+          contributor: 'platform-control',
+          projectionVersion: '1',
+          kind: 'run.failed',
+          runId: event.runId,
+          inputDigest: event.inputDigest,
+        },
+        disposition: 'PENDING_ANALYSIS',
+      },
+    );
+  });
   ctx.provide('platformControl', service);
   ctx.effect(() => () => service.close());
   if (validated.reconcileOnStartup) {
@@ -197,6 +259,50 @@ export function apply(ctx: Context, config: Config = {}): void {
   );
   ctx.tools.register(
     defineTool({
+      name: 'platform_app_approve',
+      description:
+        '为已登记发布的精确 releaseDigest 记录部署审批（审批人、证据引用、可选回滚目标与到期时间）。摘要不一致即拒绝：审批的是字节，不是版本名。',
+      parameters: {
+        appId: { ...string, required: true },
+        appVersion: { ...string, required: true },
+        releaseDigest: { ...string, required: true },
+        approvedBy: { ...string, required: true },
+        evidence: string,
+        rollbackTarget: string,
+        expiresAt: string,
+      },
+      output,
+      async execute(args, exec) {
+        return run(() =>
+          service.approveRelease(
+            {
+              appId: args.appId,
+              appVersion: args.appVersion,
+              releaseDigest: args.releaseDigest,
+              approvedBy: args.approvedBy,
+              ...(args.evidence !== undefined ? { evidence: args.evidence } : {}),
+              ...(args.rollbackTarget !== undefined ? { rollbackTarget: args.rollbackTarget } : {}),
+              ...(args.expiresAt !== undefined ? { expiresAt: args.expiresAt } : {}),
+            },
+            operator(exec),
+          ),
+        );
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_app_approval',
+      description: '读取应用版本的部署审批（状态、摘要、审批人、回滚目标、到期）；无审批返回 null。',
+      parameters: { appId: { ...string, required: true }, appVersion: { ...string, required: true } },
+      output,
+      async execute(args, exec) {
+        return run(() => service.releaseApproval(args.appId, args.appVersion, operator(exec)));
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
       name: 'platform_model_catalog_register',
       description:
         '登记/替换部署审定的模型目录快照（metadata-only）：目录 ID、批准 RuntimeBundle 摘要、默认选择与模型项。不接收密钥、任意 baseURL 或性能排名；同一内容幂等，变更留审计。',
@@ -238,6 +344,122 @@ export function apply(ctx: Context, config: Config = {}): void {
       output,
       async execute(args, exec) {
         return run(() => service.setModelPreference(args.selectionId, operator(exec)));
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_model_health_record',
+      description:
+        '记录部署探测到的模型路由健康事实（healthy/degraded/unavailable/unknown）。平台不自行探测提供方；未探测即 unknown，绝不猜测为健康。',
+      parameters: {
+        selectionId: { ...string, required: true },
+        state: { ...string, required: true, enum: ['healthy', 'degraded', 'unavailable', 'unknown'] },
+        reason: string,
+      },
+      output,
+      async execute(args, exec) {
+        return run(() =>
+          service.recordModelHealth(
+            {
+              selectionId: args.selectionId,
+              state: args.state as 'healthy' | 'degraded' | 'unavailable' | 'unknown',
+              ...(args.reason !== undefined ? { reason: args.reason } : {}),
+            },
+            operator(exec),
+          ),
+        );
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_model_health',
+      description: '读取已记录的模型健康事实；没有记录不代表健康。',
+      parameters: {},
+      output,
+      async execute(_args, exec) {
+        return run(() => ({ items: service.modelHealth(operator(exec)) }));
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_run_outbox',
+      description: '读取一次运行的持久派发消息（状态、尝试次数、下次重试、最近错误）；未入队返回 null。',
+      parameters: { runId: { ...string, required: true } },
+      output,
+      async execute(args, exec) {
+        return run(() => service.outboxForRun(args.runId, operator(exec)));
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_run_review_request',
+      description:
+        '对一次 SUCCEEDED 运行的封存成果发起业务复核（每运行最多一个未结请求；无已封存工件不可发起）。请求时服务端从已封存工件构造不可变清单并固定摘要；技术成功不代表业务批准；复核记录不改变运行状态。',
+      parameters: { runId: { ...string, required: true }, note: string },
+      output,
+      async execute(args, exec) {
+        return run(() => service.requestReview(args.runId, operator(exec), args.note));
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_run_review_decision',
+      description:
+        '对未结复核做出 APPROVED/REJECTED 决定（CAS 绑定 revision 与请求冻结的目标清单摘要 expectedManifestDigest；驳回必须写明原因）。决定不可改写。',
+      parameters: {
+        reviewId: { ...string, required: true },
+        decision: { ...string, required: true, enum: ['APPROVED', 'REJECTED'] },
+        expectedRevision: { type: 'number', required: true },
+        expectedManifestDigest: string,
+        note: string,
+      },
+      output,
+      async execute(args, exec) {
+        return run(() =>
+          service.recordReviewDecision(
+            args.reviewId,
+            args.decision as 'APPROVED' | 'REJECTED',
+            args.note,
+            args.expectedRevision,
+            args.expectedManifestDigest,
+            operator(exec),
+          ),
+        );
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_run_reviews',
+      description: '读取一次运行的业务复核记录（请求、决定、复核人与备注）。',
+      parameters: { runId: { ...string, required: true } },
+      output,
+      async execute(args, exec) {
+        return run(() => ({ items: service.reviewsForRun(args.runId, operator(exec)) }));
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_app_rollback',
+      description:
+        '普通回退：把应用默认发布指向往回切到 toVersion（须 ACTIVE，启用审批时须已批准）。只改变新 Work 的路由，不撤销 fromVersion、不改历史；安全撤权走 platform_app_revoke。',
+      parameters: {
+        appId: { ...string, required: true },
+        fromVersion: { ...string, required: true },
+        toVersion: { ...string, required: true },
+        reason: { ...string, required: true },
+      },
+      output,
+      async execute(args, exec) {
+        return run(() =>
+          service.rollbackRelease(args.appId, args.fromVersion, args.toVersion, args.reason, operator(exec)),
+        );
       },
     }),
   );

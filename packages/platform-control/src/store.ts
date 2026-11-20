@@ -1,6 +1,7 @@
 /** Persistent control-plane state: approved application releases, runs, inputs, events and audit.
  *  SQLite is the local single-owner store; a deployment may replace it with its central service. */
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { mkdirSync, lstatSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { ExecutionPlan } from '../../platform-runtime/src/plan.js';
@@ -12,10 +13,11 @@ import { PlatformError } from './registry.js';
 
 export const CONTROL_APPLICATION_ID = 1162038092;
 
-/** E4-3 keyset cursor: opaque to clients, base64url of the sort key that produced the page. */
-const encodeCursor = (t: string, id: string): string =>
+/** E4-3 keyset cursor: opaque to clients, base64url of the sort key that produced the page.
+ *  Exported so the service's catalog pagination encodes cursors the same way. */
+export const encodeCursor = (t: string, id: string): string =>
   Buffer.from(JSON.stringify({ t, id }), 'utf8').toString('base64url');
-const decodeCursor = (cursor: string): { t: string; id: string } | null => {
+export const decodeCursor = (cursor: string): { t: string; id: string } | null => {
   try {
     const value = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as { t?: unknown; id?: unknown };
     return typeof value.t === 'string' && typeof value.id === 'string' ? { t: value.t, id: value.id } : null;
@@ -35,6 +37,11 @@ export interface AppReleaseDraft {
     resultTypes?: string[];
     /** 知识域 ID（插件 knowledge/manifest.json 的 pluginId）：Run 创建时据此绑定知识快照。 */
     knowledgePluginId?: string;
+    /** 封闭参数 schema（R1/R3）：合同身份以 digest 固定进计划 v2；登记时拒绝封闭子集外的
+     *  关键字（registry → assertClosedSchema），提交值在 Run 冻结入口校验（runs.create →
+     *  validateRunInput，创建与换批共用）。必须是 JSON 对象，canonical ≤ 64KB；版本缺省 '1'。 */
+    inputSchema?: unknown;
+    inputSchemaVersion?: string;
     /** Declarative result views (E1-5): the app describes how its contributed findings render.
      *  The platform renders generically from this declaration and never branches on an appId. */
     resultViews?: Array<{
@@ -114,6 +121,17 @@ export interface WorkRecord {
   createdAt: string;
   updatedAt: string;
 }
+/** The per-app default release pointer (W2/R6): which registered release new Works are created
+ *  from. One row per app; `revision` is a monotonic CAS counter so concurrent switches cannot
+ *  silently overwrite each other, and a stale creation form can be detected against it. */
+export interface AppDefaultReleaseRecord {
+  appId: string;
+  appVersion: string;
+  releaseDigest: string;
+  revision: number;
+  updatedBy: string;
+  updatedAt: string;
+}
 export interface StoredAppBody {
   draft: AppReleaseDraft;
   plan: ExecutionPlan;
@@ -131,13 +149,15 @@ export interface RunRecord {
   /** Trusted server-derived context, never accepted from run input. */
   workspace?: WorkspaceRecord;
   context?: { goal: string; previousRuns: Array<{ runId: string; input: unknown; result: RunRecord['result'] }>; truncated: boolean };
-  /** Run 创建时绑定的知识快照（KA11）：只读摘要，在途运行不随知识更新漂移；未配置知识源时缺省。 */
+  /** Run 创建时绑定的知识快照（KA11）：只读摘要，在途运行不随知识更新漂移；未配置知识源时缺省。
+   *  records 是实际修订集合（M1-02）：Run 可据此重放固定知识，而不只是校验一个摘要。 */
   knowledge?: {
     snapshotDigest: string;
     total: number;
     pluginId: string;
     projectId?: string;
     boundAt: string;
+    records?: Array<{ knowledgeId: string; revision: number; contentDigest: string }>;
   };
   runId: string;
   workId: string | null;
@@ -314,6 +334,19 @@ export interface ModelHealthRecord {
 /** A business review of one succeeded execution's results. Technical success, sealed artifacts
  *  and business approval are separate facts; this record is only the last one. */
 export type ReviewState = 'REQUESTED' | 'APPROVED' | 'REJECTED' | 'SUPERSEDED';
+/**
+ * R5 deliverable binding: the immutable manifest a review is requested against, built by the
+ * server from the run's own sealed artifacts at request time. Records without one are legacy
+ * reviews bound only to the run (未绑定具体成果版本) — they keep their existing facts and never
+ * match any deliverable manifest.
+ */
+export interface ReviewDeliverable {
+  /** Server-computed digest over the deliverable manifest; a decision must bind this exact
+   *  target. Deliberately excludes review state, so a decision or a delivery package's seal-time
+   *  snapshot can never change the target it binds (no circular dependency). */
+  manifestDigest: string;
+  manifest: { runId: string; artifacts: Array<{ name: string; digest: string; bytes: number }> };
+}
 export interface ReviewRecord {
   reviewId: string;
   runId: string;
@@ -321,6 +354,8 @@ export interface ReviewRecord {
   requestedBy: string;
   reviewer?: string;
   note?: string;
+  /** Present on reviews requested after deliverable binding (R5); absent on legacy records. */
+  deliverable?: ReviewDeliverable;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -493,6 +528,15 @@ export const canonical = (value: unknown): string =>
     }
     return item;
   });
+
+/** Deterministic digest over a review's deliverable manifest (R5): runId + artifact identities
+ *  only. Review state is deliberately excluded so the digest can never feed back into itself
+ *  through a decision or a delivery package's seal-time review snapshot. */
+export const reviewDeliverableDigest = (manifest: {
+  runId: string;
+  artifacts: Array<{ name: string; digest: string; bytes: number }>;
+}): string =>
+  createHash('sha256').update(canonical({ schema: 'review-deliverable/v1', ...manifest })).digest('hex');
 
 const decodeAuditRow = (row: Record<string, unknown>): AuditEntry => ({
   sequence: Number(row.sequence),
@@ -791,6 +835,14 @@ export class PlatformStore {
           PRIMARY KEY(app_id, app_version),
           CHECK(state IN ('ACTIVE','REVOKED'))
         ) STRICT;
+        CREATE TABLE IF NOT EXISTS app_default_releases(
+          app_id TEXT PRIMARY KEY,
+          app_version TEXT NOT NULL,
+          release_digest TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          updated_by TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        ) STRICT;
         CREATE TABLE IF NOT EXISTS model_health(
           selection_id TEXT PRIMARY KEY,
           state TEXT NOT NULL,
@@ -804,6 +856,7 @@ export class PlatformStore {
           review_id TEXT PRIMARY KEY,
           run_id TEXT NOT NULL,
           state TEXT NOT NULL,
+          manifest_digest TEXT,
           body TEXT NOT NULL,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
@@ -879,6 +932,12 @@ export class PlatformStore {
       const auditCols = this.db.prepare('PRAGMA table_info(audit_events)').all() as Array<{ name: string }>;
       if (!auditCols.some((column) => column.name === 'correlation_id')) {
         this.db.exec('ALTER TABLE audit_events ADD COLUMN correlation_id TEXT');
+      }
+      // R5 additive migration: reviews requested before deliverable binding carry no manifest
+      // digest — they stay run-only facts and never match a deliverable manifest.
+      const reviewCols = this.db.prepare('PRAGMA table_info(delivery_reviews)').all() as Array<{ name: string }>;
+      if (!reviewCols.some((column) => column.name === 'manifest_digest')) {
+        this.db.exec('ALTER TABLE delivery_reviews ADD COLUMN manifest_digest TEXT');
       }
       this.db.exec('CREATE INDEX IF NOT EXISTS runs_by_work ON runs(work_id, state)');
       this.db.exec('CREATE INDEX IF NOT EXISTS outbox_due ON outbox_messages(state, next_attempt_at)');
@@ -1090,6 +1149,69 @@ export class PlatformStore {
       )
       .run(revokedAt, reason, appId, appVersion);
   }
+  // ── Default release pointers (W2/R6) ───────────────────────────────────────
+  defaultReleaseGet(appId: string): AppDefaultReleaseRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM app_default_releases WHERE app_id=?').get(appId) as
+      | Record<string, unknown>
+      | undefined;
+    return row
+      ? {
+          appId: String(row.app_id),
+          appVersion: String(row.app_version),
+          releaseDigest: String(row.release_digest),
+          revision: Number(row.revision),
+          updatedBy: String(row.updated_by),
+          updatedAt: String(row.updated_at),
+        }
+      : undefined;
+  }
+  defaultReleaseList(): AppDefaultReleaseRecord[] {
+    const rows = this.db.prepare('SELECT * FROM app_default_releases ORDER BY app_id').all() as Array<
+      Record<string, unknown>
+    >;
+    return rows.map((row) => ({
+      appId: String(row.app_id),
+      appVersion: String(row.app_version),
+      releaseDigest: String(row.release_digest),
+      revision: Number(row.revision),
+      updatedBy: String(row.updated_by),
+      updatedAt: String(row.updated_at),
+    }));
+  }
+  /** CAS write of the default pointer. `expectedRevision: null` means "expect no existing
+   *  pointer" (initial selection); a number means "expect the pointer at exactly that
+   *  revision". Returns the new record, or null when the expectation does not hold — the
+   *  caller surfaces that as a conflict and the caller's transaction (if any) rolls back.
+   *  Must run inside a store transaction to be atomic against concurrent switches. */
+  defaultReleaseSet(
+    appId: string,
+    appVersion: string,
+    releaseDigest: string,
+    updatedBy: string,
+    updatedAt: string,
+    expectedRevision: number | null,
+  ): AppDefaultReleaseRecord | null {
+    return this.transaction(() => {
+      const current = this.defaultReleaseGet(appId);
+      if (current) {
+        if (expectedRevision === null || current.revision !== expectedRevision) return null;
+        this.db
+          .prepare(
+            `UPDATE app_default_releases SET app_version=?, release_digest=?, revision=revision+1,
+             updated_by=?, updated_at=? WHERE app_id=? AND revision=?`,
+          )
+          .run(appVersion, releaseDigest, updatedBy, updatedAt, appId, expectedRevision);
+      } else {
+        if (expectedRevision !== null) return null;
+        this.db
+          .prepare(
+            'INSERT INTO app_default_releases(app_id,app_version,release_digest,revision,updated_by,updated_at) VALUES(?,?,?,1,?,?)',
+          )
+          .run(appId, appVersion, releaseDigest, updatedBy, updatedAt);
+      }
+      return this.defaultReleaseGet(appId)!;
+    });
+  }
   modelCatalogGet(): ModelCatalogRecord | undefined {
     const row = this.db.prepare('SELECT body FROM model_catalog WHERE singleton=1').get() as
       | { body: string }
@@ -1151,9 +1273,19 @@ export class PlatformStore {
     const row = this.db.prepare('SELECT * FROM runs WHERE run_id=?').get(runId);
     return row ? this.decodeRun(row as Record<string, unknown>) : undefined;
   }
-  runList(appId: string | undefined, offset: number, limit: number): { items: RunRecord[]; total: number } {
-    const where = appId ? 'WHERE app_id=?' : '';
-    const args = appId ? [appId] : [];
+  runList(appId: string | undefined, offset: number, limit: number, projectIds?: string[]): { items: RunRecord[]; total: number } {
+    const clauses: string[] = [];
+    const args: Array<string | number> = [];
+    if (appId) { clauses.push('app_id=?'); args.push(appId); }
+    // R2 (W2): project visibility is a server-side filter, applied before pagination. Runs
+    // without a Work (work_id NULL) match no project and are hidden when a project filter is
+    // set — fail-closed, because their ownership cannot be resolved.
+    if (projectIds !== undefined) {
+      if (projectIds.length === 0) return { total: 0, items: [] };
+      clauses.push(`work_id IN (SELECT work_id FROM works WHERE project_id IN (${projectIds.map(() => '?').join(',')}))`);
+      args.push(...projectIds);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const rows = this.db
       .prepare(`SELECT * FROM runs ${where} ORDER BY updated_at DESC, run_id LIMIT ? OFFSET ?`)
       .all(...args, limit, offset) as Array<Record<string, unknown>>;
@@ -1167,13 +1299,18 @@ export class PlatformStore {
   /** Works matching a filter, newest first, keyed on (updated_at, work_id). The cursor is opaque
    *  to clients; a null nextCursor means the end of the result set. */
   workQuery(
-    filter: { projectId?: string; appId?: string; state?: WorkState; q?: string },
+    filter: { projectId?: string; projectIds?: string[]; appId?: string; state?: WorkState; q?: string },
     cursor: string | null,
     limit: number,
   ): { items: WorkRecord[]; nextCursor: string | null } {
     const clauses: string[] = [];
     const args: Array<string | number> = [];
     if (filter.projectId !== undefined) { clauses.push('project_id=?'); args.push(filter.projectId); }
+    if (filter.projectIds !== undefined) {
+      if (filter.projectIds.length === 0) return { items: [], nextCursor: null };
+      clauses.push(`project_id IN (${filter.projectIds.map(() => '?').join(',')})`);
+      args.push(...filter.projectIds);
+    }
     if (filter.appId !== undefined) { clauses.push('app_id=?'); args.push(filter.appId); }
     if (filter.state !== undefined) { clauses.push('state=?'); args.push(filter.state); }
     if (filter.q !== undefined) {
@@ -1203,7 +1340,7 @@ export class PlatformStore {
   /** Runs matching a filter, newest first, keyed on (updated_at, run_id). The optional q matches
    *  the run's input goal via SQLite JSON — a real server-side filter, not a client shortcut. */
   runQuery(
-    filter: { appId?: string; workId?: string; projectId?: string; state?: string; q?: string },
+    filter: { appId?: string; workId?: string; projectId?: string; projectIds?: string[]; state?: string; q?: string },
     cursor: string | null,
     limit: number,
   ): { items: RunRecord[]; nextCursor: string | null } {
@@ -1214,6 +1351,15 @@ export class PlatformStore {
     if (filter.projectId !== undefined) {
       clauses.push('work_id IN (SELECT work_id FROM works WHERE project_id=?)');
       args.push(filter.projectId);
+    }
+    // R2 (W2): server-resolved project visibility, intersected with any explicit filter.
+    // Work-less runs match no project and are hidden when a filter is set (fail-closed).
+    if (filter.projectIds !== undefined) {
+      if (filter.projectIds.length === 0) return { items: [], nextCursor: null };
+      clauses.push(
+        `work_id IN (SELECT work_id FROM works WHERE project_id IN (${filter.projectIds.map(() => '?').join(',')}))`,
+      );
+      args.push(...filter.projectIds);
     }
     if (filter.state !== undefined) { clauses.push('state=?'); args.push(filter.state); }
     if (filter.q !== undefined) {
@@ -1676,9 +1822,17 @@ export class PlatformStore {
       | undefined;
     return row ? (JSON.parse(row.body) as WorkRecord) : undefined;
   }
-  workList(state: WorkState | undefined, offset: number, limit: number): { items: WorkRecord[]; total: number } {
-    const where = state ? 'WHERE state=?' : '';
-    const args = state ? [state] : [];
+  workList(state: WorkState | undefined, offset: number, limit: number, projectIds?: string[]): { items: WorkRecord[]; total: number } {
+    const clauses: string[] = [];
+    const args: Array<string | number> = [];
+    if (state) { clauses.push('state=?'); args.push(state); }
+    // R2 (W2): visibility filter applied before pagination, not after.
+    if (projectIds !== undefined) {
+      if (projectIds.length === 0) return { total: 0, items: [] };
+      clauses.push(`project_id IN (${projectIds.map(() => '?').join(',')})`);
+      args.push(...projectIds);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const rows = this.db
       .prepare(`SELECT body FROM works ${where} ORDER BY updated_at DESC, work_id LIMIT ? OFFSET ?`)
       .all(...args, limit, offset) as Array<{ body: string }>;
@@ -1912,6 +2066,19 @@ export class PlatformStore {
       )
       .run(error.slice(0, 2000), nextAttemptAt, new Date().toISOString(), messageId);
   }
+  /** Return a claimed message to the pool WITHOUT spending its attempt budget, recording why it
+   *  cannot start. A run whose registered artifact has no executor must stay due and visible
+   *  (last_error names the missing bundle) instead of retrying into a dead letter. */
+  outboxRelease(messageId: string, reason: string): void {
+    // Returning the claim refunds the attempt the claim charged (claim does attempts+1): a run
+    // whose registered artifact is missing must stay due and visible WITHOUT marching toward the
+    // dead letter while its executor is not configured yet.
+    this.db
+      .prepare(
+        "UPDATE outbox_messages SET state='PENDING', claimed_by=NULL, claim_expires_at=NULL, attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END, last_error=?, updated_at=? WHERE message_id=?",
+      )
+      .run(reason.slice(0, 2000), new Date().toISOString(), messageId);
+  }
   outboxDeadLetter(messageId: string, error: string): void {
     this.db
       .prepare(
@@ -2084,17 +2251,29 @@ export class PlatformStore {
   }
   reviewInsert(record: ReviewRecord): void {
     this.db
-      .prepare('INSERT INTO delivery_reviews(review_id,run_id,state,body,created_at,updated_at) VALUES(?,?,?,?,?,?)')
-      .run(record.reviewId, record.runId, record.state, canonical(record), record.createdAt, record.updatedAt);
+      .prepare(
+        'INSERT INTO delivery_reviews(review_id,run_id,state,manifest_digest,body,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',
+      )
+      .run(
+        record.reviewId,
+        record.runId,
+        record.state,
+        record.deliverable?.manifestDigest ?? null,
+        canonical(record),
+        record.createdAt,
+        record.updatedAt,
+      );
   }
-  /** CAS on revision so two reviewers cannot silently overwrite each other's decision. */
+  /** CAS on revision so two reviewers cannot silently overwrite each other's decision. The
+   *  manifest digest column follows the record body: legacy run-only records stay NULL — a
+   *  decision never retrofits a manifest onto a record that has none. */
   reviewUpdate(record: ReviewRecord, expectedRevision: number): boolean {
     return this.transaction(() => {
       const current = this.reviewGet(record.reviewId);
       if (!current || current.state !== 'REQUESTED' || current.revision !== expectedRevision) return false;
       const result = this.db
-        .prepare('UPDATE delivery_reviews SET state=?, body=?, updated_at=? WHERE review_id=?')
-        .run(record.state, canonical(record), record.updatedAt, record.reviewId);
+        .prepare('UPDATE delivery_reviews SET state=?, manifest_digest=?, body=?, updated_at=? WHERE review_id=?')
+        .run(record.state, record.deliverable?.manifestDigest ?? null, canonical(record), record.updatedAt, record.reviewId);
       return Number(result.changes) === 1;
     });
   }

@@ -4,6 +4,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type {} from '@deepseek-ai/dsh-skill';
+import { readFileSync } from 'node:fs';
 import { WorkbookError } from '../../../packages/platform-workbook/src/index.js';
 import { BOUNDARY_NOTICES, DvpError, overviewDvpWorkbook, parseDvpWorkbook, type DvpSection } from './parse.js';
 import { RulesInputError, parseRulesJson, withLogicParse } from './rules.js';
@@ -79,6 +80,12 @@ export function apply(ctx: Context): void {
   ctx.effect(() => unregisterContribution);
   const unregisterValidator = knowledge.registerValidator(DVP_PLUGIN_ID, dvpMethodSuite);
   ctx.effect(() => unregisterValidator);
+  // M2-01：注册本插件的知识智能体定义（随包发布锁定版本；卸载撤销注册并保留历史）。
+  ctx.effect(() =>
+    knowledge.registerAgentManifest(
+      JSON.parse(readFileSync(new URL('../knowledge/manifest.json', import.meta.url), 'utf8')),
+    ),
+  );
   // 种子问题只降级知识检索能力，不阻断插件装配；dm_dvp_status 如实上报。
   let seedState: { version: string; result: unknown } | { version: string; error: string };
   try {
@@ -125,22 +132,45 @@ export function apply(ctx: Context): void {
       name: 'dm_dvp_methods',
       description:
         '检索 DVP 方法知识（种子与已沉淀候选）：template/firewhen/protocol/uat/cases。种子为 CANDIDATE，未复现验证不称 ACTIVE；知识是方法参考不是授权，不替代当前项目文档。',
-      parameters: { topic: { ...string_type, required: true, enum: [...METHOD_TOPICS] } },
+      parameters: {
+        topic: { ...string_type, required: true, enum: [...METHOD_TOPICS] },
+        projectId: { ...string_type, description: '当前项目 ID（与快照绑定的项目一致时用于固定集合检索）。' },
+        snapshotJson: {
+          ...string_type,
+          description:
+            '可选：Run 创建时绑定的知识快照 JSON。提供时在固定修订集合内检索；缺省时结果标注 retrieval=LIVE_UNBOUND（活库、未绑定），不冒称固定集合。',
+        },
+      },
       output,
       async execute(args) {
-        return run(() => ({
-          source: 'platform-knowledge',
-          seedVersion: DVP_SEED_VERSION,
-          ...knowledge.search(
-            { pluginId: DVP_PLUGIN_ID },
-            {
-              states: ['ACTIVE', 'CANDIDATE'],
-              topics: METHOD_TOPIC_MAP[args.topic as keyof typeof METHOD_TOPIC_MAP],
-              limit: 100,
-            },
-          ),
-          notice: '历史种子当前为候选；未复现验证不称 ACTIVE。',
-        }));
+        return run(() => {
+          const context: { pluginId: string; projectId?: string } = {
+            pluginId: DVP_PLUGIN_ID,
+            ...(args.projectId ? { projectId: args.projectId } : {}),
+          };
+          const options = {
+            states: ['ACTIVE', 'CANDIDATE'] as Array<'ACTIVE' | 'CANDIDATE'>,
+            topics: METHOD_TOPIC_MAP[args.topic as keyof typeof METHOD_TOPIC_MAP],
+            limit: 100,
+          };
+          if (args.snapshotJson) {
+            if (args.snapshotJson.length > 2_000_000) throw new DvpError('KNOWLEDGE_SNAPSHOT_INVALID', 'snapshot JSON 过大');
+            return {
+              source: 'platform-knowledge',
+              retrieval: 'PINNED_SNAPSHOT',
+              seedVersion: DVP_SEED_VERSION,
+              ...knowledge.searchPinned(context, JSON.parse(args.snapshotJson), options),
+              notice: '快照内固定修订；撤回/撤权条目在 evidence.excluded 中显式列出。',
+            };
+          }
+          return {
+            source: 'platform-knowledge',
+            retrieval: 'LIVE_UNBOUND',
+            seedVersion: DVP_SEED_VERSION,
+            ...knowledge.search(context, options),
+            notice: '历史种子当前为候选；未绑定 Run 快照，结果为活库检索（不冒充固定集合）。',
+          };
+        });
       },
     }),
   );
@@ -428,3 +458,6 @@ export function apply(ctx: Context): void {
     }),
   );
 }
+
+// KA15 黄金集需要的自持知识导出（平台种子单一来源仍是 knowledge-seeds.ts）。
+export { dvpSeeds, dvpKnowledgeContribution, DVP_PLUGIN_ID, DVP_SEED_VERSION } from './knowledge-seeds.js';

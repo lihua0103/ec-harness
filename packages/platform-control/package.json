@@ -9,13 +9,15 @@
     "./cordis": "./lib/cordis.js",
     "./http": "./lib/http.js"
   },
-  "files": ["lib", "cordis.patch.yml", "README.md"],
+  "files": ["lib", "scripts", "cordis.patch.yml", "README.md", "knowledge"],
   "description": "应用发布注册、确定性执行计划绑定、持久运行与审计的平台控制面 bundle；不执行应用代码。",
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
   "engines": { "node": ">=24.9.0" },
   "scripts": {
     "build": "node build.mjs",
-    "serve:workbench": "tsx src/api-cli.ts",
+    "serve:workbench": "node node_modules/tsx/dist/cli.mjs src/api-cli.ts",
+    "backup": "node node_modules/tsx/dist/cli.mjs src/backup-cli.ts",
+    "doctor": "node node_modules/tsx/dist/cli.mjs src/doctor-cli.ts",
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run test && npm run build"

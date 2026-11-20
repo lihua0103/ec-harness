@@ -15,6 +15,11 @@ function fixture(t) {
   };
   put('scripts/check-development-standard.mjs', 'if (process.argv.includes("--self-test")) console.log("synthetic checker self-test");');
   // Deliberately a tiny fixture, not a copy of this recursive test runner.
+  put('scripts/verify-applications.mjs', 'process.exit(0);');
+  put('scripts/verify-knowledge-golden.mjs', 'process.exit(0);');
+  put('scripts/verify-knowledge-coverage.mjs', 'process.exit(0);');
+  put('scripts/verify-knowledge-coverage.test.mjs', 'process.exit(0);');
+  put('scripts/accept-knowledge-roles.mjs', 'process.exit(0);');
   put('scripts/verify-all.test.cjs', 'require("node:assert/strict").ok(true);');
   const pkg = (directory = 'packages/example', overrides = {}) => {
     const manifest = { name: '@synthetic/example', version: '1.0.0', type: 'module', exports: './index.mjs', engines: { node: '>=24.9.0' }, scripts: { verify: 'node --check index.mjs' }, ...overrides };
@@ -69,7 +74,7 @@ test('requires checker and aggregator self-test files', (t) => {
   unlinkSync(path.join(f.root, 'scripts/check-development-standard.mjs'));
   unlinkSync(path.join(f.root, 'scripts/verify-all.test.cjs'));
   const failures = discover(f.root).failures;
-  assert.equal(failures.length, 3); // Checker normal + self-test, plus aggregator self-test.
+  assert.equal(failures.length, 3); // Checker normal + self-test, plus aggregator self-test; golden fixture is intentionally kept present.
   assert.ok(failures.every((failure) => failure.includes('missing (required check)')));
 });
 
@@ -80,7 +85,7 @@ test('discovers all package groups, checker self-test, and separate prototype ve
   const calls = [];
   const result = runVerification(f.root, { execute: (command, args, options) => { calls.push({ command, args, options }); return { status: 0 }; }, log() {}, error() {} });
   assert.deepEqual(result.failures, []);
-  assert.equal(calls.length, 7);
+  assert.equal(calls.length, 12);
   assert.equal(calls.filter((call) => call.args.includes('verify')).length, 3);
   assert.equal(calls.filter((call) => call.args.includes('--self-test')).length, 1);
   assert.ok(result.targets.some((target) => target.name.includes('not product acceptance')));
@@ -101,15 +106,15 @@ for (const result of [{ status: 1 }, { status: null, signal: 'SIGTERM' }, { stat
   test(`failed child cannot pass (${result.signal || result.error?.message || result.status})`, (t) => {
     const f = fixture(t);
     const actual = runVerification(f.root, { execute: () => result, log() {}, error() {} });
-    assert.equal(actual.failedCommands, 3);
-    assert.equal(actual.failures.length, 3);
+    assert.equal(actual.failedCommands, 8);
+    assert.equal(actual.failures.length, 8);
   });
 }
 
 test('a thrown executor error is reported as failure', (t) => {
   const f = fixture(t);
   const result = runVerification(f.root, { execute() { throw new Error('cannot spawn'); }, log() {}, error() {} });
-  assert.equal(result.failedCommands, 3);
+  assert.equal(result.failedCommands, 8);
   assert.ok(result.failures.every((failure) => failure.includes('cannot spawn')));
 });
 
@@ -126,7 +131,7 @@ test('real subprocesses execute synthetic tooling and prototype checks without r
     log() {}, error() {},
   });
   assert.deepEqual(result.failures, []);
-  assert.equal(result.targets.length, 4);
+  assert.equal(result.targets.length, 9);
 });
 
 test('supported Node versions preserve minimum 24.9 gate', () => {

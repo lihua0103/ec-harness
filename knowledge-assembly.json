@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-11-20",
+  "entries": [
+    {
+      "path": "plugins/dm-dvp",
+      "pluginId": "dm-dvp",
+      "class": "managed",
+      "owner": "dm-dvp 维护者"
+    },
+    {
+      "path": "plugins/dm-listing",
+      "pluginId": "dm-listing",
+      "class": "managed",
+      "owner": "dm-listing 维护者"
+    },
+    {
+      "path": "plugins/dm-participants",
+      "pluginId": "ec-clinical-dm-participants",
+      "class": "managed",
+      "owner": "dm-participants 维护者"
+    },
+    {
+      "path": "plugins/dm-viz",
+      "pluginId": "ec-clinical-dm-viz",
+      "class": "managed",
+      "owner": "dm-viz 维护者"
+    },
+    {
+      "path": "packages/platform-control",
+      "pluginId": "ec-platform-control",
+      "class": "managed",
+      "owner": "平台控制面负责人"
+    },
+    {
+      "path": "packages/platform-knowledge",
+      "pluginId": "ec-platform-knowledge",
+      "class": "managed",
+      "owner": "平台知识服务负责人"
+    },
+    {
+      "path": "packages/platform-workbench",
+      "pluginId": "ec-platform-workbench",
+      "class": "managed",
+      "owner": "工作台负责人"
+    },
+    {
+      "path": "packages/platform-identity",
+      "class": "library",
+      "reason": "纯库：身份断言与权限目录，由装配方插件消费，无独立装配身份"
+    },
+    {
+      "path": "packages/platform-runtime",
+      "class": "library",
+      "reason": "纯库：运行契约与执行计划类型"
+    },
+    {
+      "path": "packages/platform-viz",
+      "class": "library",
+      "reason": "纯库：可视化数据通道与配置编译"
+    },
+    {
+      "path": "packages/platform-workbook",
+      "class": "library",
+      "reason": "纯库：工作簿读写与封存"
+    },
+    {
+      "path": "apps/enterprise-workbench",
+      "class": "application",
+      "reason": "前端应用外壳；不是插件身份，能力通过 platform-workbench 暴露"
+    }
+  ]
+}

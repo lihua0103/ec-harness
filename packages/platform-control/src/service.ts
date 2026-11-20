@@ -6,9 +6,9 @@ import { RunError } from '../../platform-runtime/src/run.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
-import { AuthorizationError, LocalOperatorPolicy, type PlatformPolicy, type Principal } from './policy.js';
+import { AuthorizationError, LocalOperatorPolicy, type PlatformAction, type PlatformPolicy, type Principal } from './policy.js';
 import { ApplicationRegistry, PlatformError } from './registry.js';
-import { RunRepository } from './runs.js';
+import { RunRepository, runInputDigest } from './runs.js';
 import { WorkRepository, type WorkDraft } from './works.js';
 import { ProjectRepository, type ProjectDraft, type WorkspaceDraft } from './projects.js';
 import {
@@ -37,7 +37,10 @@ import {
   type ModelSelectionSource,
 } from './models.js';
 import {
+  decodeCursor,
+  encodeCursor,
   PlatformStore,
+  type AppDefaultReleaseRecord,
   type AppRecord,
   type AppState,
   type AppReleaseDraft,
@@ -53,6 +56,7 @@ import {
   type OutboxMessage,
   type ReleaseApprovalRecord,
   type ReviewRecord,
+  reviewDeliverableDigest,
   type RunRecord,
   type WorkRecord,
   type WorkState,
@@ -266,6 +270,8 @@ export interface KnowledgeCaptureEvent {
   appId: string;
   appVersion: string;
   projectId?: string;
+  /** 该 Run 绑定的知识域（插件 identity）；未绑定时缺省，sink 不得猜测。 */
+  pluginId?: string;
   inputDigest: string;
   artifactDigests: string[];
   reason?: string;
@@ -292,10 +298,19 @@ export class PlatformControlService {
   private readonly quotaMaxRunsPerDayPerProject: number;
   private readonly maxConcurrentRuns: number;
   private executor: RunExecutor | null;
+  /** W3/R6: executors registered for one exact runtime bundle digest. Dispatch resolves the
+   *  worker by the RUN's frozen bundle — never by the app's default release — so two different
+   *  artifacts drain under their original locks and a run whose artifact is missing never
+   *  starts, never falls back to another version's worker. */
+  private readonly executorsByDigest = new Map<string, RunExecutor>();
   private knowledgeSource?: (app: AppRecord, projectId: string) => RunRecord['knowledge'] | undefined;
   private knowledgeCaptureSink?: (event: KnowledgeCaptureEvent) => void | Promise<void>;
   private closed = false;
   private readonly conversationActivities = new Map<string, NonNullable<RunOutcome['activities']>>();
+  /** Live activity feed (E4-7): cursor-tagged entries so SSE can resume without re-reading the run. */
+  private readonly activityLog = new Map<string, Array<{ cursor: number; activity: RunActivity }>>();
+  private readonly activityCursor = new Map<string, number>();
+  private readonly activityWaiters = new Map<string, Set<(entry: { cursor: number; activity: RunActivity }) => void>>();
   private readonly conversationInputs = new Map<string, Array<{ role: 'user'; text: string; createdAt: string }>>();
   /** Live waiters for SDK user questions; persistence is the durable inbox the UI reads. */
   private readonly interactionWaiters = new Map<string, (result: UserQuestionResult) => void>();
@@ -330,6 +345,21 @@ export class PlatformControlService {
   }
   setExecutor(executor: RunExecutor): void {
     this.executor = executor;
+  }
+  /** Register an executor for one exact runtime bundle digest (W3/R6). The digest must be a
+   *  real bundle digest: a typo or placeholder would strand every run queued without an
+   *  honest reason. */
+  registerExecutor(runtimeBundleDigest: string, executor: RunExecutor): void {
+    if (typeof runtimeBundleDigest !== 'string' || !/^[a-f0-9]{64}$/.test(runtimeBundleDigest)) {
+      throw new PlatformError('WORKER_CONFIG_INVALID', 'runtimeBundleDigest 必须是 64 位十六进制摘要');
+    }
+    this.executorsByDigest.set(runtimeBundleDigest, executor);
+  }
+  /** The executor registered for this exact bundle; a deployment configured with a single
+   *  worker (constructor/setExecutor) keeps its prior behavior — that executor's own dispatch
+   *  re-checks digest equality (WORKER_RUNTIME_MISMATCH) as the second exactness gate. */
+  private executorFor(runtimeBundleDigest: string): RunExecutor | null {
+    return this.executorsByDigest.get(runtimeBundleDigest) ?? this.executor;
   }
   /** Deployment seam: an enterprise identity/project-authorization plugin replaces the local policy. */
   setPolicy(policy: PlatformPolicy): void {
@@ -599,9 +629,14 @@ export class PlatformControlService {
   }
 
   /**
-   * Withdraw one release and keep another as the rollback target. The target must itself be an
-   * ACTIVE release (and approved when approvals are enforced); this never deletes history and
-   * never re-points an in-flight run. Version ordering is deliberately not guessed.
+   * Ordinary default rollback (W2/R6): switch the per-app default release pointer back to
+   * another ACTIVE (and, when enforced, approved) release. Only the routing of new Work
+   * changes — this never revokes the source version, never rewrites history and never touches
+   * in-flight runs, and it deliberately does not share a write action with security
+   * revocation ('app.default.set' here; 'app.revoke' stays with revokeApp alone). A revoked
+   * version can therefore never re-enter the default route. The pointer carries a monotonic
+   * revision; when the caller passes expectedRevision it must still match, so two concurrent
+   * rollbacks cannot silently overwrite each other.
    */
   rollbackRelease(
     appId: string,
@@ -609,47 +644,63 @@ export class PlatformControlService {
     toVersion: string,
     reason: string,
     principal: Principal,
-  ): { revoked: AppRecord; target: AppRecord } {
-    this.policy.authorize(principal, 'app.revoke', { appId });
+    opts: { expectedRevision?: number | null } = {},
+  ): { previous: AppDefaultReleaseRecord; current: AppDefaultReleaseRecord; target: AppRecord } {
+    this.policy.authorize(principal, 'app.default.set', { appId });
     if (fromVersion === toVersion) throw new PlatformError('APP_ROLLBACK_INVALID', 'same version');
     const trimmed = typeof reason === 'string' ? reason.trim() : '';
     if (!trimmed || trimmed.length > 2000) throw new PlatformError('APP_ROLLBACK_INVALID', 'reason');
-    const from = this.registry.get(appId, fromVersion);
     const target = this.registry.get(appId, toVersion);
-    if (from.state !== 'ACTIVE') throw new PlatformError('APP_RELEASE_NOT_ACTIVE', `${appId}@${fromVersion}`);
     if (target.state !== 'ACTIVE') throw new PlatformError('APP_RELEASE_NOT_ACTIVE', `${appId}@${toVersion}`);
     this.requireApproval(target);
-    const revoked = this.registry.revoke(
-      appId,
-      fromVersion,
-      `ROLLBACK_TO ${toVersion}: ${trimmed}`.slice(0, 2000),
-      principal.actorId,
-    );
-    this.store.audit(principal.actorId, 'APP_RELEASE_ROLLED_BACK', `${appId}@${fromVersion}`, {
-      toVersion,
-      fromDigest: from.releaseDigest,
-      targetDigest: target.releaseDigest,
-      reason: trimmed,
+    return this.store.transaction(() => {
+      const pointer = this.store.defaultReleaseGet(appId);
+      if (!pointer) throw new PlatformError('APP_DEFAULT_RELEASE_MISSING', appId);
+      const expected = opts.expectedRevision === undefined ? pointer.revision : opts.expectedRevision;
+      if (pointer.appVersion !== fromVersion || pointer.revision !== expected) {
+        throw new PlatformError('APP_DEFAULT_REVISION_STALE', `${appId} 当前默认指向 ${pointer.appVersion}@${pointer.revision}`);
+      }
+      const current = this.store.defaultReleaseSet(
+        appId,
+        target.appVersion,
+        target.releaseDigest,
+        principal.actorId,
+        new Date().toISOString(),
+        pointer.revision,
+      );
+      if (!current) throw new PlatformError('APP_DEFAULT_REVISION_STALE', appId);
+      this.store.audit(principal.actorId, 'APP_DEFAULT_RELEASE_ROLLED_BACK', `${appId}@${fromVersion}`, {
+        toVersion,
+        fromDigest: pointer.releaseDigest,
+        targetDigest: target.releaseDigest,
+        reason: trimmed,
+      });
+      return { previous: pointer, current, target };
     });
-    return { revoked, target };
   }
 
   // ── Delivery reviews ───────────────────────────────────────────────────────
-  /** Request a business review of one SUCCEEDED execution. Technical success alone never means
-   *  approval; one open request per run is allowed. */
+  /** Request a business review of one SUCCEEDED execution's sealed deliverables (R5). The server
+   *  builds the immutable deliverable manifest from the run's own sealed artifacts at request
+   *  time — without verifiable sealed facts no deliverable review may be initiated. Technical
+   *  success alone never means approval; one open request per run is allowed. */
   requestReview(runId: string, principal: Principal, note?: string): ReviewRecord {
     const run = this.runs.get(runId);
-    this.policy.authorize(principal, 'run.review', {
-      appId: run.appId,
-      projectId: run.workspace?.projectId,
-      workspaceId: run.workspace?.workspaceId,
-      workId: run.workId ?? undefined,
-    });
+    this.authorizeRunScope(principal, 'run.review', run);
     if (run.snapshot.state !== 'SUCCEEDED') throw new PlatformError('RUN_REVIEW_NOT_SUCCEEDED', run.snapshot.state);
     if (note !== undefined && (typeof note !== 'string' || note.length > 4000)) {
       throw new PlatformError('RUN_REVIEW_INVALID', 'note');
     }
+    // R5: run_artifacts rows exist only after the control plane sealed a digest-verified copy —
+    // artifacts.length > 0 is the verifiable sealed fact a review must stand on.
+    const artifacts = this.store.artifacts(runId);
+    if (artifacts.length === 0) throw new PlatformError('RUN_REVIEW_NOT_SEALED', runId);
+    const manifest = {
+      runId,
+      artifacts: artifacts.map(({ name, digest, bytes }) => ({ name, digest, bytes })),
+    };
     const trimmed = note?.trim() || undefined;
+    const manifestDigest = reviewDeliverableDigest(manifest);
     const now = new Date().toISOString();
     return this.store.transaction(() => {
       if (this.store.openReviewForRun(runId)) throw new PlatformError('RUN_REVIEW_EXISTS', runId);
@@ -659,6 +710,7 @@ export class PlatformControlService {
         state: 'REQUESTED',
         requestedBy: principal.actorId,
         ...(trimmed ? { note: trimmed } : {}),
+        deliverable: { manifestDigest, manifest },
         revision: 1,
         createdAt: now,
         updatedAt: now,
@@ -666,18 +718,25 @@ export class PlatformControlService {
       this.store.reviewInsert(record);
       this.store.audit(principal.actorId, 'RUN_REVIEW_REQUESTED', runId, {
         reviewId: record.reviewId,
+        manifestDigest,
+        artifacts: manifest.artifacts.map((artifact) => ({ name: artifact.name, digest: artifact.digest })),
         note: trimmed ?? null,
       });
       return record;
     });
   }
-  /** Approve or reject an open review. The decision binds the review revision (CAS) and never
-   *  rewrites an earlier decision. */
+  /** Approve or reject an open review. The decision binds the request's target manifest digest
+   *  and the review revision (R5): the server re-checks current authorization, the exact target
+   *  and the pending state, so a decision against a different manifest or a stale revision never
+   *  takes effect, and only one concurrent decision ever wins. A decision never rewrites an
+   *  earlier one. Legacy reviews bound only to the run keep deciding on revision alone — they
+   *  bind no manifest and accept no digest. */
   recordReviewDecision(
     reviewId: string,
     decision: 'APPROVED' | 'REJECTED',
     note: string | undefined,
     expectedRevision: number,
+    expectedManifestDigest: string | undefined,
     principal: Principal,
   ): ReviewRecord {
     if (decision !== 'APPROVED' && decision !== 'REJECTED') {
@@ -689,12 +748,19 @@ export class PlatformControlService {
     const record = this.store.reviewGet(reviewId);
     if (!record) throw new PlatformError('RUN_REVIEW_NOT_FOUND', reviewId);
     const run = this.runs.get(record.runId);
-    this.policy.authorize(principal, 'run.review', {
-      appId: run.appId,
-      projectId: run.workspace?.projectId,
-      workspaceId: run.workspace?.workspaceId,
-      workId: run.workId ?? undefined,
-    });
+    this.authorizeRunScope(principal, 'run.review', run);
+    if (record.deliverable) {
+      // R5: the decision must confirm the exact manifest the request froze — same target or no effect.
+      if (typeof expectedManifestDigest !== 'string' || !expectedManifestDigest) {
+        throw new PlatformError('RUN_REVIEW_TARGET_REQUIRED');
+      }
+      if (expectedManifestDigest !== record.deliverable.manifestDigest) {
+        throw new PlatformError('RUN_REVIEW_TARGET_MISMATCH', expectedManifestDigest);
+      }
+    } else if (expectedManifestDigest !== undefined) {
+      // Old records only show existing facts: they bind no manifest, so a claimed target is refused.
+      throw new PlatformError('RUN_REVIEW_TARGET_INVALID', 'run-only review');
+    }
     if (record.state !== 'REQUESTED') throw new PlatformError('RUN_REVIEW_NOT_OPEN', record.state);
     const trimmed = typeof note === 'string' ? note.trim() : '';
     if (trimmed.length > 4000) throw new PlatformError('RUN_REVIEW_INVALID', 'note');
@@ -714,6 +780,7 @@ export class PlatformControlService {
       }
       this.store.audit(principal.actorId, `RUN_REVIEW_${decision}`, record.runId, {
         reviewId,
+        manifestDigest: record.deliverable?.manifestDigest ?? null,
         note: trimmed || null,
       });
       return next;
@@ -727,8 +794,8 @@ export class PlatformControlService {
 
   // ── Delivery packages (E1-3) ───────────────────────────────────────────────
   /** Seal one SUCCEEDED run's deliverables into an immutable package. Sealing requires the run's
-   *  own sealed artifacts and honestly freezes whatever review state exists at seal time — it
-   *  neither requires a review nor invents one. */
+   *  own sealed artifacts and honestly freezes whatever matching-target review state exists at
+   *  seal time (R5) — it neither requires a review nor invents one. */
   sealDeliveryPackage(
     workId: string,
     draft: { runId: string; note?: string },
@@ -751,9 +818,12 @@ export class PlatformControlService {
       name: artifact.name, digest: artifact.digest, bytes: artifact.bytes,
     }));
     if (artifacts.length === 0) throw new PlatformError('DELIVERY_PACKAGE_INVALID', 'the run has no sealed artifacts to deliver');
-    // Honest review snapshot: the newest review of the run at seal time, or null — never invented.
+    // R5: the package snapshots only reviews bound to these exact artifacts — a review of a
+    // different manifest (another run, another batch) or a legacy run-only review never becomes
+    // this package's fact. The digest excludes review state, so snapshot and decision cannot cycle.
+    const deliverableDigest = reviewDeliverableDigest({ runId: run.runId, artifacts });
     const reviews = this.store.reviewsForRun(run.runId);
-    const newest = reviews.at(-1);
+    const newest = reviews.filter((review) => review.deliverable?.manifestDigest === deliverableDigest).at(-1);
     const now = new Date().toISOString();
     const record: DeliveryPackageRecord = {
       packageId: randomUUID(),
@@ -1040,17 +1110,21 @@ export class PlatformControlService {
   // ── Durable outbox dispatch ────────────────────────────────────────────────
   /**
    * One bounded outbox turn: stale claims return to the pool, due messages are claimed, and each
-   * corresponding run is dispatched. A run already terminal is completed without dispatch; a
-   * transient failure backs off; a permanent one is dead-lettered after the attempt budget.
+   * corresponding run is dispatched — by the executor registered for THAT run's exact runtime
+   * bundle (W3/R6), never by the app's default release. A run whose bundle has no registered
+   * executor is released without spending its attempt budget: it stays due, stays QUEUED, and
+   * the outbox row records the missing bundle, so registering the artifact later resumes the
+   * drain. A run already terminal is completed without dispatch; a transient failure backs off;
+   * a permanent one is dead-lettered after the attempt budget.
    */
   async dispatchOutbox(
     owner: Principal,
     options: { limit?: number; now?: Date } = {},
-  ): Promise<{ claimed: number; dispatched: number; retried: number; dead: number; skipped: number }> {
+  ): Promise<{ claimed: number; dispatched: number; retried: number; dead: number; skipped: number; noExecutor: number }> {
     this.policy.authorize(owner, 'run.dispatch');
-    // Without an executor, claiming messages would only burn their attempt budget. Leave them
-    // queued so configuring the worker later resumes dispatch instead of dead-lettering.
-    if (!this.executor) throw new PlatformError('EXECUTOR_NOT_CONFIGURED');
+    // Without any executor at all, claiming messages would only burn their attempt budget. Leave
+    // them queued so configuring the worker later resumes dispatch instead of dead-lettering.
+    if (!this.executor && this.executorsByDigest.size === 0) throw new PlatformError('EXECUTOR_NOT_CONFIGURED');
     // Capacity is checked before claiming: a capped control plane leaves messages PENDING with
     // their attempt budget intact, and resumes as soon as a launch settles.
     let capacity = Math.min(Math.max(options.limit ?? 1, 1), 100);
@@ -1058,14 +1132,14 @@ export class PlatformControlService {
       const open = this.store.openAttempts(this.maxConcurrentRuns + 1).length;
       if (open >= this.maxConcurrentRuns) {
         metrics.counter('platform_outbox_capacity_deferred');
-        return { claimed: 0, dispatched: 0, retried: 0, dead: 0, skipped: 0 };
+        return { claimed: 0, dispatched: 0, retried: 0, dead: 0, skipped: 0, noExecutor: 0 };
       }
       capacity = Math.min(capacity, this.maxConcurrentRuns - open);
     }
     const limit = capacity;
     const now = options.now ?? new Date();
     const claimed = this.store.outboxClaim(owner.actorId, now.toISOString(), limit, OUTBOX_CLAIM_TTL_MS);
-    const result = { claimed: claimed.length, dispatched: 0, retried: 0, dead: 0, skipped: 0 };
+    const result = { claimed: claimed.length, dispatched: 0, retried: 0, dead: 0, skipped: 0, noExecutor: 0 };
     for (const message of claimed) {
       let run: RunRecord;
       try {
@@ -1081,6 +1155,16 @@ export class PlatformControlService {
         continue;
       }
       try {
+        // W3: resolve this run's own frozen bundle and its registered executor BEFORE any attempt
+        // is spent. No registered executor for this exact bundle → release without spending the
+        // attempt budget: stays due, stays QUEUED, the reason is recorded on the outbox row.
+        const bundle = this.registry.get(run.appId, run.appVersion).plan.runtimeBundleDigest;
+        if (!this.executorFor(bundle)) {
+          this.store.outboxRelease(message.messageId, `EXECUTOR_UNAVAILABLE: bundle ${bundle}`);
+          metrics.counter('platform_outbox_no_executor');
+          result.noExecutor++;
+          continue;
+        }
         await this.dispatchRun(run.runId, run.snapshot.revision, owner);
         this.store.outboxComplete(message.messageId);
         result.dispatched++;
@@ -1174,6 +1258,151 @@ export class PlatformControlService {
     this.policy.authorize(principal, 'app.revoke', { appId });
     return this.registry.revoke(appId, appVersion, reason, principal.actorId);
   }
+
+  // ── Default release pointer (W2/R6) ─────────────────────────────────────────
+  /** Set the per-app default release new Works are created from. The target must be an ACTIVE
+   *  registered release — a revoked version can never become default — and approved when
+   *  approvals are enforced. `expectedRevision` is required: `null` initializes the pointer,
+   *  a number CAS-switches it, so concurrent switches cannot silently overwrite each other.
+   *  This never revokes anything; security revocation is revokeApp, a separate write action. */
+  setDefaultRelease(
+    appId: string,
+    version: string,
+    opts: { expectedRevision: number | null; reason?: string },
+    principal: Principal,
+  ): AppDefaultReleaseRecord {
+    this.policy.authorize(principal, 'app.default.set', { appId });
+    if (opts.expectedRevision !== null && !Number.isSafeInteger(opts.expectedRevision)) {
+      throw new PlatformError('APP_DEFAULT_REVISION_INVALID', String(opts.expectedRevision));
+    }
+    const target = this.registry.get(appId, version);
+    if (target.state !== 'ACTIVE') throw new PlatformError('APP_RELEASE_NOT_ACTIVE', `${appId}@${version}`);
+    this.requireApproval(target);
+    return this.store.transaction(() => {
+      const next = this.store.defaultReleaseSet(
+        appId,
+        target.appVersion,
+        target.releaseDigest,
+        principal.actorId,
+        new Date().toISOString(),
+        opts.expectedRevision,
+      );
+      if (!next) throw new PlatformError('APP_DEFAULT_REVISION_STALE', `${appId} 默认指向已被并发切换，请读取当前指向后重试`);
+      this.store.audit(principal.actorId, 'APP_DEFAULT_RELEASE_SET', `${appId}@${target.appVersion}`, {
+        releaseDigest: target.releaseDigest,
+        revision: next.revision,
+        ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
+      });
+      return next;
+    });
+  }
+  /** Current default pointer of one app (null before the first selection). */
+  defaultRelease(appId: string, principal: Principal): AppDefaultReleaseRecord | null {
+    this.policy.authorize(principal, 'app.read', { appId });
+    return this.store.defaultReleaseGet(appId) ?? null;
+  }
+
+  // ── Employee catalog (W2/R2) ────────────────────────────────────────────────
+  /** Per-project catalog of what new Work may actually be created from: a release with the
+   *  app's default pointer on it, ACTIVE, approved when enforcement is on, and allowed to this
+   *  principal. Filtering happens before pagination; pages are keyset-keyed on appId and the
+   *  items are bounded summaries — identity, display name, availability digests — never the
+   *  full descriptor, result views or input schema. ACTIVE alone is not approval: entries the
+   *  policy or the approval gate refuses are omitted, not errored. */
+  catalogSummaries(
+    projectId: string,
+    cursor: string | null,
+    limit: number,
+    principal: Principal,
+  ): {
+    items: Array<{
+      appId: string;
+      appVersion: string;
+      displayName: string;
+      releaseDigest: string;
+      planDigest: string;
+      listingTypes?: string[];
+      revision: number;
+      updatedAt: string;
+    }>;
+    nextCursor: string | null;
+  } {
+    // Authorization precedes existence checks so an unknown project and a forbidden one are
+    // indistinguishable in what they reveal.
+    this.policy.authorize(principal, 'project.read', { projectId });
+    if (!this.projects.get(projectId)) throw new PlatformError('PROJECT_NOT_FOUND', projectId);
+    if (limit < 1 || limit > 100) throw new PlatformError('CATALOG_PAGE_INVALID', 'limit');
+    const key = cursor ? decodeCursor(cursor) : null;
+    if (cursor && (!key || key.t !== key.id)) throw new PlatformError('CATALOG_PAGE_INVALID', 'cursor');
+    const pointers = new Map(this.store.defaultReleaseList().map((pointer) => [pointer.appId, pointer]));
+    const entries: Array<{
+      appId: string;
+      appVersion: string;
+      displayName: string;
+      releaseDigest: string;
+      planDigest: string;
+      listingTypes?: string[];
+      revision: number;
+      updatedAt: string;
+    }> = [];
+    for (const app of this.registry.list('ACTIVE')) {
+      const pointer = pointers.get(app.appId);
+      // The pointer must name exactly this ACTIVE release; a pointer at a revoked or replaced
+      // version is not creatable and is honestly omitted rather than silently re-routed.
+      if (!pointer || pointer.appVersion !== app.appVersion) continue;
+      if (key && app.appId <= key.t) continue;
+      try {
+        this.policy.authorize(principal, 'app.read', { appId: app.appId });
+        this.requireApproval(app);
+      } catch (error) {
+        const code = error instanceof PlatformError ? error.code : '';
+        if (error instanceof AuthorizationError || code === 'APP_RELEASE_NOT_APPROVED' || code === 'APP_RELEASE_APPROVAL_EXPIRED') {
+          continue;
+        }
+        throw error;
+      }
+      entries.push({
+        appId: app.appId,
+        appVersion: app.appVersion,
+        displayName: app.draft.descriptor.displayName,
+        releaseDigest: app.releaseDigest,
+        planDigest: app.plan.planDigest,
+        ...(app.draft.descriptor.listingTypes !== undefined ? { listingTypes: app.draft.descriptor.listingTypes } : {}),
+        revision: pointer.revision,
+        updatedAt: pointer.updatedAt,
+      });
+    }
+    const page = entries.slice(0, limit);
+    const last = page.at(-1);
+    return { items: page, nextCursor: entries.length > limit && last ? encodeCursor(last.appId, last.appId) : null };
+  }
+  /** Full descriptor of the selected catalog entry: chosen after the project and the expected
+   *  release identity, resolved through the server-owned pointer — never from a browser-supplied
+   *  version. Returns the pointer facts so the creation form can carry expectedRelease. */
+  catalogRelease(appId: string, projectId: string, principal: Principal): { app: AppRecord; catalog: AppDefaultReleaseRecord } {
+    this.policy.authorize(principal, 'project.read', { projectId });
+    if (!this.projects.get(projectId)) throw new PlatformError('PROJECT_NOT_FOUND', projectId);
+    this.policy.authorize(principal, 'app.read', { appId });
+    const pointer = this.store.defaultReleaseGet(appId);
+    if (!pointer) throw new PlatformError('APP_DEFAULT_RELEASE_MISSING', appId);
+    const app = this.registry.active(appId, pointer.appVersion);
+    this.requireApproval(app);
+    return { app, catalog: pointer };
+  }
+  /** ACTIVE releases for the employee home surface, gated per app. The HTTP layer projects a
+   *  bounded summary without the full descriptor — /api/workbench no longer ships it (W2). */
+  workbenchApps(principal: Principal): AppRecord[] {
+    this.policy.authorize(principal, 'app.read');
+    return this.registry.list('ACTIVE').filter((app) => {
+      try {
+        this.policy.authorize(principal, 'app.read', { appId: app.appId });
+        return true;
+      } catch (error) {
+        if (error instanceof AuthorizationError) return false;
+        throw error;
+      }
+    });
+  }
   createProject(draft: ProjectDraft, principal: Principal) {
     this.policy.authorize(principal, 'project.create');
     return this.projects.create(draft, principal.actorId);
@@ -1206,6 +1435,51 @@ export class PlatformControlService {
     this.policy.authorize(principal, 'workspace.create', { projectId: draft?.projectId });
     return this.projects.createWorkspace(draft, principal.actorId);
   }
+
+  // ── Project-scope authorization (W2/R2) ─────────────────────────────────────
+  /** Server-resolved set of project ids this principal may see, or null when unrestricted.
+   *  A deployment policy may answer directly (exact even for projects created later);
+   *  otherwise the policy is probed per known project — the same filter listProjects applies.
+   *  Scope comes from the policy and resource ownership, never from browser parameters. */
+  private visibleProjectIds(principal: Principal): string[] | null {
+    if (typeof this.policy.visibleProjects === 'function') {
+      return this.policy.visibleProjects(principal);
+    }
+    const all = this.projects.list();
+    const visible = all.filter((project) => {
+      try {
+        this.policy.authorize(principal, 'project.read', { projectId: project.projectId });
+        return true;
+      } catch (error) {
+        if (error instanceof AuthorizationError) return false;
+        throw error;
+      }
+    });
+    return visible.length === all.length ? null : visible.map((project) => project.projectId);
+  }
+  /** A run's project is resolved from server-side ownership: the bound workspace when present,
+   *  otherwise the Work row. A workspace-less Work still carries its project; a work-less run
+   *  has none and stays visible only to principals without a project restriction. */
+  private runProjectId(run: Pick<RunRecord, 'workId' | 'workspace'>): string | undefined {
+    if (run.workspace?.projectId !== undefined) return run.workspace.projectId;
+    if (run.workId !== null) return this.works.get(run.workId)?.projectId;
+    return undefined;
+  }
+  /** Shared authorization for run-scoped actions: policy authorize with the server-resolved
+   *  project, then the project-scope gate. Denial carries no metadata beyond the denial. */
+  private authorizeRunScope(principal: Principal, action: PlatformAction, run: RunRecord): void {
+    const projectId = this.runProjectId(run);
+    this.policy.authorize(principal, action, {
+      appId: run.appId,
+      projectId,
+      workspaceId: run.workspace?.workspaceId,
+      workId: run.workId ?? undefined,
+    });
+    const scope = this.visibleProjectIds(principal);
+    if (scope !== null && (projectId === undefined || !scope.includes(projectId))) {
+      throw new AuthorizationError('PLATFORM_PROJECT_ACCESS_DENIED', projectId ?? '(no project)');
+    }
+  }
   workDraft(workId: string, principal: Principal) {
     const work = this.getWork(workId, principal);
     this.policy.authorize(principal, 'work.draft', { appId: work.appId, projectId: work.projectId, workId });
@@ -1227,12 +1501,31 @@ export class PlatformControlService {
     if (draft.workspaceId !== undefined) {
       this.policy.authorize(principal, 'workspace.read', { projectId: draft.projectId, workspaceId: draft.workspaceId });
     }
-    this.registry.active(draft?.appId, draft?.appVersion);
-    return this.works.create(draft, principal.actorId);
+    return this.store.transaction(() => {
+      // W2/R3: the creation form carries the release identity it saw. The server compares it
+      // against the current default pointer inside the write transaction, so a form loaded
+      // before a default switch conflicts instead of writing a stale binding. An unregistered
+      // app is APP_NOT_FOUND; an app without a pointer is not open for new Work — no version
+      // is ever guessed; any other version than the pointer is a stale form (409, no write).
+      this.registry.get(draft?.appId);
+      const pointer = this.store.defaultReleaseGet(draft?.appId);
+      if (!pointer) throw new PlatformError('APP_DEFAULT_RELEASE_MISSING', draft?.appId);
+      if (draft?.appVersion !== pointer.appVersion) {
+        throw new PlatformError(
+          'APP_DEFAULT_RELEASE_CONFLICT',
+          `表单所见 ${draft?.appId}@${draft?.appVersion}，当前默认 ${pointer.appVersion}；请刷新目录后重试`,
+        );
+      }
+      const app = this.registry.active(pointer.appId, pointer.appVersion);
+      this.requireApproval(app);
+      return this.works.create(draft, principal.actorId);
+    });
   }
   getWork(workId: string, principal: Principal): WorkRecord {
     const work = this.works.get(workId);
-    this.policy.authorize(principal, 'work.read', { appId: work.appId });
+    // R2: the Work row itself is the authoritative project — including workspace-less Works,
+    // whose projectId is never inferred from request parameters.
+    this.policy.authorize(principal, 'work.read', { appId: work.appId, projectId: work.projectId, workId });
     return work;
   }
   listWorks(state: WorkState | undefined, offset: number, limit: number, principal: Principal): {
@@ -1240,10 +1533,13 @@ export class PlatformControlService {
     total: number;
   } {
     this.policy.authorize(principal, 'work.read');
-    return this.works.list(state, offset, limit);
+    const projectIds = this.visibleProjectIds(principal) ?? undefined;
+    return this.works.list(state, offset, limit, projectIds);
   }
   /** E4-3: server-side filtered, cursor-paginated Works. The q filter matches titles only —
-   *  stated here so no client assumes the goal body is searched. */
+   *  stated here so no client assumes the goal body is searched. Project visibility is
+   *  resolved server-side and applied before pagination; an explicit projectId outside the
+   *  principal's scope is denied, not silently emptied. */
   queryWorks(
     filter: { projectId?: string; appId?: string; state?: WorkState; q?: string },
     cursor: string | null,
@@ -1251,6 +1547,7 @@ export class PlatformControlService {
     principal: Principal,
   ): { items: WorkRecord[]; nextCursor: string | null } {
     this.policy.authorize(principal, 'work.read');
+    if (filter.projectId !== undefined) this.policy.authorize(principal, 'project.read', { projectId: filter.projectId });
     if (limit < 1 || limit > 100) throw new PlatformError('WORK_PAGE_INVALID', 'limit');
     if (filter.state !== undefined && filter.state !== 'ACTIVE' && filter.state !== 'ARCHIVED') {
       throw new PlatformError('WORK_STATE_INVALID', String(filter.state));
@@ -1258,10 +1555,13 @@ export class PlatformControlService {
     if (filter.q !== undefined && (typeof filter.q !== 'string' || filter.q.length > 200)) {
       throw new PlatformError('WORK_PAGE_INVALID', 'q');
     }
-    return this.store.workQuery(filter, cursor, limit);
+    const projectIds = this.visibleProjectIds(principal) ?? undefined;
+    return this.store.workQuery({ ...filter, projectIds }, cursor, limit);
   }
   /** E4-3: server-side filtered, cursor-paginated Runs. The q filter matches the run's input
-   *  goal only — run ids and digests are not substring-searched. */
+   *  goal only — run ids and digests are not substring-searched. Project visibility applies
+   *  before pagination, resolved from Work ownership (work-less runs have none and are only
+   *  visible to unrestricted principals). */
   queryRuns(
     filter: { appId?: string; workId?: string; projectId?: string; state?: string; q?: string },
     cursor: string | null,
@@ -1269,11 +1569,13 @@ export class PlatformControlService {
     principal: Principal,
   ): { items: RunRecord[]; nextCursor: string | null } {
     this.policy.authorize(principal, 'run.read', filter.appId ? { appId: filter.appId } : undefined);
+    if (filter.projectId !== undefined) this.policy.authorize(principal, 'project.read', { projectId: filter.projectId });
     if (limit < 1 || limit > 100) throw new PlatformError('RUN_PAGE_INVALID', 'limit');
     if (filter.q !== undefined && (typeof filter.q !== 'string' || filter.q.length > 200)) {
       throw new PlatformError('RUN_PAGE_INVALID', 'q');
     }
-    return this.store.runQuery(filter, cursor, limit);
+    const projectIds = this.visibleProjectIds(principal) ?? undefined;
+    return this.store.runQuery({ ...filter, projectIds }, cursor, limit);
   }
   /**
    * E4-6 global search: one bounded query over the four catalogues the workbench navigates —
@@ -1303,10 +1605,13 @@ export class PlatformControlService {
       workId?: string;
       runId?: string;
     }> = [];
-    for (const work of this.store.workQuery({ q: term }, null, 5).items) {
+    // R2: search is filtered by the server-resolved project scope before hits are collected —
+    // pagination, search and direct access share the same authorization basis.
+    const projectIds = this.visibleProjectIds(principal) ?? undefined;
+    for (const work of this.store.workQuery({ q: term, projectIds }, null, 5).items) {
       hits.push({ kind: 'work', id: work.workId, title: work.title, detail: `${work.appId} @ ${work.appVersion}`, workId: work.workId });
     }
-    for (const run of this.store.runQuery({ q: term }, null, 5).items) {
+    for (const run of this.store.runQuery({ q: term, projectIds }, null, 5).items) {
       hits.push({
         kind: 'run',
         id: run.runId,
@@ -1317,12 +1622,12 @@ export class PlatformControlService {
       });
     }
     const needle = term.toLowerCase();
-    for (const project of this.projects.list()) {
+    for (const project of this.listProjects(principal)) {
       if (!project.name.toLowerCase().includes(needle)) continue;
       hits.push({ kind: 'project', id: project.projectId, title: project.name, detail: project.projectId });
       if (hits.filter((hit) => hit.kind === 'project').length >= 5) break;
     }
-    for (const app of this.listApps(undefined, principal)) {
+    for (const app of this.workbenchApps(principal)) {
       const label = app.draft.descriptor?.displayName ?? app.draft.descriptor?.appId ?? app.appId;
       if (!label.toLowerCase().includes(needle) && !app.appId.toLowerCase().includes(needle)) continue;
       hits.push({ kind: 'app', id: `${app.appId}@${app.appVersion}`, title: label, detail: `${app.appId} @ ${app.appVersion}` });
@@ -1347,12 +1652,12 @@ export class PlatformControlService {
   }
   archiveWork(workId: string, principal: Principal): WorkRecord {
     const work = this.works.get(workId);
-    this.policy.authorize(principal, 'work.archive', { appId: work.appId });
+    this.policy.authorize(principal, 'work.archive', { appId: work.appId, projectId: work.projectId, workId });
     return this.works.archive(workId, principal.actorId);
   }
   runsForWork(workId: string, offset: number, limit: number, principal: Principal) {
     const work = this.works.get(workId);
-    this.policy.authorize(principal, 'run.read', { appId: work.appId });
+    this.policy.authorize(principal, 'run.read', { appId: work.appId, projectId: work.projectId, workId });
     return this.runs.forWork(workId, offset, limit);
   }
 
@@ -1576,45 +1881,93 @@ export class PlatformControlService {
       sessionId: binding?.sessionId ?? null,
     };
   }
-  /** A Work run is bound to the Work's app release and obeys the single-active-run rule. */
+  /**
+   * W3: the single server-side freeze operation. Every run-creation and rebatch entry converges
+   * here: the input's immutable work-level revision (baseline), the Run row, and its durable
+   * dispatch intent are committed in ONE transaction, and every mutable precondition (work
+   * active, no other active run, release active+approved, project quota, model route) is checked
+   * inside that same transaction — so a duplicate submission that races an admit is refused by
+   * the transaction itself, a default switched after admission never reaches an already-frozen
+   * run, and a crash never leaves a Run without its frozen revision or dispatch intent.
+   */
   createWorkRun(
     workId: string,
     input: unknown,
     principal: Principal,
-    options: { modelSelectionId?: string; modelOptions?: unknown } = {},
+    options: { modelSelectionId?: string; modelOptions?: unknown; sourceRef?: string } = {},
   ): RunRecord {
+    // Authorization resolves against the Work BEFORE any write: an identity that cannot run this
+    // app, or cannot see the Work's project, is refused without opening a transaction or touching
+    // the ledger. The Work row is the authoritative project (R2/R3) — never a request parameter.
     const work = this.works.get(workId);
-    this.policy.authorize(principal, 'run.create', { appId: work.appId });
-    if (work.state !== 'ACTIVE') throw new PlatformError('WORK_ARCHIVED', workId);
-    this.works.requireNoActiveRun(workId);
-    const app = this.registry.active(work.appId, work.appVersion);
-    this.requireApproval(app);
-    // E2-3: per-project budget gate, checked before any model resolution or launch.
-    this.requireProjectQuota(work.projectId);
-    // Runs stay persistent when no executor is configured; the workbench must show that truth
-    // and offer configuration, never imply execution has started.
-    const model = this.resolveRunModel(app.plan.runtimeBundleDigest, principal, options);
-    const available = this.availableForApp(app, principal);
-    if (available.entries.some((entry) => entry.enabled) && !model) {
-      throw new PlatformError('MODEL_SELECTION_REQUIRED', '请选择一个可用模型后再开始运行。');
-    }
-    const workspace = work.workspaceId ? this.projects.workspace(work.workspaceId) : undefined;
-    if (workspace) this.policy.authorize(principal, 'workspace.read', {
-      projectId: work.projectId, workspaceId: workspace.workspaceId,
+    this.policy.authorize(principal, 'run.create', {
+      appId: work.appId, projectId: work.projectId, workId: work.workId,
     });
-    const history = this.runs.forWork(workId, 0, 20);
-    // KA11：Run 创建时绑定知识快照（只读摘要）。未配置源或应用未声明知识域时缺省，不伪造绑定。
-    const knowledge = this.knowledgeSource?.(app, work.projectId);
-    return this.runs.create(app, input, principal.actorId, model, workId, {
-      ...(workspace ? { workspace } : {}),
-      ...(knowledge ? { knowledge } : {}),
-      context: {
-        goal: work.goal ?? work.title,
-        previousRuns: history.items.reverse().map((previous) => ({
-          runId: previous.runId, input: previous.input, result: previous.result,
-        })),
-        truncated: history.total > history.items.length,
-      },
+    const scope = this.visibleProjectIds(principal);
+    if (scope !== null && (work.projectId === undefined || !scope.includes(work.projectId))) {
+      throw new AuthorizationError('PLATFORM_PROJECT_ACCESS_DENIED', work.projectId ?? '(no project)');
+    }
+    return this.store.transaction(() => {
+      if (work.state !== 'ACTIVE') throw new PlatformError('WORK_ARCHIVED', workId);
+      // Fast fail before the baseline append; runs.create re-checks single-Work admission inside
+      // its own savepoint, so a submission that races an in-flight admit can never dispatch twice.
+      this.works.requireNoActiveRun(workId);
+      const app = this.registry.active(work.appId, work.appVersion);
+      this.requireApproval(app);
+      // E2-3: per-project budget gate, checked before any model resolution or launch.
+      this.requireProjectQuota(work.projectId);
+      // Runs stay persistent when no executor is configured; the workbench must show that truth
+      // and offer configuration, never imply execution has started.
+      const model = this.resolveRunModel(app.plan.runtimeBundleDigest, principal, options);
+      const available = this.availableForApp(app, principal);
+      if (available.entries.some((entry) => entry.enabled) && !model) {
+        throw new PlatformError('MODEL_SELECTION_REQUIRED', '请选择一个可用模型后再开始运行。');
+      }
+      const workspace = work.workspaceId ? this.projects.workspace(work.workspaceId) : undefined;
+      if (workspace) this.policy.authorize(principal, 'workspace.read', {
+        projectId: work.projectId, workspaceId: workspace.workspaceId,
+      });
+      const history = this.runs.forWork(workId, 0, 20);
+      // KA11：Run 创建时绑定知识快照（只读摘要）。未配置源或应用未声明知识域时缺省，不伪造绑定。
+      const knowledge = this.knowledgeSource?.(app, work.projectId);
+      // Freeze the input revision and the Run in one transaction: the baseline digest IS the
+      // canonical digest the Run records as inputDigest, so the work ledger and the execution
+      // agree on exactly what was frozen, and a rebatch appends a new revision — it never
+      // mutates the revision an already-admitted run points at.
+      const inputDigest = runInputDigest(input);
+      const baseline = this.inputBaselines.append({
+        workId,
+        sourceRef: options.sourceRef ?? `input:${inputDigest}`,
+        digest: inputDigest,
+      }, principal.actorId);
+      const run = this.runs.create(app, input, principal.actorId, model, workId, {
+        ...(workspace ? { workspace } : {}),
+        ...(knowledge ? { knowledge } : {}),
+        context: {
+          goal: work.goal ?? work.title,
+          previousRuns: history.items.reverse().map((previous) => ({
+            runId: previous.runId, input: previous.input, result: previous.result,
+          })),
+          truncated: history.total > history.items.length,
+        },
+      });
+      if (run.inputDigest !== baseline.digest) {
+        // Unreachable by construction (both derive from runInputDigest(input)); asserted so a
+        // future refactor cannot silently split the ledger from the execution contract.
+        throw new PlatformError('RUN_INPUT_FROZEN_MISMATCH', baseline.digest);
+      }
+      this.store.audit(principal.actorId, 'RUN_INPUT_FROZEN', run.runId, {
+        workId,
+        baselineId: baseline.baselineId,
+        revision: baseline.revision,
+        sourceRef: baseline.sourceRef,
+        digest: baseline.digest,
+        appId: app.appId,
+        appVersion: app.appVersion,
+        releaseDigest: app.releaseDigest,
+        planDigest: app.plan.planDigest,
+      });
+      return run;
     });
   }
   /** Register/replace the deployment's verified model catalog snapshot (metadata only). */
@@ -1860,12 +2213,7 @@ export class PlatformControlService {
   }
   appendInput(runId: string, input: unknown, principal: Principal): InputCommit {
     const record = this.runs.get(runId);
-    this.policy.authorize(principal, 'run.input', {
-      appId: record.appId,
-      projectId: record.workspace?.projectId,
-      workspaceId: record.workspace?.workspaceId,
-      workId: record.workId ?? undefined,
-    });
+    this.authorizeRunScope(principal, 'run.input', record);
     return this.runs.appendInput(runId, input, principal.actorId);
   }
   inputs(runId: string, offset: number, limit: number, principal: Principal) {
@@ -1895,17 +2243,12 @@ export class PlatformControlService {
   }
   getRun(runId: string, principal: Principal): RunRecord {
     const record = this.runs.get(runId);
-    this.policy.authorize(principal, 'run.read', {
-      appId: record.appId,
-      projectId: record.workspace?.projectId,
-      workspaceId: record.workspace?.workspaceId,
-      workId: record.workId ?? undefined,
-    });
+    this.authorizeRunScope(principal, 'run.read', record);
     return { ...record, activities: this.conversationActivities.get(runId) ?? [] };
   }
   listRuns(appId: string | undefined, offset: number, limit: number, principal: Principal) {
     this.policy.authorize(principal, 'run.read', appId ? { appId } : undefined);
-    return this.runs.list(appId, offset, limit);
+    return this.runs.list(appId, offset, limit, this.visibleProjectIds(principal) ?? undefined);
   }
   runEvents(runId: string, offset: number, limit: number, principal: Principal) {
     this.getRun(runId, principal);
@@ -1944,10 +2287,7 @@ export class PlatformControlService {
       let run: RunRecord;
       try {
         run = this.runs.get(record.runId);
-        this.policy.authorize(principal, 'run.read', {
-          appId: run.appId,
-          ...(run.workId ? { workId: run.workId } : {}),
-        });
+        this.authorizeRunScope(principal, 'run.read', run);
       } catch (error) {
         if (error instanceof AuthorizationError) continue;
         throw error;
@@ -2008,12 +2348,7 @@ export class PlatformControlService {
       let run: RunRecord;
       try {
         run = this.runs.get(review.runId);
-        this.policy.authorize(principal, 'run.review', {
-          appId: run.appId,
-          projectId: run.workspace?.projectId,
-          workspaceId: run.workspace?.workspaceId,
-          workId: run.workId ?? undefined,
-        });
+        this.authorizeRunScope(principal, 'run.review', run);
       } catch (error) {
         if (error instanceof AuthorizationError) continue;
         throw error;
@@ -2024,8 +2359,12 @@ export class PlatformControlService {
         runId: review.runId,
         workId: run.workId ?? null,
         createdAt: review.createdAt,
-        summary: `交付复核待决定（由 ${review.requestedBy} 发起，当前 revision ${review.revision}）`,
-        resolveHint: 'POST /api/reviews/:reviewId/decision（需 expectedRevision）',
+        // R5 display facts: a bound review names its frozen target manifest; a legacy run-only
+        // record is marked for what it is — never given an invented manifest.
+        summary: review.deliverable
+          ? `交付复核待决定（由 ${review.requestedBy} 发起，目标清单 ${review.deliverable.manifestDigest.slice(0, 12)}，当前 revision ${review.revision}）`
+          : `交付复核待决定（由 ${review.requestedBy} 发起，未绑定具体成果版本，当前 revision ${review.revision}）`,
+        resolveHint: 'POST /api/reviews/:reviewId/decision（需 expectedRevision 与 expectedManifestDigest）',
       });
     }
     // Delivered-but-unreceived packages: authorized exactly as acknowledgeDeliveryPackage authorizes,
@@ -2059,10 +2398,7 @@ export class PlatformControlService {
     const record = this.store.interactionGet(interactionId);
     if (!record) throw new PlatformError('INTERACTION_NOT_FOUND');
     const run = this.runs.get(record.runId);
-    this.policy.authorize(principal, 'run.answer', {
-      appId: run.appId, projectId: run.workspace?.projectId,
-      workspaceId: run.workspace?.workspaceId, workId: run.workId ?? undefined,
-    });
+    this.authorizeRunScope(principal, 'run.answer', run);
     if (['SUCCEEDED', 'FAILED', 'CANCELLED', 'UNKNOWN'].includes(run.snapshot.state)) {
       throw new PlatformError('INTERACTION_RUN_TERMINAL', run.snapshot.state);
     }
@@ -2204,8 +2540,12 @@ export class PlatformControlService {
     this.settleInteractions(runId, 'CANCELLED');
     if (cancelled.snapshot.state === 'CANCELLED') return { record: cancelled, cancelSettled: true };
     const launchId = cancelled.snapshot.launchId;
-    if (!launchId || !this.executor) return { record: cancelled, cancelSettled: false };
-    const settled = await this.executor.cancel(launchId);
+    if (!launchId) return { record: cancelled, cancelSettled: false };
+    // Cancel through the executor this run was dispatched under — its own bundle, never a default.
+    const bundle = this.registry.get(record.appId, record.appVersion).plan.runtimeBundleDigest;
+    const executor = this.executorFor(bundle);
+    if (!executor) return { record: cancelled, cancelSettled: false };
+    const settled = await executor.cancel(launchId);
     if (!settled) return { record: cancelled, cancelSettled: false };
     const latest = this.runs.get(runId);
     if (latest.snapshot.state === 'CANCELLED') return { record: latest, cancelSettled: true };
@@ -2221,12 +2561,7 @@ export class PlatformControlService {
   /** Operator-confirmed reconciliation: UNKNOWN stays the historical fact, but no longer reserves work. */
   reconcileUnknown(runId: string, principal: Principal): RunRecord {
     const run = this.runs.get(runId);
-    this.policy.authorize(principal, 'run.reconcile', {
-      appId: run.appId,
-      projectId: run.workspace?.projectId,
-      workspaceId: run.workspace?.workspaceId,
-      workId: run.workId ?? undefined,
-    });
+    this.authorizeRunScope(principal, 'run.reconcile', run);
     if (run.snapshot.state !== 'UNKNOWN') throw new PlatformError('RUN_NOT_UNKNOWN', run.snapshot.state);
     if (!run.reconciledAt) {
       this.store.runMarkReconciled(runId, new Date().toISOString());
@@ -2237,14 +2572,17 @@ export class PlatformControlService {
     return this.getRun(runId, principal);
   }
 
-  /** Supervisor-only: launch the worker and bind its launchId/fencing token. */
+  /** Supervisor-only: launch the worker and bind its launchId/fencing token. Dispatch resolves
+   *  the executor by THIS run's exact runtime bundle (never the app's default release), so a
+   *  queued run always drains on the artifact it was admitted under. */
   async dispatchRun(runId: string, expectedRevision: number, principal: Principal): Promise<RunRecord> {
     this.policy.authorize(principal, 'run.dispatch');
-    if (!this.executor) throw new PlatformError('EXECUTOR_NOT_CONFIGURED');
     const record = this.runs.get(runId);
     if (record.snapshot.revision !== expectedRevision) throw new PlatformError('RUN_REVISION_STALE');
     if (record.snapshot.cancelRequested) throw new PlatformError('RUN_CANCEL_REQUESTED');
     const app = this.registry.get(record.appId, record.appVersion);
+    const executor = this.executorFor(app.plan.runtimeBundleDigest);
+    if (!executor) throw new PlatformError('EXECUTOR_UNAVAILABLE', app.plan.runtimeBundleDigest);
     if (app.state !== 'ACTIVE')
       throw new PlatformError('APP_RELEASE_NOT_ACTIVE', `${record.appId}@${record.appVersion}`);
     if (record.model) {
@@ -2274,7 +2612,7 @@ export class PlatformControlService {
     metrics.counter('platform_run_dispatch_started', { appId: record.appId });
     let launch;
     try {
-      launch = await this.executor.dispatch({
+      launch = await executor.dispatch({
         run: record,
         plan: app.plan,
         inputs,
@@ -2303,7 +2641,7 @@ export class PlatformControlService {
         whichService(principal),
       );
     } catch (error) {
-      await this.executor.cancel(launch.launchId);
+      await executor.cancel(launch.launchId);
       this.store.attemptUpdate(launchId, 'FAILED', 'DISPATCH_BINDING_FAILED');
       throw error;
     }
@@ -2322,7 +2660,7 @@ export class PlatformControlService {
   /** Supervisor-only: one bounded scheduling turn over queued runs. Failures leave the run queued. */
   async dispatchQueued(limit: number, principal: Principal): Promise<RunRecord[]> {
     this.policy.authorize(principal, 'run.dispatch');
-    if (!this.executor) throw new PlatformError('EXECUTOR_NOT_CONFIGURED');
+    if (!this.executor && this.executorsByDigest.size === 0) throw new PlatformError('EXECUTOR_NOT_CONFIGURED');
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new PlatformError('RUN_BATCH_INVALID');
     const queued = this.store
       .queuedRuns(100)
@@ -2444,7 +2782,9 @@ export class PlatformControlService {
           (counts.CANCELLED ?? 0) +
           (counts.UNKNOWN ?? 0),
       },
-      executor: this.executor?.kind ?? 'not-configured',
+      executor:
+        this.executor?.kind ??
+        (this.executorsByDigest.size > 0 ? `${this.executorsByDigest.size} bundle executor(s)` : 'not-configured'),
       artifacts: this.store.artifactCount(),
       auditEntries: this.store.auditList(0, 1).total,
       outbox: this.store.outboxCounts(),
@@ -2581,6 +2921,44 @@ export class PlatformControlService {
       item.kind === activity.kind &&
       (item.seq === undefined || activity.seq === undefined || item.seq === activity.seq))) return;
     this.conversationActivities.set(runId, [...seen, activity].slice(-200));
+    // Same dedupe above guards the live feed: a cursor-tagged copy is appended once and pushed to
+    // every open stream, so the UI never needs to poll the run to see new activity.
+    const cursor = (this.activityCursor.get(runId) ?? 0) + 1;
+    this.activityCursor.set(runId, cursor);
+    this.activityLog.set(runId, [...(this.activityLog.get(runId) ?? []), { cursor, activity }].slice(-200));
+    for (const waiter of this.activityWaiters.get(runId) ?? []) {
+      try {
+        waiter({ cursor, activity });
+      } catch {
+        // A broken stream must not stop activity recording for the run.
+      }
+    }
+  }
+
+  /** Replay activities after `after`, then stream new ones. Authorized on subscribe and per push. */
+  activityStream(
+    runId: string,
+    after: number,
+    principal: Principal,
+    deliver: (entry: { cursor: number; activity: RunActivity }) => void,
+  ): () => void {
+    this.getRun(runId, principal);
+    for (const entry of this.activityLog.get(runId) ?? []) {
+      if (entry.cursor > after) deliver(entry);
+    }
+    const guarded = (entry: { cursor: number; activity: RunActivity }): void => {
+      // Re-authorize on every push: a stream must not outlive the caller's right to read the run.
+      this.getRun(runId, principal);
+      deliver(entry);
+    };
+    const waiters = this.activityWaiters.get(runId) ?? new Set();
+    waiters.add(guarded);
+    this.activityWaiters.set(runId, waiters);
+    return () => {
+      const current = this.activityWaiters.get(runId);
+      current?.delete(guarded);
+      if (current && current.size === 0) this.activityWaiters.delete(runId);
+    };
   }
   private async observeOutcome(runId: string, launchId: string, fencingToken: number, promise: Promise<RunOutcome>): Promise<void> {
     try {
@@ -2620,6 +2998,7 @@ export class PlatformControlService {
       appId: run.appId,
       appVersion: run.appVersion,
       ...(run.workspace?.projectId ? { projectId: run.workspace.projectId } : {}),
+      ...(run.knowledge?.pluginId ? { pluginId: run.knowledge.pluginId } : {}),
       inputDigest: run.inputDigest,
       artifactDigests: this.store.artifacts(run.runId).map((artifact) => artifact.digest),
       ...(run.snapshot.reason ? { reason: run.snapshot.reason } : {}),

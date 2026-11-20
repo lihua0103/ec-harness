@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 2,
+  "pluginId": "ec-platform-workbench",
+  "owner": "工作台负责人",
+  "source": "docs/WORKBENCH-ENTERPRISE-RENOVATION-PLAN-2026-11-17.md",
+  "taxonomy": {
+    "topics": ["operate", "recover", "governance", "release"]
+  },
+  "seeds": [],
+  "validators": [],
+  "capabilities": [
+    { "tool": "platform_workbench_snapshot", "topics": ["operate", "release"] },
+    { "tool": "platform_workbench_create_work", "topics": ["operate"] },
+    { "tool": "platform_workbench_start_run", "topics": ["operate"] },
+    { "tool": "platform_workbench_history", "topics": ["recover"] },
+    { "tool": "platform_workbench_governance", "topics": ["governance"] }
+  ],
+  "noMethodKnowledge": [
+    { "tool": "platform_workbench_snapshot", "reason": "工作台状态快照读取；操作指引由 docs 语料提供" }
+  ],
+  "agent": {
+    "id": "ec-platform-workbench.agent",
+    "version": "1.0.0",
+    "owner": "工作台负责人",
+    "topics": ["operate", "recover", "governance", "release"],
+    "tools": [
+      { "tool": "platform_workbench_snapshot", "topics": ["operate", "release"] },
+      { "tool": "platform_workbench_create_work", "topics": ["operate"] },
+      { "tool": "platform_workbench_start_run", "topics": ["operate"] },
+      { "tool": "platform_workbench_history", "topics": ["recover"] },
+      { "tool": "platform_workbench_governance", "topics": ["governance"] }
+    ],
+    "noMethodTools": [
+      { "tool": "platform_workbench_snapshot", "reason": "状态读取；操作指引由 docs 语料提供" }
+    ]
+  },
+  "feedback": {
+    "events": ["run.failed", "run.succeeded", "business.clarified"],
+    "projectionVersion": "1"
+  },
+  "goldenSet": {
+    "id": "ec-platform-workbench.golden",
+    "version": "1",
+    "cases": [
+      { "query": "workbench snapshot", "expectEmpty": true }
+    ]
+  },
+  "corpus": {
+    "source": "docs/",
+    "docPrefixes": ["docs/ENTERPRISE-WORKBENCH-UX-SOLUTION.md", "docs/WORKBENCH-ENTERPRISE-RENOVATION-PLAN-2026-11-17.md", "docs/ENTERPRISE-WORKBENCH-DSH-REMEDIATION-ADDENDUM.md", "docs/WORKBENCH-UX-RENOVATION-PLAN-2026-11-17.md"]
+  },
+  "scope": { "projects": "all" }
+}

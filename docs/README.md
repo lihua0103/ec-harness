@@ -2,6 +2,10 @@
 
 企业级开发规范：[DSH 插件开发规范 v1.0](DSH-PLUGIN-DEVELOPMENT-STANDARD.md)——**当前系统及所有后续开发必须遵守**，不设存量豁免，不为错误实现保留兼容层；不符合项须修正或重做并通过对应检查。规范唯一维护于该正文。
 
+## 社区工作台调研（2026-11-19）
+
+[DSH 社区工作台插件调研](DSH-COMMUNITY-WORKBENCH-RESEARCH-2026-11-19.md)：基于 npm / GitHub 与 11,979 条插件目录快照，梳理社区工作台的五类形态，提取 10 个可借鉴架构模式（版本化模块契约、共享宿主、同屏同事实同权限、控制室、完成≠验收、台账修订、唤醒租约、内联 GenUI、市场探测、版本能力矩阵），并列出不建议照搬的做法与三步落地顺序。**结论来自作者 README 自述，未逐行核源；采纳前须核对 DSH 上游公开契约。**
+
 ## 原生 WebUI 与企业工作台统一实施（2026-11-12）
 
 [详细开发实施任务书](NATIVE-WEBUI-ENTERPRISE-WORKBENCH-IMPLEMENTATION.md)：保留原生实时会话能力，统一企业工作体验，支持员工独立环境与集中部署，并预备对接既有身份权限系统。包含 T00–T11 任务依赖、文件责任、目标接口、迁移步骤、NW01–NW24 验收与接续开发指令；**当前是开发方案，不是功能已实现或部署通过**。
@@ -47,7 +51,15 @@ DSH profile/SDK，默认未配置，配置后可通过 SDK client 执行并登�
 
 - [应用发布与执行合同](PLATFORM-APPLICATION-RELEASE-CONTRACT.md)：AppRegistration/AppExecutor、确定性能力映射、不可变运行基线和 home 隔离。
 - [工作与运行生命周期合同](PLATFORM-RUN-LIFECYCLE-CONTRACT.md)：取消竞争、追加消息来源、完成屏障和同 Run 恢复/新 Run 重试。
+- [平台运行手册](PLATFORM-OPERATIONS-RUNBOOK.md)：Outbox 派发、启动租约与 UNKNOWN 处置、发布审批、模型健康、指标/日志、审计哈希链导出、备份校验恢复与知识验证回执的操作口径（2026-11-17 实现）。
+- [平台故障排查 Runbook](PLATFORM-FAULT-RUNBOOK.md)：按症状的故障处置——运行停滞、模型/审批/配额拒绝（429）、库损坏恢复、交付包状态、不可比较差异、Windows 已知边界、升级迁移核对清单与明确门控缺口（2026-11-18，E3-5）。
+- [控制面备份恢复演练记录](BACKUP-DRILL-2026-11-18.md)：2026-11-18 实机演练（备份→校验→恢复→逐表复核），含内容保真回归测试与诚实边界声明（E3-2）。
 - [跨进程知识验证合同](PLATFORM-KNOWLEDGE-VALIDATION-CONTRACT.md)：中心状态、固定验证执行器与回执条件激活。
+- [企业级知识库体系设计](DSH-ENTERPRISE-KNOWLEDGE-SYSTEM.md)：每纳管插件一个知识智能体、分层权威、运行接线、验证激活与降级（2026-11-20 设计稿）。
+- [知识库开发与验收计划](DSH-ENTERPRISE-KNOWLEDGE-DELIVERY-PLAN.md)：M0–M4 里程碑、12 项工单与 A01–A16 验收矩阵；验收证据与状态分列。
+- [插件知识智能体合同](KNOWLEDGE-AGENT-CONTRACT.md)：manifest v2、可信范围、固定快照与证据、事件投影、一次性回执与覆盖门禁（2026-11-20 已实现工程合同）。
+- [知识库规模评估](KNOWLEDGE-SCALE-ASSESSMENT.md)：2026-11-16 实测——检索在 20 000 条下约 1.9 s、2/4 插件零沉淀、`claims`/`coverage` 缺口使 listing 全量与 DVP 5 条方法结构性不可 ACTIVE；含 P0–P2 整改顺序。
+- [国际化企业级知识库架构](ENTERPRISE-KNOWLEDGE-ARCHITECTURE.md)：六层分层（语料/对象/索引检索/验证激活/租户授权/消费面）、对象模型与 `knowledge/manifest.json` 每插件沉淀合同、检索管线与延迟预算、租户与区域分区、多语言面（非分库）、Run 快照绑定、Phase 1–3 演进与 KA01–KA16 验收编号。**P0 + KA01–KA16 工程项已落地并过全仓门禁（2026-11-17，verify-all 18/18）**：存储 v3+FTS5 trigram（20k 条选择性查询 2 ms）、四插件沉淀合同+检查器规则、participants/viz 接入、种子窄声明激活、docs 57 份建 813 分片（幂等导入）、Run 创建绑定只读知识快照摘要。KA07–KA16 工程项已落地；真实生产跨进程执行器身份、ClaimEvidence 结构化扩展与生产部署演练仍为目标。
 - [架构评审与修订对照](ENTERPRISE-MULTI-PLUGIN-ARCHITECTURE-REVIEW.md)：保留七项原评审，区分设计修订与运行验证。
 - [SDK 最小真实接入验证](SDK-MINIMAL-INTEGRATION-VERIFICATION.md)：2026-11-11 锁定 0.2.2-rc.1 实测全绿（接入/事件/恢复/关闭），附未覆盖边界清单；不构成合同验收。
 - [SDK 集成交付级验收](SDK-INTEGRATION-ACCEPTANCE.md)：2026-11-11 12 用例验收套件，11/11 真实模型通过（工具执行/多轮/提问应答与取消/并发隔离/恢复拒绝/截断/排空/审批通道），崩溃注入用例待执行；产出问答链路缺位、事件级粒度、写柄租约等基线事实。
