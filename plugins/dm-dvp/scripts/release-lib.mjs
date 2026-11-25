@@ -1,7 +1,9 @@
-// dm-dvp release pipeline (adapted from dm-listing release-lib): host bundle only.
-// No client, no platform-knowledge copy, no knowledge dir; runtime deps are bundled,
-// DSH peer services stay external. CANDIDATE discipline is identical: a portable bundle
-// is not proof of clean DSH installation or clinical acceptance. No disk writes here.
+// dm-dvp release pipeline (adapted from dm-listing release-lib): host bundle plus the browser
+// client-module factory (lib/client.js) since the employee entry shipped (2026-11-24).
+// No platform-knowledge copy, no knowledge dir; runtime deps are bundled,
+// DSH peer services stay external, and the client's React / @deepseek-ai client packages are
+// resolved by the web shell's module table (never bundled). CANDIDATE discipline is identical: a
+// portable bundle is not proof of clean DSH installation or clinical acceptance. No disk writes here.
 import { build } from 'esbuild';
 import { zipSync, unzipSync, strToU8 } from 'fflate';
 import { createHash } from 'node:crypto';
@@ -108,6 +110,14 @@ export async function buildCandidate(root) {
       throw new Error(`UNBUNDLED_RUNTIME_DEPENDENCY: ${entry.path}`);
     }
   }
+  // The browser half: a client-module factory whose externals (React, the client primitives) are
+  // supplied by the web shell. Built here so the candidate carries exactly this source's entry.
+  const client = await build({
+    absWorkingDir: root, entryPoints: ['src/client/index.ts'], bundle: true,
+    platform: 'browser', format: 'cjs', target: 'es2022', write: false, metafile: true, logLevel: 'silent',
+    external: ['react', '@deepseek-ai/dsh-client-ui-primitives'],
+  });
+  const clientBundle = strToU8(`window.__ModuleLoader__.load({id:${JSON.stringify(pkg.name)},factory(require){const module={exports:{}};const exports=module.exports;\n${client.outputFiles[0].text}\nreturn module.exports;}});\n`);
   const runtimePackage = {
     name: pkg.name, version: pkg.version, description: pkg.description, type: 'module',
     main: './lib/index.js', exports: pkg.exports,
@@ -117,6 +127,7 @@ export async function buildCandidate(root) {
   const files = {
     'package/package.json': strToU8(JSON.stringify(runtimePackage, null, 2) + '\n'),
     'package/lib/index.js': host.outputFiles[0].contents,
+    'package/lib/client.js': clientBundle,
     'package/README.md': new Uint8Array(await readFile(join(root, 'README.md'))),
     'package/DEVELOPMENT.md': new Uint8Array(await readFile(join(root, 'DEVELOPMENT.md'))),
     'package/THIRD-PARTY-NOTICES.txt': strToU8(bundledPackages.map(p => `${p.name}@${p.version} (${p.license})\n${p.text}`).join('\n\n----------------\n\n')),
@@ -160,7 +171,7 @@ export function verifyCandidate(archive) {
       return true;
     },
   });
-  const allowed = name => /^package\/(package\.json|README\.md|DEVELOPMENT\.md|THIRD-PARTY-NOTICES\.txt|cordis\.patch\.yml|release-manifest\.json|lib\/index\.js)$/.test(name)
+  const allowed = name => /^package\/(package\.json|README\.md|DEVELOPMENT\.md|THIRD-PARTY-NOTICES\.txt|cordis\.patch\.yml|release-manifest\.json|lib\/(index|client)\.js)$/.test(name)
     && !name.split('/').includes('..') && !name.includes('//');
   if (Object.keys(files).some(name => !allowed(name))) throw new Error('CANDIDATE_UNEXPECTED_FILE');
   const json = name => JSON.parse(Buffer.from(files[`package/${name}`] ?? []).toString('utf8'));
@@ -171,7 +182,7 @@ export function verifyCandidate(archive) {
   const expected = Object.keys(files).filter(n => n !== 'package/release-manifest.json').sort();
   if (JSON.stringify(Object.keys(manifest.checksums ?? {}).sort()) !== JSON.stringify(expected)) throw new Error('CANDIDATE_FILE_SET_CHANGED');
   for (const name of expected) if (digest(files[name]) !== manifest.checksums[name]) throw new Error('CANDIDATE_DIGEST_MISMATCH');
-  for (const required of ['package.json', 'README.md', 'DEVELOPMENT.md', 'THIRD-PARTY-NOTICES.txt', 'cordis.patch.yml', 'lib/index.js']) if (!files[`package/${required}`]) throw new Error('CANDIDATE_INCOMPLETE');
+  for (const required of ['package.json', 'README.md', 'DEVELOPMENT.md', 'THIRD-PARTY-NOTICES.txt', 'cordis.patch.yml', 'lib/index.js', 'lib/client.js']) if (!files[`package/${required}`]) throw new Error('CANDIDATE_INCOMPLETE');
   const computed = digest(JSON.stringify({ source: manifest.source, checksums: manifest.checksums, upstreamCommit: manifest.upstreamCommit, node: manifest.nodeVersion }));
   if (computed !== manifest.buildDigest) throw new Error('CANDIDATE_BUILD_DIGEST_MISMATCH');
   return { manifest, archiveDigest: digest(archive), integrity: 'VERIFIED', acceptance: 'NOT_RUN' };

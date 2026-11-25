@@ -80,6 +80,7 @@ const setup = async () => {
     { requireArtifacts: true },
   );
   service.registerApp(draft(), operator);
+  service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
   const project = service.createProject({ name: '肾病三期项目' }, operator);
   const escTitle = '达标率100%清单';
   const works = [

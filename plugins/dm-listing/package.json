@@ -1,16 +1,54 @@
 {
   "name": "@ec-clinical/dsh-dm-listing",
-  "version": "0.2.1",
+  "version": "0.2.6",
   "description": "临床 Listing：Medical / Manual / Report / PK；真实项目只读工作流、合成执行验证与候选交付，生成物需业务审核。",
   "type": "module",
   "main": "./lib/index.js",
-  "exports": {".": "./lib/index.js", "./client": "./lib/client.js", "./package.json": "./package.json", "./application.json": "./application.json"},
-  "files": ["lib", "knowledge", "application.json", "cordis.patch.yml", "README.md", "PROJECTION.md"],
-  "engines": {"node": ">=24.9.0", "dsh": "0.2.2-rc.1"},
-  "dsh": {"bundle": {"patch": "./cordis.patch.yml"}, "client": {"platform": "web"}},
-  "scripts": {"build": "node build.mjs", "typecheck": "tsc --noEmit", "test": "tsx --test tests/*.test.ts", "verify": "node scripts/verify.mjs", "release:candidate": "node scripts/release.mjs", "review:demo": "node --import tsx scripts/review.ts --demo"},
-  "dependencies": {"fflate": "0.8.2", "yauzl": "3.4.0", "fast-xml-parser": "5.11.1"},
-  "peerDependencies": {"@deepseek-ai/cordis": "4.1.0", "@deepseek-ai/dsh-tools": "0.2.2-rc.1", "@deepseek-ai/dsh-skill": "0.2.2-rc.1", "@deepseek-ai/dsh-user-questions": "0.2.2-rc.1"},
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./application.json": "./application.json"
+  },
+  "files": [
+    "lib",
+    "knowledge",
+    "application.json",
+    "cordis.patch.yml",
+    "README.md",
+    "PROJECTION.md"
+  ],
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": "0.2.2-rc.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "verify": "node scripts/verify.mjs",
+    "release:candidate": "node scripts/release.mjs",
+    "review:demo": "node --import tsx scripts/review.ts --demo"
+  },
+  "dependencies": {
+    "fflate": "0.8.2",
+    "yauzl": "3.4.0",
+    "fast-xml-parser": "5.11.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-skill": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-user-questions": "0.2.2-rc.1"
+  },
   "devDependencies": {
     "@deepseek-ai/dsh-client-ui-renderer": "link:../../upstream/deepseek-harness-git/packages/client/ui-renderer",
     "@deepseek-ai/dsh-client-ui-primitives": "link:../../upstream/deepseek-harness-git/packages/client/ui-primitives",
@@ -18,13 +56,19 @@
     "@deepseek-ai/dsh-client-locale": "link:../../upstream/deepseek-harness-git/packages/client/locale",
     "@deepseek-ai/dsh-client-ui-conversation": "link:../../upstream/deepseek-harness-git/packages/client/ui-conversation",
     "@deepseek-ai/dsh-client-ui-plugin-manager": "link:../../upstream/deepseek-harness-git/packages/client/ui-plugin-manager",
-    "react": "18.3.1", "@types/react": "18.3.1",
+    "react": "18.3.1",
+    "@types/react": "18.3.1",
     "@deepseek-ai/dsh-system-prompt": "link:../../upstream/deepseek-harness-git/packages/core/system-prompt",
     "@deepseek-ai/cordis": "link:../../upstream/deepseek-harness-git/vendor/cordis",
     "@deepseek-ai/dsh-tools": "link:../../upstream/deepseek-harness-git/packages/core/tools",
     "@deepseek-ai/dsh-skill": "link:../../upstream/deepseek-harness-git/packages/skill/skill",
     "@deepseek-ai/dsh-user-questions": "link:../../upstream/deepseek-harness-git/packages/interaction/user-questions",
-    "@types/node": "22.20.1", "@types/yauzl": "2.10.3", "esbuild": "0.28.2", "typescript": "6.0.3", "tsx": "4.23.13", "fflate": "0.8.2"
+    "@types/node": "22.20.1",
+    "@types/yauzl": "2.10.3",
+    "esbuild": "0.28.2",
+    "typescript": "6.0.3",
+    "tsx": "4.23.13",
+    "fflate": "0.8.2"
   },
   "license": "UNLICENSED",
   "packageManager": "pnpm@11.28.5"

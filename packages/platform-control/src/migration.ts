@@ -171,7 +171,7 @@ export function summarizeControlStore(storePath: string, sessionsHome?: string):
     for (const table of [
       'projects', 'project_workspaces', 'works', 'runs', 'run_inputs', 'run_artifacts',
       'run_events', 'run_interactions', 'audit_events', 'work_drafts', 'work_session_bindings',
-      'submissions', 'execution_domains', 'input_baselines', 'app_releases', 'model_catalog',
+      'submissions', 'execution_domains', 'input_baselines', 'app_releases', 'app_default_releases', 'model_catalog',
     ]) {
       if (tableExists(db, table)) counts[table] = count(db, table);
     }

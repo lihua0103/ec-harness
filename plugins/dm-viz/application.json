@@ -2,7 +2,17 @@
   "appId": "ec.viz",
   "displayName": "图表设计与交付",
   "description": "把图表设计稿转成系统内可保存、可复跑的图表配置与布局，并按设计稿逐图验收。输出为配置候选，需业务验收。",
-  "materialRoles": ["设计稿（自包含 HTML）", "数据产物", "样式约定（可选）"],
-  "resultTypes": ["图表配置（数据集/规格/布局）", "图表页", "验收证据"],
-  "capabilityId": "ec.viz.deliver"
+  "materialRoles": [
+    "设计稿（自包含 HTML）",
+    "数据产物",
+    "样式约定（可选）"
+  ],
+  "resultTypes": [
+    "图表配置（数据集/规格/布局）",
+    "图表页",
+    "验收证据"
+  ],
+  "capabilityId": "ec.viz.deliver",
+  "capabilityVersion": "1.0.0",
+  "knowledgePluginId": "ec-clinical-dm-viz"
 }

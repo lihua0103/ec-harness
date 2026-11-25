@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 1500" role="img" aria-labelledby="title description">
+  <title id="title">Emerald 旗舰工作台双屏设计样张</title>
+  <desc id="description">上屏展示首页优先处理最新失败但不虚构待办。下屏保留原生对话，右栏在新批次失败时仍明确标出旧批次的有效交付。所有状态、时间和批次均为示意。</desc>
+  <style>
+    text {font-family:'Source Sans 3','Noto Sans SC','Microsoft YaHei',sans-serif;fill:#182b26;font-size:16px}
+    .paper{fill:#f2f5f1}.white{fill:#fff}.stamp{fill:#e0eee6}.emerald{fill:#11604a}.warn{fill:#8b421e}.on{fill:#fff}
+    .line{stroke:#d1dcd5;stroke-width:1}.muted{fill:#51645d}.small{font-size:13px}.section{font-size:20px;font-weight:650}.heavy{font-weight:650}.title{font-size:36px;font-weight:650}.heading{font-size:29px;font-weight:650}.brand{font-size:24px;font-weight:650;letter-spacing:-.5px}
+  </style>
+  <rect width="1320" height="1500" class="paper"/>
+  <text x="48" y="69" class="title">Emerald 旗舰工作台</text>
+  <text x="49" y="104" class="muted">从发现失败到识别有效交付</text>
+  <text x="1272" y="102" text-anchor="end" class="small muted">视觉样张 · 批次、对话与交付为示意</text>
+
+  <g aria-label="首页样张">
+    <rect x="48" y="142" width="1224" height="543" rx="12" class="white line"/>
+    <path d="M60 142H244V685H60Q48 685 48 673V154Q48 142 60 142Z" fill="#e0eee6"/>
+    <text x="73" y="188" class="brand">Emerald</text>
+    <text x="74" y="211" class="small muted">临床 AI 工作台</text>
+    <rect x="64" y="241" width="160" height="38" rx="6" class="white"/>
+    <text x="76" y="266" class="emerald heavy">我的工作</text>
+    <text x="76" y="312">历史会话</text><text x="76" y="357">项目空间</text><text x="76" y="402">应用中心</text><text x="76" y="447">待我处理</text>
+    <text x="76" y="650" class="small muted">平台设置</text>
+    <text x="278" y="200" class="heading">我的工作</text>
+    <rect x="884" y="170" width="132" height="37" rx="6" class="white line"/>
+    <text x="903" y="194" class="small">所有项目　⌄</text>
+    <rect x="1030" y="170" width="200" height="37" rx="6" class="emerald"/>
+    <text x="1130" y="194" text-anchor="middle" class="on heavy">＋ 新建工作</text>
+    <path d="M278 228H1230" class="line"/>
+
+    <text x="278" y="267" class="section">优先处理</text>
+    <rect x="278" y="288" width="655" height="114" rx="6" fill="#f2f5f1"/>
+    <path d="M280 299v92" stroke="#8b421e" stroke-width="3"/>
+    <text x="300" y="320" class="warn small">运行未完成</text>
+    <text x="300" y="348" class="section">EMPA-KIDNEY DVP 草稿</text>
+    <text x="300" y="377" class="small muted">最近运行使用批次 02，失败原因待查看。</text>
+    <rect x="807" y="337" width="106" height="36" rx="5" class="white line"/>
+    <text x="860" y="360" text-anchor="middle" class="heavy">查看失败</text>
+
+    <text x="278" y="450" class="section">最近工作</text>
+    <text x="278" y="483" class="small muted">工作</text><text x="685" y="483" class="small muted">最近运行</text><text x="913" y="483" text-anchor="end" class="small muted">操作</text>
+    <path d="M278 496H933M278 559H933M278 624H933" class="line"/>
+    <text x="278" y="520" class="heavy">EMPA-KIDNEY DVP 草稿</text><text x="278" y="542" class="small muted">公开肾脏试验数据</text>
+    <text x="685" y="530" class="warn">失败</text><text x="913" y="530" text-anchor="end" class="emerald">查看失败</text>
+    <text x="278" y="585" class="heavy">NHANES CKD Manual Listing</text><text x="278" y="607" class="small muted">公开肾脏试验数据</text>
+    <text x="685" y="595">运行完成</text><text x="913" y="595" text-anchor="end" class="emerald">打开工作</text>
+
+    <path d="M960 250V624" class="line"/>
+    <text x="986" y="267" class="section">项目空间</text>
+    <text x="986" y="309" class="heavy">公开肾脏试验数据</text>
+    <text x="986" y="335" class="small muted">公开资料与数据</text>
+    <path d="M986 370H1230" class="line"/>
+    <text x="986" y="408" class="section">待我处理</text>
+    <text x="986" y="442" class="small muted">没有待你处理的事项。</text>
+  </g>
+
+  <g aria-label="工作页样张">
+    <rect x="48" y="734" width="1224" height="702" rx="12" class="white line"/>
+    <text x="78" y="776" class="emerald small heavy">‹ 我的工作</text>
+    <text x="180" y="776" class="small muted">/　公开肾脏试验数据</text>
+    <text x="78" y="820" class="heading">EMPA-KIDNEY DVP 草稿</text>
+    <path d="M48 848H1272M854 848V1436" class="line"/>
+    <text x="80" y="889" class="section">原生 DSH 会话</text>
+    <text x="80" y="918" class="small muted">保留宿主的消息、工具事件和输入区</text>
+    <rect x="306" y="958" width="504" height="76" rx="9" class="paper"/>
+    <text x="328" y="1002">批次 02 的运行没有完成。先看看发生了什么。</text>
+    <circle cx="95" cy="1076" r="13" class="stamp"/>
+    <path d="M90 1076l4 4 6-8" fill="none" stroke="#11604a" stroke-width="2"/>
+    <text x="121" y="1076" class="heavy">我会先核对这次运行使用的输入和可用诊断。</text>
+    <text x="121" y="1106" class="muted">右侧保留了当前交付；这次失败没有替换它。</text>
+    <rect x="80" y="1310" width="730" height="81" rx="11" class="white line"/>
+    <text x="101" y="1343" class="muted">继续当前会话</text>
+    <text x="101" y="1372" class="small muted">模型与工具操作留在原生会话内</text>
+
+    <text x="881" y="890" class="section">运行记录</text>
+    <rect x="881" y="910" width="364" height="155" rx="7" class="stamp"/>
+    <path d="M883 920v134" stroke="#11604a" stroke-width="3"/>
+    <text x="903" y="940" class="small emerald heavy">当前交付</text>
+    <text x="903" y="976" class="section">DVP 交付包　v1</text>
+    <text x="903" y="1003" class="small muted">输入批次 01　/　11 月 18 日 16:42</text>
+    <text x="903" y="1040" class="emerald heavy">查看交付证据</text>
+    <text x="881" y="1106" class="small muted">输入基线</text><text x="1244" y="1106" text-anchor="end" class="heavy">批次 02</text>
+    <path d="M881 1124H1245" class="line"/>
+    <text x="881" y="1155" class="small muted">最近运行</text><text x="1244" y="1155" text-anchor="end" class="warn heavy">失败</text>
+    <text x="881" y="1186" class="small muted">使用批次 02　/　11 月 19 日 09:42</text>
+    <text x="881" y="1220" class="emerald heavy">查看失败详情</text>
+    <path d="M881 1242H1245M881 1321H1245" class="line"/>
+    <text x="881" y="1274" class="heavy">结果与复核</text>
+    <text x="881" y="1302" class="small muted">本次运行没有可复核的结果。</text>
+    <text x="881" y="1358" class="heavy">运行历史</text>
+    <text x="1244" y="1358" text-anchor="end" class="muted">展开　⌄</text>
+  </g>
+  <text x="48" y="1475" class="small muted">设计原则：运行失败、复核通过、正式交付是三种不同的事实。</text>
+</svg>

@@ -17,6 +17,7 @@ test('projects, real workspace references, long goals and personal drafts surviv
   let service = new PlatformControlService(path);
   try {
     service.registerApp(draft(), operator);
+    service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
     const project = service.createProject({ name: '合成项目', code: 'P001' }, operator);
     const other = service.createProject({ name: '合成项目', code: 'P001' }, operator);
     assert.notEqual(project.projectId, other.projectId);

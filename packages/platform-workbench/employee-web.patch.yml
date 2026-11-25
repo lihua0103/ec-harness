@@ -1,0 +1,19 @@
+# 员工 Web profile 叠加层（单侧栏架构 2026-11-21 · [设计方案](../../docs/WORKBENCH-SINGLE-SIDEBAR-ARCHITECTURE.md)）。
+#
+# 用途：员工界面只保留一套左侧导航——企业工作台的 `sidebar` 占位者。本文件按锁定版公开的
+# Cordis 配置语义（`disabled: true` 保留条目但跳过挂载，见
+# upstream/deepseek-harness-git/docs/cordis-tutorial/06-composition-and-hmr.md）禁用默认
+# `ui-sidebar` 客户端 bundle；企业导航由此成为 `sidebar` slot 的唯一占位者。
+# 工作台 Client 同时以 priority -1 注册同一 slot：即使未应用本文件，企业导航也会按
+# "lowest renders" 规则遮蔽默认侧栏，不会触发同优先级二次注册错误。
+#
+# 应用方式（二选一，回退以移除叠加层/取消 disabled 为单位）：
+# 1. 启动叠加：dsh web 启动参数追加 `--patch <repo>/packages/platform-workbench/employee-web.patch.yml`
+#    （不改 profile 目录，适合隔离装配探针）。
+# 2. profile 层合并：node scripts/apply-employee-web-profile.cjs --profile <DSH_HOME>/profiles/web
+#    （幂等合并进该 profile 的 cordis.patch.yml 用户层；--rollback 移除）。
+# ui-sidebar 被禁用后其声明的子 seat（sidebar.workspaces/settings/panellist）一并消失：
+# ui-workspace / ui-settings / 插件管理等 bundle 保持挂载，其服务仍可用，仅默认树入口不再出现——
+# 员工所需入口由企业导航承载，运维入口留在运维 profile。
+- id: ui-sidebar
+  disabled: true

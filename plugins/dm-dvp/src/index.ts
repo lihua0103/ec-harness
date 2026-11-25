@@ -6,9 +6,11 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import type {} from '@deepseek-ai/dsh-skill';
 import { readFileSync } from 'node:fs';
 import { WorkbookError } from '../../../packages/platform-workbook/src/index.js';
-import { BOUNDARY_NOTICES, DvpError, overviewDvpWorkbook, parseDvpWorkbook, type DvpSection } from './parse.js';
+import { boundaryNotices, DvpError, overviewDvpWorkbook, parseDvpWorkbook, type DvpSection } from './parse.js';
+import { dataBoundaryMode, fullAccess } from './data-boundary.js';
 import { RulesInputError, parseRulesJson, withLogicParse } from './rules.js';
 import { suggestCases } from './cases.js';
+import { readInputWorkbook, scanInputs } from './inputs.js';
 import { writeDvpWorkbook } from './write.js';
 import { renderChecks, RENDER_TARGETS } from './render.js';
 import { readProtocol } from './protocol.js';
@@ -18,7 +20,7 @@ import {
   DVP_PLUGIN_ID,
   DVP_SEED_VERSION,
   METHOD_TOPICS,
-  METHOD_TOPIC_MAP,
+  resolveMethodTopic,
 } from './knowledge-seeds.js';
 import { dvpMethodSuite } from './knowledge-validators.js';
 import type { KnowledgeDraft } from '../../../packages/platform-knowledge/src/schema.js';
@@ -27,9 +29,44 @@ import type {} from '../../../packages/platform-knowledge/src/cordis.js';
 export const name = 'ec-clinical-dm-dvp';
 export const inject = ['tools', 'skills', 'clinicalKnowledge'];
 
+/** 随包 package.json 的版本：dm_dvp_status 如实上报，不再手写一份会过期的版本号。 */
+export const DVP_PLUGIN_VERSION: string = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+
+/** 数据安全开关（data-boundary.ts，用户手动维护，与模型无关）。下面这些片段在插件注册时按开关选定：
+ *  full = 开关关闭（.runtime/data-boundary.json 的 dataSecurity=false）；redacted = 开关开启（默认）。 */
+const FULL = fullAccess();
+const COVER_NOTE = FULL ? 'Cover / Approval 在本部署全量可读' : '含 Cover，标记不读取';
+const REVIEW_NOTE = FULL ? '含 TEST CASE 受试者号与 DM/DBD 评审意见原值；Cover / Approval 原值附在 stats.sheets[].content' : '受试者号/评审意见只计数';
+const READ_SCOPE_HEAD = FULL ? '任意工作簿（含 DVP 模板）' : '非 DVP 模板工作簿';
+const READ_SCOPE_NOTE = FULL
+  ? '本部署已关闭数据安全开关：DVP 模板工作簿与 Cover / Approval / 未识别 sheet 均可直接读取。'
+  : 'DVP 模板工作簿一律拒绝（请用 dm_dvp_overview / dm_dvp_parse_workbook，它们保证 Cover/Approval/TEST CASE 边界）；名为 Cover/Approval 的 sheet 不读。';
+const SKILL_BOUNDARY_READ = FULL
+  ? '本部署为全量模式：DVP 模板工作簿也可以用该工具直接读取任意 sheet（含 Cover / Approval / 未识别 sheet）。'
+  : [
+    'DVP 模板工作簿不能用该工具——Cover 永不读、Approval 不读、TEST CASE 只计数，',
+    '  这些只由 dm_dvp_overview / dm_dvp_parse_workbook 保证；任何工作簿里名为 Cover / Approval 的 sheet 都不读。',
+  ].join('\n');
+const SKILL_BOUNDARY_SECTION = (FULL
+  ? [
+    '## 数据边界（随部署模式）',
+    '- 本部署为全量模式（.runtime/data-boundary.json 的 dataSecurity=false，由用户自行开关）：工作簿内容（含 Cover / Approval / TEST CASE / DM/DBD 评审意见）全量可读、原值返回。',
+    '- 全部生成物为候选（CANDIDATE），不是已验证 DVP；不伪报验证结果。',
+  ]
+  : [
+    '## 数据边界（不可协商）',
+    '- Cover sheet 内容永不读取；Approval 签署内容不读取。',
+    '- Manual Review for Programming 的 TEST CASE 受试者号与 DM/DBD 评审意见只计数、不回传。',
+    '- 未识别 sheet 只记录存在，不读取内容。',
+    '- 全部生成物为候选（CANDIDATE），不是已验证 DVP；不伪报验证结果。',
+  ]
+).join('\n');
+
 const SKILL_CONTENT = `# dm-dvp 方法（DVP 内容生成）
 
 ## 输入与可用能力
+- 工作目录内容：dm_dvp_scan 列出方案 PDF 与工作簿（含 ALS 导出）的存在、大小与修改时间，不读内容；
+  其他类型按扩展名计数。目录里有哪些文件不确定时用它查看。
 - 方案 PDF（语言随项目）：dm_dvp_read_protocol 读取文本层（window 控制页区间）。只返回文本层——表格、图表与版式不在其中；
   扫描件返回 NEEDS_OCR（不做 OCR、不凭图猜内容）；加密 PDF 拒绝；缺 ToUnicode 字体以 U+FFFD 占位并计数（ENCODING_FIDELITY）；
   解析 ObjStm 压缩页对象；页树声明页数与实际解析页数不一致时明确告警，不能当作方案完整。
@@ -37,6 +74,9 @@ const SKILL_CONTENT = `# dm-dvp 方法（DVP 内容生成）
   dm_dvp_parse_workbook 返回规则 IR（跨字段规则/字段级规格/人工评审/动态/版本历史 + 逐条诊断），
   可按 section + paging.nextOffset 继续读取；dm_dvp_validate_rules 复核完整性；dm_dvp_suggest_cases 生成
   正例/反例/恰边界候选；dm_dvp_render_checks 给出目标 EDC 配置参考；dm_dvp_write_workbook 写出草稿工作簿。
+- ALS / 数据库结构等非 DVP 模板工作簿：dm_dvp_read_workbook 读取任意 sheet（先省略 sheetId 取清单；大表用
+  startRow/endRow 分窗口）。${SKILL_BOUNDARY_READ}
+  旧版 .xls（二进制）不能直接读取，需另存为 .xlsx。
 - 方法知识：dm_dvp_methods 检索 template/firewhen/protocol/uat/cases；dm_dvp_knowledge_capture/validate/events
   沉淀、复核和查看学习事件。
 
@@ -63,11 +103,7 @@ dm_dvp_methods 检索 DVP 方法种子（template/firewhen/protocol/uat/cases）
 ## 行内变更控制
 Add/Delete/Update 列形如 Add/V2.0 = 动作/版本。逐版本追溯差异属后续版本（KnowledgeService 生命周期）。
 
-## 数据边界（不可协商）
-- Cover sheet 内容永不读取；Approval 签署内容不读取。
-- Manual Review for Programming 的 TEST CASE 受试者号与 DM/DBD 评审意见只计数、不回传。
-- 未识别 sheet 只记录存在，不读取内容。
-- 全部生成物为候选（CANDIDATE），不是已验证 DVP；不伪报验证结果。
+${SKILL_BOUNDARY_SECTION}
 - UAT 用例留档遵循公司流程：用例落在 Manual Review for Programming 行内 TEST CASE 区，由项目团队执行归档。
 
 ## 字段级规格的 EDC 语义
@@ -131,9 +167,15 @@ export function apply(ctx: Context): void {
     defineTool({
       name: 'dm_dvp_methods',
       description:
-        '检索 DVP 方法知识（种子与已沉淀候选）：template/firewhen/protocol/uat/cases。种子为 CANDIDATE，未复现验证不称 ACTIVE；知识是方法参考不是授权，不替代当前项目文档。',
+        '检索 DVP 方法知识（种子与已沉淀候选）：template/firewhen/protocol/uat/cases（topic 可填主题名，也可用自然语言描述）。种子为 CANDIDATE，未复现验证不称 ACTIVE；知识是方法参考不是授权，不替代当前项目文档。',
       parameters: {
-        topic: { ...string_type, required: true, enum: [...METHOD_TOPICS] },
+        topic: {
+          ...string_type,
+          // 不设 enum/必填：真实会话里模型 15 次把自然语言描述传进来被 INVALID_ARGS 挡回（2026-11-24）。
+          // 参数校验不该替模型做归类——执行时按关键词归入最接近的主题，归不进去就检索全部主题。
+          description:
+            '要检索的方法主题。可写主题名：template（模板结构/列语义）、firewhen（fire-when 方言）、protocol（方案 PDF 抽取）、uat（用例与 UAT 边界）、cases（用例设计）；也可以直接用自然语言描述想查什么，会按关键词归入最接近的主题，归不进去或省略时检索全部主题。没有 directory 参数——知识库检索不需要目录。',
+        },
         projectId: { ...string_type, description: '当前项目 ID（与快照绑定的项目一致时用于固定集合检索）。' },
         snapshotJson: {
           ...string_type,
@@ -148,10 +190,19 @@ export function apply(ctx: Context): void {
             pluginId: DVP_PLUGIN_ID,
             ...(args.projectId ? { projectId: args.projectId } : {}),
           };
+          const resolved = resolveMethodTopic(args.topic);
           const options = {
             states: ['ACTIVE', 'CANDIDATE'] as Array<'ACTIVE' | 'CANDIDATE'>,
-            topics: METHOD_TOPIC_MAP[args.topic as keyof typeof METHOD_TOPIC_MAP],
+            topics: resolved.topics,
             limit: 100,
+          };
+          // 如实告诉模型主题是怎么归类的；归不进去时给出可选的精确主题名，下一轮自然收窄
+          const topicInfo = {
+            requestedTopic: args.topic ?? null,
+            resolvedTopic: resolved.topic,
+            topicMatch: resolved.matched,
+            validTopics: [...METHOD_TOPICS],
+            ...(resolved.topic === null ? { topicNotice: '主题未指定或无法归入既定主题，已检索全部主题；下一次可从 validTopics 里选一个主题名以收窄结果。' } : {}),
           };
           if (args.snapshotJson) {
             if (args.snapshotJson.length > 2_000_000) throw new DvpError('KNOWLEDGE_SNAPSHOT_INVALID', 'snapshot JSON 过大');
@@ -159,6 +210,7 @@ export function apply(ctx: Context): void {
               source: 'platform-knowledge',
               retrieval: 'PINNED_SNAPSHOT',
               seedVersion: DVP_SEED_VERSION,
+              ...topicInfo,
               ...knowledge.searchPinned(context, JSON.parse(args.snapshotJson), options),
               notice: '快照内固定修订；撤回/撤权条目在 evidence.excluded 中显式列出。',
             };
@@ -167,6 +219,7 @@ export function apply(ctx: Context): void {
             source: 'platform-knowledge',
             retrieval: 'LIVE_UNBOUND',
             seedVersion: DVP_SEED_VERSION,
+            ...topicInfo,
             ...knowledge.search(context, options),
             notice: '历史种子当前为候选；未绑定 Run 快照，结果为活库检索（不冒充固定集合）。',
           };
@@ -266,14 +319,18 @@ export function apply(ctx: Context): void {
       output,
       async execute() {
         return run(() => ({
-          version: '0.3.0',
+          version: DVP_PLUGIN_VERSION,
           templateSchema: 'docs/DVP-TEMPLATE-SCHEMA.md',
           research: 'docs/DVP-GENERATION-RESEARCH.md',
-          boundaries: BOUNDARY_NOTICES,
+          boundaries: boundaryNotices(),
+          dataBoundary: dataBoundaryMode(),
           knowledge: { pluginId: DVP_PLUGIN_ID, seedVersion: seedState.version, topics: [...METHOD_TOPICS], seedState },
           discipline: '全部生成物为候选（CANDIDATE）；不伪报验证结果；UAT 用例由项目团队在行内留档执行。',
+          harness: '本插件不限制 Harness 通用工具或模型能力；通用工具（文件、搜索、Shell、代码等）照常可用。以下仅列本插件提供的领域工具。',
           tools: [
+            'dm_dvp_scan',
             'dm_dvp_read_protocol',
+            'dm_dvp_read_workbook',
             'dm_dvp_overview',
             'dm_dvp_parse_workbook',
             'dm_dvp_validate_rules',
@@ -293,8 +350,21 @@ export function apply(ctx: Context): void {
     defineTool({
       name: 'dm_dvp_overview',
       description:
-        '列出 DVP workbook 全部 sheet 及角色分类（含 Cover，标记不读取）。不读取任何单元格内容；按任务需要决定是否继续读取某个 sheet。',
-      parameters: { directory: { ...string_type, required: true }, workbookPath: { ...string_type, required: true } },
+        `列出 DVP workbook 全部 sheet 及角色分类（${COVER_NOTE}）。不读取任何单元格内容；按任务需要决定是否继续读取某个 sheet。`,
+      parameters: {
+        directory: {
+          ...string_type,
+          required: true,
+          description:
+            '工作目录的绝对路径（例如 D:\\project\\company\\epro\\Project\\DXP-DSH）。必须是已存在的目录本身，不要填到文件；路径未知时先用 dm_dvp_scan 定位。',
+        },
+        workbookPath: {
+          ...string_type,
+          required: true,
+          description:
+            'DVP 模板工作簿的路径：可写相对 directory 的文件名（例如 "DVP_v2.xlsx"），也可写绝对路径，但必须落在 directory 内。不是方案 PDF，也不是 ALS 等其他工作簿。',
+        },
+      },
       output,
       async execute(args) {
         return run(() => overviewDvpWorkbook(args.directory, args.workbookPath));
@@ -305,10 +375,20 @@ export function apply(ctx: Context): void {
     defineTool({
       name: 'dm_dvp_parse_workbook',
       description:
-        '解析公司 DVP workbook 为规则 IR：跨字段规则（含 fire-when 结构化解析与诊断）、字段级规格、人工评审（受试者号/评审意见只计数）、动态规格与版本历史。未识别 sheet 只记录存在。limit 为每区每页条数（默认 200，最大 1000）；超过一页时按返回的 paging.nextOffset 与同一 section 继续读取，offset 必须配 section。aggregate total 覆盖全量。',
+        `解析公司 DVP workbook 为规则 IR：跨字段规则（含 fire-when 结构化解析与诊断）、字段级规格、人工评审（${REVIEW_NOTE}）、动态规格与版本历史。未识别 sheet 只记录存在。limit 为每区每页条数（默认 200，最大 1000）；超过一页时按返回的 paging.nextOffset 与同一 section 继续读取，offset 必须配 section。aggregate total 覆盖全量。`,
       parameters: {
-        directory: { ...string_type, required: true },
-        workbookPath: { ...string_type, required: true },
+        directory: {
+          ...string_type,
+          required: true,
+          description:
+            '工作目录的绝对路径（例如 D:\\project\\company\\epro\\Project\\DXP-DSH）。必须是已存在的目录本身；路径未知时先用 dm_dvp_scan 定位。',
+        },
+        workbookPath: {
+          ...string_type,
+          required: true,
+          description:
+            'DVP 模板工作簿的路径：可写相对 directory 的文件名（例如 "DVP_v2.xlsx"）或绝对路径，但必须落在 directory 内。不是方案 PDF，也不是 ALS 等其他工作簿（那些用 dm_dvp_read_workbook）。',
+        },
         limit: { type: 'number', description: '每区每页条数上限；默认 200，最大 1000。' },
         section: {
           ...string_type,
@@ -422,9 +502,62 @@ export function apply(ctx: Context): void {
   );
   ctx.tools.register(
     defineTool({
+      name: 'dm_dvp_scan',
+      description:
+        '列出工作目录内的输入文件（只看存在与属性，不读内容）：方案 PDF（protocol）、可读工作簿 .xlsx/.xlsm（workbook）、旧版或二进制工作簿 .xls/.xlsb 等（unsupportedWorkbook，需另存为 .xlsx 才能读取）；其他类型按扩展名计数。不跟随符号链接，跳过点开头的目录与 node_modules。recursive=false 或 maxDepth=0 只看顶层；相关文件超过 500 个时截断并在 notices 标明。',
+      parameters: {
+        directory: {
+          ...string_type,
+          required: true,
+          description:
+            '工作目录的绝对路径（例如 D:\\project\\company\\epro\\Project\\DXP-DSH）。必须是已存在的目录本身；路径未知时先用 dm_dvp_scan 定位。本工具不接受 workbookPath 或 topic。',
+        },
+        recursive: { type: 'boolean', description: '默认 true。' },
+        maxDepth: { type: 'number', description: '递归深度上限，默认 8，最大 32；0 = 只看顶层。' },
+      },
+      output,
+      async execute(args) {
+        return run(() => scanInputs(args.directory, {
+          ...(args.recursive !== undefined ? { recursive: args.recursive } : {}),
+          ...(args.maxDepth !== undefined ? { maxDepth: args.maxDepth } : {}),
+        }));
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'dm_dvp_read_workbook',
+      description:
+        `读取目录内${READ_SCOPE_HEAD}（ALS / 数据库结构等）的 sheet。不给 sheetId：返回 sheet 清单（角色与可读性）。给 sheetId：返回整表，或 startRow/endRow 行窗口内的单元格（坐标、值、类型；公式只给表达式不给缓存值）、合并区、隐藏行列与警告。${READ_SCOPE_NOTE}大表请分窗口读（建议每窗 ≤ 1000 行）。仅支持 .xlsx/.xlsm。`,
+      parameters: {
+        directory: { ...string_type, required: true },
+        workbookPath: { ...string_type, required: true, description: '工作簿路径（相对 directory 或绝对，但必须落在 directory 内）。' },
+        sheetId: { ...string_type, description: '清单返回的 sheet id；省略时返回清单。' },
+        startRow: { type: 'number', description: '行窗口起始（1-based，含）；须与 endRow 同时给出。' },
+        endRow: { type: 'number', description: '行窗口结束（含）；须与 startRow 同时给出。' },
+      },
+      output,
+      async execute(args) {
+        return run(() => {
+          if (args.startRow === undefined && args.endRow === undefined) {
+            return readInputWorkbook(args.directory, args.workbookPath, args.sheetId);
+          }
+          if (args.startRow === undefined || args.endRow === undefined) {
+            throw new DvpError('WINDOW_INCOMPLETE', 'startRow 与 endRow 须同时给出');
+          }
+          return readInputWorkbook(args.directory, args.workbookPath, args.sheetId, {
+            startRow: args.startRow,
+            endRow: args.endRow,
+          });
+        });
+      },
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
       name: 'dm_dvp_write_workbook',
       description:
-        '把规则 IR 写出为公司模板结构的 DVP 草稿工作簿（8 sheet：Cover/Approval 脚手架 + Version History + Edit Checks + Field Level + Manual Review×2 + Dynamic）。生成物为候选（CANDIDATE）；TEST CASE/DM/DBD Comments 永远留空；辅助 sheet 不生成。outputPath 必须在 directory 内，默认拒绝覆盖。',
+        '把规则 IR 写出为公司模板结构的 DVP 草稿工作簿（默认 8 sheet：Cover/Approval 脚手架 + Version History + Edit Checks + Field Level + Manual Review×2 + Dynamic；template 可按实物差量配置 sheet 集与列）。各内容区可为内联数组或文件引用（NDJSON/JSON 数组，路径相对 directory 且不得越界）——千级规则的全量物化走 bulk 引用，模型只产映射不逐条内联。生成物为候选（CANDIDATE）；TEST CASE/DM/DBD Comments 永远留空；辅助 sheet 不生成。outputPath 必须在 directory 内，默认拒绝覆盖。',
       parameters: {
         directory: { ...string_type, required: true },
         outputPath: {
@@ -436,13 +569,16 @@ export function apply(ctx: Context): void {
           ...string_type,
           required: true,
           description: [
-            '工作簿内容 JSON，区键：{project?, crossField?, fieldLevel?, manualReview?, manualReviewProgramming?, dynamic?, versionHistory?}。',
+            '工作簿内容 JSON，区键：{project?, template?, crossField?, fieldLevel?, manualReview?, manualReviewProgramming?, dynamic?, versionHistory?, subjectStatus?, matrix?}。',
+            '区值两类写法：① 内联数组；② 文件引用字符串（相对 directory 的 NDJSON——每行一个 JSON 对象、空行跳过——或 JSON 数组文件，≤8MB，必须落在 directory 内，越界/缺文件/坏行按 BULK_REF_OUTSIDE_DIRECTORY/BULK_FILE_NOT_FOUND/BULK_FILE_BAD_LINE:<行号> 拒绝；成功后在结果 notices 回报 BULK_SOURCE:<区>=<相对路径>(<n> rows)）。千级规则一律走 ②。',
+            'template（可选，模板差量配置）：{governanceOrder?: "cover-first"|"approval-first"（默认 cover-first；实物 V6.0 为 approval-first）, editChecksQueryType?: boolean（默认 true；V6.0 实物无 Query Type 列设 false）, fieldLevelSheetName?: string（默认 "Edit Checks(Field Level)"；V6.0 实物为 "Edit Checks Rave"，≤31 字符且不含 []:*?/\\）, includeProgramming?: boolean（默认 true；V6.0 无 Programming 页设 false）, includeSubjectStatus?: boolean, includeMatrix?: boolean（默认 false；对应区有行时自动生成该页）}。旋钮中性只约束工具不替调用方判断：调用方（模型）须在汇报中逐项说明六个旋钮最终取值与依据（识别到的实物形态，或「未识别，用默认」），不得静默套默认。',
             'crossField 行：{id, formName, targetField, relatedFields?, queryType, discrepancyText, logic, visits?, changeMark?}；',
             'fieldLevel 行：{formOid, formName, fieldOid, preText?, controlType?, dataFormat?, isLog, isRequired, queryFutureDate, queryNonConformance, changeMark?}（布尔接受 true/false）；',
             'manualReview / manualReviewProgramming 行：{id, formName, reportDescription, discrepancyText?, logic?, visits?, relatedFields?, programming?:{assign?, columnHeading?}}（TEST CASE/DM/DBD 三列恒空）；',
             'dynamic 行：{id, formName, fieldName, type, visits?, discrepancyText?, condition?}，type 限 8 枚举 Dynamic Field/Dynamic Search list/Dynamic Page/Derivation/Dynamic Visit/Participant Status/Dynamic Option/Add Event，越枚举记 DYNAMIC_TYPE_UNRECOGNIZED 诊断；',
             'versionHistory 行：{version, date, modifiedBy?, comments?}；',
-            'project：{studyCode?, studyTitle?, protocolNumber?, sponsor?, dvpVersion?, dvpDate?, createdBy?}。',
+            'subjectStatus 行：{status, condition}（受试者状态定义，条件用【表单.字段】记法）；matrix 行：{id, folder?, oid?, forms?: string[]}（访视→表单矩阵，folder 亦接受实物拼写 folrder，forms 可为分号/换行分隔文本）；',
+            'project：{studyCode?, studyTitle?, protocolNumber?, sponsor?, dvpVersion?, dvpDate?, createdBy?}。零编造纪律：versionHistory 只写有输入证据的行（协议版本/日期 + 本次生成行），实物惯例是历史版本行由人类维护、日期列留空。',
             '宽容别名：form→formName、fields→targetField(首)+relatedFields(余)、message→discrepancyText、targetedField→targetField、crfPageDomain→formName（dynamic）、author/by→modifiedBy、change/description→comments、code→studyCode、name/title→studyTitle、protocolNo/registry→protocolNumber、version→dvpVersion、date→dvpDate。',
             '未识别键照常写出能识别的部分，并在结果 notices 逐条列出未识别键（UNKNOWN_KEYS_IGNORED）供核对；issues 是带诊断的行数统计，覆盖已存在文件需显式 overwrite:true。',
           ].join(''),

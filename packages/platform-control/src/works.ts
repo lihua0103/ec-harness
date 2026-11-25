@@ -74,14 +74,14 @@ export class WorkRepository {
     return record;
   }
 
-  list(state: WorkState | undefined, offset: number, limit: number): { items: WorkRecord[]; total: number } {
+  list(state: WorkState | undefined, offset: number, limit: number, projectIds?: string[]): { items: WorkRecord[]; total: number } {
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw new PlatformError('WORK_PAGE_INVALID');
     }
     if (state !== undefined && state !== 'ACTIVE' && state !== 'ARCHIVED') {
       throw new PlatformError('WORK_STATE_INVALID', String(state));
     }
-    return this.store.workList(state, offset, limit);
+    return this.store.workList(state, offset, limit, projectIds);
   }
 
   archive(workId: string, actor: string): WorkRecord {

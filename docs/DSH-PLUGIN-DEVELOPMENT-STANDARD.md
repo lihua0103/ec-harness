@@ -100,10 +100,12 @@ PluginPackage 是技术包；Capability 是版本化能力；Application 是员�
 | 类型 | 必需交付 | 条件适用 |
 |---|---|---|
 | 公共纯库 | manifest、明确 exports、接口/限制说明、相关测试；TS 类型检查 | 转译/打包在目标运行方式需要时执行；无独立安装/启停/图标要求 |
-| Host 插件 | manifest、Host 入口、依赖/生命周期合同、相关测试和装配验证 | 配置 schema、skill、工具、持久化按能力提供；作为 Bundle 发布时加 patch |
+| Host 插件 | manifest、Host 入口、依赖/生命周期合同、相关测试和装配验证、**知识沉淀 manifest（[§7](#7-领域可靠性与知识验证)）** | 配置 schema、skill、工具、持久化按能力提供；作为 Bundle 发布时加 patch |
 | Host + Client 插件 | Host 项及 Client 声明、browser 入口、两端构建检查、实际 UI 验证 | 专业视图、主题/语言/交互按实际贡献验证 |
 | 配置型 Bundle | manifest 的 `dsh.bundle.patch`、patch、配置/依赖说明与组合验证 | 可没有 Host/Client 源码、编译步骤或 TS 检查；引用已有插件不复制实现 |
 | 其他可安装 Bundle | 上述相关内容、完整安装制品、显示资源和安装/升级/卸载证据 | 运行兼容范围、依赖构建脚本和平台支持按实际发布声明 |
+
+带员工入口（`application.json`）的 Host 插件必须提交 `knowledge/manifest.json`，把**每个业务工具**映射到知识主题（主题须有种子支撑）或显式声明 `noMethodKnowledge` 并给出具体理由；状态/元工具除外。此要求由 `scripts/check-development-standard.mjs` 自动执行（规则 `KNOWLEDGE_MANIFEST_MISSING` / `KNOWLEDGE_MANIFEST_PLUGIN_ID` / `KNOWLEDGE_CAPABILITY_UNMAPPED` / `KNOWLEDGE_TOPIC_UNRESOLVED` / `KNOWLEDGE_NO_METHOD_REASON`）。知识域 ID 与正文格式见 [国际化企业级知识库架构](ENTERPRISE-KNOWLEDGE-ARCHITECTURE.md) §7。
 
 各包必须提供一条可复跑的聚合验证命令，检查与包类型匹配；可委托 workspace 根命令，无需每包复制 `verify.mjs`。发布构建/验证可由平台共享脚本承担，无需复制 `release.mjs`。小包不强制独立 DEVELOPMENT 文档；复杂包应提供开发说明或链接到公共开发指南。
 

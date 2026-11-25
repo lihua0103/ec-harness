@@ -7,7 +7,21 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client';
 import type {} from '@deepseek-ai/dsh-client-locale/client';
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client';
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client';
+import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots';
+import { entryApplies } from './entry-visibility.js';
 
+/** 本插件的员工应用（application.json 的 appId）。工作台把"当前会话属于哪项应用"作为平台事实公开
+ *  （标准工具包钩子）：会话属于别的应用时，Listing 的入口和它插入的提示词对那项工作只是噪音，本插件
+ *  自行隐藏；null 表示不是某项工作的会话（历史会话、独立会话），入口照常显示。平台不认识本插件。 */
+const APPLICATION_ID = 'ec.listing';
+
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface GlobalStandardProps {
+    /** 平台工作台提供的标准钩子；不在工作台里运行时不存在。形状与平台 conversation-application.ts
+     *  逐字段一致——标准工具包成员靠声明合并，各处声明的类型必须相同。 */
+    useConversationApplication?: SnapshotSelectorHook<{ appId: string; appVersion: string; displayName: string } | null>;
+  }
+}
 export const inject = ['slots', 'locale'];
 const labels = {
   title: 'DM Listing',
@@ -53,11 +67,15 @@ export function apply(ctx: Context): void {
   ctx.slots.inject('conversation.input.activity', () =>
     ctx.slots.register(
       { name: 'conversation.input.activity', locale: 'ecDmListing' },
-      ({ inputActions, locked, t }) => {
+      ({ inputActions, locked, t, useConversationApplication }) => {
+        // 平台事实（2026-11-24）：该钩子是否存在在进程生命周期内不变（随工作台 bundle 装配），所以这里的
+        // 条件调用不改变 Hook 顺序。其余 Hook 一律先调用完再决定是否渲染。
+        const application = useConversationApplication?.((value) => value) ?? null;
         const [span, setSpan] = useState<ReturnType<typeof inputActions.captureInsertion> | null>(null);
         const [scenario, setScenario] = useState('manual');
         const [pkType, setPkType] = useState('be');
         const [stale, setStale] = useState(false);
+        if (!entryApplies(application, APPLICATION_ID)) return null;
         return h(
           'div',
           null,

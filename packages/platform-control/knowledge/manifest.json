@@ -2,11 +2,18 @@
   "schemaVersion": 2,
   "pluginId": "ec-platform-control",
   "owner": "平台控制面负责人",
-  "source": "docs/PLATFORM-CONTROL-IMPLEMENTATION.md",
+  "source": "src/knowledge-seeds.ts",
   "taxonomy": {
     "topics": ["publish", "dispatch", "recover", "identity", "knowledge"]
   },
-  "seeds": [],
+  "seeds": [
+    { "knowledgeId": "platform-control.run.lifecycle", "topics": ["dispatch", "recover"] },
+    { "knowledgeId": "platform-control.model.governance", "topics": ["identity", "publish"] },
+    { "knowledgeId": "platform-control.quota.boundaries", "topics": ["dispatch", "publish"] },
+    { "knowledgeId": "platform-control.storage.recovery", "topics": ["recover"] },
+    { "knowledgeId": "platform-control.delivery.package", "topics": ["publish", "recover"] },
+    { "knowledgeId": "platform-control.upgrade.migration", "topics": ["recover", "knowledge"] }
+  ],
   "validators": [],
   "capabilities": [
     { "tool": "platform_control_status", "topics": ["publish", "dispatch"] },
@@ -45,7 +52,10 @@
     "id": "ec-platform-control.golden",
     "version": "1",
     "cases": [
-      { "query": "platform control publish", "expectEmpty": true }
+      { "query": "运行停在 QUEUED", "expect": ["platform-control.run.lifecycle"] },
+      { "query": "RUN_QUOTA_DAILY_EXCEEDED", "expect": ["platform-control.quota.boundaries"] },
+      { "query": "quick_check 报错", "expect": ["platform-control.storage.recovery"] },
+      { "query": "完全不存在的黄金集探针词", "expect": [], "expectEmpty": true }
     ]
   },
   "corpus": {

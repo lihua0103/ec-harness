@@ -1,0 +1,19 @@
+{
+  "name": "@ec-clinical/platform-viz",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared chart pipeline core used by business plugins; no clinical domain policy.",
+  "exports": { ".": "./src/index.ts" },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "tsx": "4.23.13",
+    "typescript": "6.0.3"
+  },
+  "engines": { "node": ">=24.9.0" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "verify": "npm run typecheck && npm run test"
+  }
+}

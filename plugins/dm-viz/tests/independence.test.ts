@@ -31,13 +31,14 @@ test('no source imports another plugin or its package', () => {
   assert.deepEqual(offenders, []);
 });
 
-test('manifest declares the plugin name and no runtime package dependencies', () => {
+test('manifest declares the plugin name and the workbook reader runtime dependencies', () => {
   const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
     name: string;
     dependencies?: Record<string, string>;
     dsh?: { bundle?: { patch?: string } };
   };
   assert.equal(manifest.name, '@ec-clinical/dsh-dm-viz');
-  assert.deepEqual(manifest.dependencies ?? {}, {});
+  // 构建产物内联 platform-workbook 的解析器，其运行时依赖必须随插件声明，否则真实系统加载失败。
+  assert.deepEqual(manifest.dependencies, { 'fast-xml-parser': '5.11.1', yauzl: '3.4.0' });
   assert.equal(manifest.dsh?.bundle?.patch, './cordis.patch.yml');
 });

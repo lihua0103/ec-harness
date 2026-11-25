@@ -34,7 +34,7 @@ test('KA16: VACUUM INTO backup restores revisions/FTS/chunks/snapshots and keeps
     assert.ok(readonly);
     const db = new DatabaseSync(backup, { readOnly: true });
     try {
-      assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 5);
+      assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 6);
       assert.equal(Number(db.prepare('SELECT COUNT(*) n FROM knowledge_chunks').get().n), 1);
     } finally {
       db.close();

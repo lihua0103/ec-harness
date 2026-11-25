@@ -42,6 +42,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import {
   PlatformApiError,
   WorkbenchApi,
+  errorText,
   type ArtifactItem,
   type AuditEntryItem,
   type CatalogReleaseDetail,
@@ -56,6 +57,7 @@ import {
   type ModelCatalog,
   type ModelPreference,
   type OpsPanel,
+  type PersonalPreferenceItem,
   type Page,
   type ReviewItem,
   type ResultViewDecl,
@@ -68,15 +70,24 @@ import {
   type WorkspaceItem,
 } from '../api.js'
 import { homePriority, latestHomeRuns } from '../home-priority.js'
-import { artifactDownloadPath, formatBytes, monogram, pageWindow, relativeTime, runTone, selectWorkRows, summarizeArtifacts, type WorkRow } from '../reports.js'
+import { artifactDownloadPath, formatBytes, monogram, pageWindow, relativeTime, runTone, summarizeArtifacts, type WorkRow } from '../reports.js'
 import { buildAnswers, chosenModel, modelChoices, runInput, type NativeQuestion } from '../forms.js'
 import type { WorkContext } from '../work-context.js'
 import { bindingDraft, selectBindingDomain } from '../work-context.js'
 import type { SubmissionWatchOptions } from './submission-observer.js'
 import { workPointers } from './pointers.js'
-import { clearPersistedView, hashToView, readPersistedView, viewKey, viewToHash, writePersistedView, type PersistedView } from './view-state.js'
+import { clearPersistedView, hashToView, readPersistedView, viewKey, viewToHash, writePersistedView, type PersistedView, type WorkbenchView } from './view-state.js'
+import { NavigationGate } from './navigation.js'
+import type { WorkbenchRouteCommand, WorkbenchRouteStore } from './route-store.js'
 import { EmbeddedConversationViews, EmbeddedViewsProvider, useEmbeddedViewElection } from './embedded-views.js'
+import type { ConversationApplication } from './conversation-application.js'
 import { KnowledgeBasisCard } from './run-insights.js'
+import { RUN_EVENT_LABELS, WorkBrief } from './work-brief.js'
+import { WorkIndex, type WorkIndexChip } from './work-index.js'
+import { DeskPanel, DeskToolsMenu } from './work-desk-frame.js'
+import { pickPreviewWorkId, workRowState } from './work-index-model.js'
+import { useWorkIndex, type WorkIndexData, type WorkIndexFilters } from './use-work-index.js'
+import { UnifiedTodoList, TODO_KINDS, type TodoItem } from './todo-rows.js'
 import {
   availableTimeZones,
   formatDate,
@@ -85,15 +96,14 @@ import {
   navLabel,
   runStateText,
   setPreferences,
-  subscribePreferences,
   t,
+  usePreferences,
   LOCALES,
   type Locale,
 } from './i18n.js'
 
 export type { SubmissionWatchOptions } from './submission-observer.js'
-
-export type WorkbenchView = 'works' | 'sessions' | 'projects' | 'apps' | 'pending' | 'settings'
+export type { WorkbenchView } from './view-state.js'
 
 /** Closed set used to validate a persisted view coordinate before it is applied at boot. */
 const WORKBENCH_VIEWS: WorkbenchView[] = ['works', 'sessions', 'projects', 'apps', 'pending', 'settings']
@@ -107,8 +117,13 @@ type SessionListSource = {
 export interface WorkbenchPageInjected {
   /** Retain a Session for the embedded session view; returns the framework SessionProvider target. */
   retainSession(sessionId: string): SessionReference
-  /** Release the view's retained reference (the embedded host returns to its session-less posture). */
-  releaseSession(): void
+  /** Release the view's retained reference. With a reference argument, only releases when that
+   *  reference is STILL the active view reference (WP3: expired intents free what they own). */
+  releaseSession(reference?: SessionReference): void
+  /** WP3: the host's navigation gate — each call aborts the previous pending navigation's signal. */
+  beginNavigation(): AbortSignal
+  /** 单侧栏架构：共享路由状态。主区发布当前坐标并执行侧栏派发的导航命令。 */
+  route: WorkbenchRouteStore
   /** Begin enterprise correlation for a Work's bound Session (public event window only). */
   watchWorkSession(options: SubmissionWatchOptions): void
   /** Number of live submission observers (a diagnostic, never business state). */
@@ -119,6 +134,12 @@ export interface WorkbenchPageInjected {
   sessionList: SessionListSource
   /** Pull the Host-authoritative session list. */
   refreshSessionList(): Promise<void>
+  /** Resolves once the host's first-screen panel selection has settled; the boot restore waits
+   *  on it, because a concurrent selectPanel would abort the restore's navigation intent. */
+  platformSelected: Promise<void>
+  /** Publish the application of the Work whose conversation is on screen — the platform fact
+   *  conversation entries read to decide whether they apply (null when none is on screen). */
+  publishConversationApplication(application: ConversationApplication | null): void
 }
 
 export type WorkbenchPageProps =
@@ -483,11 +504,6 @@ function RunTranscript({ api, runId, token, onRetryError }: {
   )
 }
 
-const errorText = (reason: unknown): string => {
-  if (reason instanceof PlatformApiError) return reason.message
-  return reason instanceof Error ? reason.message : 'WORKBENCH_UNAVAILABLE'
-}
-
 const readCompact = (): boolean => {
   try {
     return globalThis.localStorage?.getItem(COMPACT_KEY) === '1'
@@ -533,32 +549,15 @@ const Glyph = ({ children, size = 16 }: { children: ReactNode; size?: number }) 
 
 const GLYPH_REFRESH = <Glyph><path d="M21 12a9 9 0 1 1-2.64-6.36" /><polyline points="21 3 21 9 15 9" /></Glyph>
 const GLYPH_DENSITY = <Glyph><line x1="4" y1="7" x2="20" y2="7" /><line x1="4" y1="12" x2="20" y2="12" /><line x1="4" y1="17" x2="20" y2="17" /></Glyph>
-const SETTINGS_PATHS = (
-  <>
-    <circle cx="12" cy="12" r="3" />
-    <path d="M12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M5.6 18.4l1.6-1.6M16.8 7.2l1.6-1.6" />
-  </>
-)
 const SEARCH_PATHS = (
   <>
     <circle cx="11" cy="11" r="6.5" />
     <line x1="16" y1="16" x2="21" y2="21" />
   </>
 )
-const GLYPH_SETTINGS = <Glyph>{SETTINGS_PATHS}</Glyph>
 const GLYPH_CHECK = <Glyph size={11}><polyline points="4 12.5 9 17.5 20 6.5" /></Glyph>
 const GLYPH_SEARCH_TOP = <Glyph size={16}><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.2" y2="16.2" /></Glyph>
 const GLYPH_SPARK = <Glyph size={19}><path d="M12 3.5 14.6 9.4 20.5 12 14.6 14.6 12 20.5 9.4 14.6 3.5 12 9.4 9.4Z" /></Glyph>
-
-/** The brand mark: a faceted emerald, drawn — not a text glyph. */
-const BRAND_MARK = (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-    strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
-    <path d="M12 2.5 19.5 9 12 21.5 4.5 9Z" />
-    <path d="M4.5 9h15" />
-    <path d="M12 2.5 9.2 9l2.8 12.5L14.8 9 12 2.5" />
-  </svg>
-)
 
 /** Today's date as the home eyebrow; the platform records no "business day", so this is local time. */
 /** Display name of the model a new run would use, or '' when the platform registered none. */
@@ -614,11 +613,6 @@ function StateBadge({ state }: { state: unknown }) {
 
 function formatTime(value: unknown): string {
   return formatDateTime(value, getPreferences(), getPreferences().locale === 'en-US' ? 'Time not recorded' : '时间未记录')
-}
-
-/** Re-render the shell when the employee changes language or time zone. */
-function usePreferences(): ReturnType<typeof getPreferences> {
-  return useSyncExternalStore(subscribePreferences, getPreferences)
 }
 
 /** One verified artifact save shared by the detail page and the console rail: a failed fetch is
@@ -762,15 +756,7 @@ function usePendingWorkTitles(
   return titles
 }
 
-/** E3-4 unified todos keep their source kind and their own resolution verb — the list never
- *  blurs a review decision or a receipt into "a question to answer". */
-const TODO_KINDS: Record<'question' | 'review' | 'delivery-receipt' | 'model-approval', { label: string; verb: string }> = {
-  question: { label: '问题答复', verb: '回答' },
-  review: { label: '交付复核', verb: '决定' },
-  'delivery-receipt': { label: '交付接收', verb: '确认接收' },
-  'model-approval': { label: '模型审批', verb: '去审批' },
-}
-type TodoItem = NonNullable<WorkbenchBootstrap['todos']>[number]
+/** E3-4 unified todo rows moved to `todo-rows.tsx` (shared with the work brief). */
 
 type SearchHit = Awaited<ReturnType<WorkbenchApi['search']>>[number]
 const SEARCH_KIND_LABEL: Record<SearchHit['kind'], string> = { work: '工作', run: '运行', project: '项目', app: '应用' }
@@ -895,40 +881,7 @@ function CommandPalette({ api, open, onClose, onOpenWork, onOpenRun, onNavigate 
   )
 }
 
-/** Unified todo rows (E3-4). Each row names its kind, the concrete act that resolves it and when
- *  it started waiting; clicking opens the Work's run where that act happens. */
-function UnifiedTodoList({ items, works, titles, onOpen }: {
-  items: TodoItem[]
-  works: WorkbenchItem[]
-  titles?: Record<string, string>
-  onOpen(workId: string, runId: string): void
-}) {
-  if (items.length === 0) return <p className="ec-wb-empty">当前没有待处理事项。</p>
-  return (
-    <div className="ec-wb-rows">
-      {items.map((item) => {
-        const work = works.find((candidate) => candidate.workId === item.workId)
-        const title = work?.title ?? (item.workId ? titles?.[item.workId] : undefined) ?? `工作 ${String(item.workId ?? '').slice(0, 8)}`
-        const kind = TODO_KINDS[item.kind]
-        return (
-          <button
-            type="button"
-            className="ec-wb-row-button"
-            key={`${item.kind}:${item.id}`}
-            disabled={!item.workId || !item.runId}
-            onClick={() => { if (item.workId && item.runId) onOpen(item.workId, item.runId) }}
-          >
-            <span className="ec-wb-row-main">
-              <strong><span className="ec-wb-badge" data-tone={item.kind === 'question' ? 'warn' : undefined}>{kind.label}</span> {title}</strong>
-              <small className="ec-wb-muted">{item.summary} · {formatTime(item.createdAt)}</small>
-            </span>
-            <span className="ec-wb-muted">{work ? `${kind.verb} ›` : '打开 ›'}</span>
-          </button>
-        )
-      })}
-    </div>
-  )
-}
+/** Unified todo rows (E3-4) live in `todo-rows.tsx` now. */
 
 // ── New work / project ───────────────────────────────────────────────────────
 
@@ -3101,11 +3054,8 @@ const CONSOLE_REFRESH_MS = 15_000
  * and says so when a Work has no execution record yet.
  */
 /** Durable run-ledger events (E0b): the state transitions the control plane persisted, newest
- *  first. Unlike the live activity window, these survive a control-plane restart. */
-const RUN_EVENT_LABELS: Record<string, string> = {
-  cancel: '请求停止', dispatch: '派发', started: '已启动', barrier: '完成屏障', finish: '已完成',
-  fail: '失败', unknown: '结果未知', 'cancel-settled': '停止已确认',
-}
+ *  first. Unlike the live activity window, these survive a control-plane restart. Labels are
+ *  shared with the work brief (`work-brief.tsx`). */
 function RunEvents({ api, runId, token }: { api: WorkbenchApi; runId: string; token: number }) {
   const [events, setEvents] = useState<RunEventItem[]>([])
   const [error, setError] = useState('')
@@ -3149,25 +3099,66 @@ function RunEvents({ api, runId, token }: { api: WorkbenchApi; runId: string; to
   )
 }
 
-function WorkConsole({ api, workId, title, modelLabel, models, onBack, onReload, initialRunId, onFocusRun, children }: {
+type SessionProviderComponent = WorkbenchPageProps['SessionProvider']
+
+function WorkConsole({ api, workId, title, modelLabel, models, onReload, initialRunId, onFocusRun, SessionProvider, sessionSlot, workSessionId, retainSessionById, retainWorkSession, adoptWorkReference, workEpoch, releaseRunReference, railPanelOpen, onRailPanelToggle, children }: {
   api: WorkbenchApi
   workId: string
   title: string
   modelLabel: string
   models?: WorkbenchBootstrap['models']
-  onBack(): void
   /** Refresh the shell bootstrap so the home counters reflect a run this console just changed. */
   onReload(): Promise<void>
   /** Run to focus on open — a refresh restore re-enters the run the employee had selected. */
   initialRunId?: string
   /** The employee's focused run, mirrored to the persisted view coordinate for refresh survival. */
   onFocusRun?(runId: string | null): void
+  /** The framework SessionProvider target: the center's one native conversation stream rebinds
+   *  to whichever session the rail selection names — 会话对话 shows the Work session, a 运行
+   *  row shows that run's own native conversation. Exactly one stream is mounted at all times. */
+  SessionProvider: SessionProviderComponent
+  /** The registered session slot (the native conversation UI) rendered inside the provider. */
+  sessionSlot: ReactNode
+  /** The Work's own bound session id — the center returns here when the selection is 会话对话. */
+  workSessionId: string
+  /** Retain any known session id (catalog-race tolerant) as the active single-slot reference. */
+  retainSessionById(sessionId: string): Promise<SessionReference>
+  /** Synchronous direct retain, used ONLY for the Work's own session on the way back: it cannot
+   *  hit the catalog race (openWork already retained it), and the single-slot release of the run
+   *  reference plus the viewSession clear must land in one batched continuation — a released
+   *  reference throws the moment SessionProvider's renderer reads it (binding → "is released"). */
+  retainWorkSession(sessionId: string): SessionReference
+  /** Adopt the fresh reference a retain returned back into the page state. The single slot
+   *  releases the previous Work reference on every swap, so the stored copy goes stale the
+   *  moment any other session is retained — `children` must render the CURRENT reference or
+   *  SessionProvider's renderer throws "is released". */
+  adoptWorkReference(reference: SessionReference): void
+  /** Incremented on every page-level Work-session commit or adopt (openWork, openBoundSession,
+   *  the way-back swap). The run view is valid only under the epoch it was opened in: a later
+   *  epoch means the page re-retained some session on the single slot, which released this
+   *  view's reference — the view must withdraw (or re-bind) instead of rendering it. */
+  workEpoch: number
+  /** WP3-precise release: frees a retained run reference only when it is still the active slot. */
+  releaseRunReference(reference: SessionReference): void
+  /** Desk shell (方案 B): the main area is too narrow for a persistent rail column — the CSS
+   *  container query turns the rail (工作资料) into a temporary panel and shows the toggle.
+   *  Panel semantics are additive shell behaviour — mount timing, request ownership and the
+   *  reference swap below never change with the width. */
+  railPanelOpen?: boolean
+  onRailPanelToggle?(open: boolean): void
   children: ReactNode
 }) {
   const [context, setContext] = useState<WorkContext | null>(null)
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [runsTotal, setRunsTotal] = useState(0)
   const [selectedRunId, setSelectedRunId] = useState<string | null>(initialRunId ?? null)
+  // 2026-11-23 定调：右边有会话历史，点击切换，中间 chat 就要显示对应历史数据。中心永远只有
+  // 一个原生会话流，但流绑定哪个会话跟随右栏选择：会话对话 → Work 自己的会话；运行行 → 该运行
+  // result.sessionId 的原生会话。runView 持有该交换的单槽引用；epoch 不匹配即撤回（引用已被
+  // 页面级交换释放，渲染它会直接抛错）。
+  const [runView, setRunView] = useState<{ runId: string; epoch: number; reference: SessionReference } | null>(null)
+  const [viewError, setViewError] = useState('')
+  const [viewBusy, setViewBusy] = useState(false)
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([])
   const [error, setError] = useState('')
   const [artifactsError, setArtifactsError] = useState('')
@@ -3187,6 +3178,85 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onReload,
   // SSE drives live run updates when connected; the 15s poll is the fallback. A ref lets the
   // mount-time interval read the latest liveness without re-subscribing.
   const sseLiveRef = useRef(false)
+  // Mirrors for the synchronous swap handlers: load's auto-refresh prune and the rail clicks run
+  // with whatever closure the callback was built in, so they read the refs, not the state.
+  const selectedRunIdRef = useRef<string | null>(selectedRunId)
+  selectedRunIdRef.current = selectedRunId
+  // Mirrors for the synchronous swap handlers and the async seq guard: rail clicks and load's
+  // prune run with whatever closure built them, so they read the refs, not the state.
+  const runViewRef = useRef(runView)
+  runViewRef.current = runView
+  const workEpochRef = useRef(workEpoch)
+  workEpochRef.current = workEpoch
+  // One increment per swap attempt: a superseded attempt releases what it retained (WP3) and
+  // commits nothing — only the newest attempt may commit a run reference to the single slot.
+  const swapSeqRef = useRef(0)
+
+  // An async swap INTO a run's native conversation. retainSessionById is catalog-race tolerant;
+  // from its resolution to the commit there is no await, so the single-slot release inside the
+  // retain and this batched commit never land in different paints (a released reference throws
+  // the moment SessionProvider's renderer reads it). A run without a result.sessionId — unknown,
+  // or a session the host cannot resolve — stays on the Work chat with an honest rail error.
+  const openRunView = useCallback(async (run: RunSummary): Promise<void> => {
+    setSelectedRunId(run.runId)
+    onFocusRun?.(run.runId)
+    const current = runViewRef.current
+    if (current && current.runId === run.runId && current.epoch === workEpochRef.current) return
+    const seq = ++swapSeqRef.current
+    setViewError('')
+    setViewBusy(true)
+    try {
+      const detail = await api.runDetail(run.runId)
+      const sessionId = detail.result?.sessionId
+      if (!sessionId) throw new Error('RUN_SESSION_MISSING')
+      const reference = await retainSessionById(sessionId)
+      if (swapSeqRef.current !== seq) { releaseRunReference(reference); return }
+      setRunView({ runId: run.runId, epoch: workEpochRef.current, reference })
+      setViewBusy(false)
+    } catch (reason) {
+      if (swapSeqRef.current !== seq) return
+      setViewBusy(false)
+      setViewError(errorText(reason))
+    }
+  }, [api, onFocusRun, releaseRunReference, retainSessionById])
+
+  // The way back is a SYNCHRONOUS swap: re-retain the Work session on the single slot (which
+  // releases the run reference), adopt the returned fresh reference into the page state (the
+  // stored Work reference went stale when the run was retained), and clear the run view in the
+  // same batched continuation. Retains are synchronous, so the whole dance is one event-handler
+  // batch — the released run reference is never painted. Returns false only when the Work
+  // session can no longer be retained at all; the run view then stays with an honest error.
+  const closeRunView = useCallback((): boolean => {
+    setViewError('')
+    const current = runViewRef.current
+    if (!current || current.epoch !== workEpochRef.current) {
+      // Nothing live to tear down — a stale epoch means the page already re-retained some
+      // session; this is a pure selection reset.
+      setRunView(null)
+      setSelectedRunId(null)
+      onFocusRun?.(null)
+      return true
+    }
+    try {
+      const reference = retainWorkSession(workSessionId)
+      adoptWorkReference(reference)
+      setRunView(null)
+      setSelectedRunId(null)
+      onFocusRun?.(null)
+      return true
+    } catch (reason) {
+      setViewError(errorText(reason))
+      return false
+    }
+  }, [adoptWorkReference, onFocusRun, retainWorkSession, workSessionId])
+
+  // A run view whose epoch moved on is holding a released reference: withdraw it in the first
+  // commit after the page-level swap (the render guard below already hides it that commit).
+  useEffect(() => {
+    if (runView && runView.epoch !== workEpoch) setRunView(null)
+  }, [runView, workEpoch])
+  // The view the center renders: only a run view under its own epoch may mount the run session.
+  const runViewLive = runView !== null && runView.epoch === workEpoch
 
   const load = useCallback(async () => {
     try {
@@ -3199,9 +3269,6 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onReload,
       setRunsTotal(page.total)
       setError('')
       setLastLoadedAt(Date.now())
-      // Preserve the employee's content choice across auto-refresh: null means live chat and must
-      // not be yanked into a run record just because runs exist. A focused run that still exists is
-      // kept; one that vanished falls back to live chat, never an arbitrary auto-selected run.
       setSelectedRunId((previous) => previous && page.items.some((run) => run.runId === previous)
         ? previous
         : null)
@@ -3261,6 +3328,9 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onReload,
     return () => { live = false }
   }, [api, selectedRunId, token])
 
+  // The center swap (above) mounts at most one SessionProvider: the Work's children under the
+  // Work session, or the same session slot under the selected run's retained reference.
+
   // 发布声明按需读取（W5/R2）：与详情页同一规则——不缓存，撤权后如实报错，不显示旧声明。
   useEffect(() => {
     if (!context) { setDecl(null); setDeclError(''); return undefined }
@@ -3314,12 +3384,39 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onReload,
     void onReload()
   }, [onReload])
 
+  // 工作资料临时面板（方案 B）：窄主区下右栏收成面板（几何由 container query 表达）。Escape
+  // 关闭、打开即移入面板、关闭后焦点还给触发按钮；这只改变外壳几何，不改数据拥有者、挂载
+  // 时机或请求语义。宽容器下「工作资料」按钮被 CSS 隐藏，面板不会打开。
+  const railRef = useRef<HTMLElement | null>(null)
+  const railDialogOpen = railPanelOpen === true
+  useEffect(() => {
+    if (!railDialogOpen) return undefined
+    const rail = railRef.current
+    const previous = document.activeElement as HTMLElement | null
+    const timer = setTimeout(() => {
+      // 焦点落在面板容器上（打开态带 tabIndex=-1），而不是面板里的第一个控件：聚焦控件会让浏览器
+      // 把它滚进视口，面板一打开就停在半截（2026-11-24 实测滚过 670px）。容器自身就是滚动容器，
+      // 聚焦它不会移动内容；之后按 Tab 自然进入第一个控件。
+      rail?.focus({ preventScroll: true })
+    }, 0)
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') { event.preventDefault(); onRailPanelToggle?.(false) }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => {
+      clearTimeout(timer)
+      document.removeEventListener('keydown', onKey)
+      previous?.focus?.()
+    }
+  }, [railDialogOpen, onRailPanelToggle])
+
   return (
     <div className="ec-wb-console">
       <header className="ec-wb-console-head">
         <div>
+          {/* 基准图 B2：内容区从工作标题开始；返回走全局导航（我的工作）或索引点击另一行，
+              头部不再放第二套返回链接。 */}
           <div className="ec-wb-console-crumb">
-            <button type="button" className="ec-wb-back-link" onClick={onBack}>← 返回</button>
             <span>{context ? context.project.name : '正在读取项目'}</span>
             <span aria-hidden="true">·</span>
             <span>{context ? context.app.displayName : '正在读取应用'}</span>
@@ -3333,6 +3430,10 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onReload,
         </div>
         <div className="ec-wb-console-actions">
           <Freshness at={lastLoadedAt} onRefresh={() => setToken((value) => value + 1)} />
+          <button type="button" className="ec-wb-button ec-wb-rail-toggle" aria-expanded={Boolean(railPanelOpen)}
+            onClick={() => onRailPanelToggle?.(!railPanelOpen)}>
+            {t('rail.materials')}
+          </button>
           <button type="button" className="ec-wb-button" aria-expanded={detailOpen} aria-controls="ec-wb-console-detail"
             onClick={() => setDetailOpen((value) => !value)}>
             {detailOpen ? '收起详情' : '详情'}
@@ -3345,29 +3446,33 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onReload,
         </div>
       </header>
 
-      <div className="ec-wb-console-body">
-        {/* The center is always this Work's native conversation — history, live output and the
-            composer. Inspecting a run updates the rail only; it never unmounts the conversation. */}
+      {/* data-desk-rail（方案 B）：宽容器恒为列布局（CSS 忽略该值）；窄容器 open/closed 把右栏
+          收成「工作资料」临时面板。面板态只改外壳几何——中心仍是原生会话，数据拥有者不变。 */}
+      <div className="ec-wb-console-body" data-desk-rail={railPanelOpen ? 'open' : 'closed'}>
+        {/* 2026-11-23 定调：中心永远只有一个原生会话流，但流绑定哪个会话跟随右栏运行历史的选择
+            ——会话对话渲染 Work 会话（children），运行行渲染该运行自己的原生会话（同一 sessionSlot
+            换绑）。两个分支共用同一个 thread 容器与同一份几何，交换只换内容不换布局；任何时刻
+            只挂载一个 SessionProvider，抄本/事件/知识依据仍然只在右栏。 */}
         <div className="ec-wb-console-center">
-          {activeRun
-            ? (
-              <div className="ec-wb-mode-banner" role="status">
-                <span>
-                  运行 {activeRun.runId.slice(0, 8)} {runStateText(activeRun.snapshot?.state)}
-                  ；实时对话只显示本工作的 AI 对话，运行活动在运行记录中。
-                </span>
-                <button type="button" onClick={() => { setSelectedRunId(activeRun.runId); onFocusRun?.(activeRun.runId) }}>
-                  在侧栏查看
-                </button>
-              </div>
-            )
-            : null}
-          <div className="ec-wb-console-thread">{children}</div>
+          <div className="ec-wb-console-thread" data-run-view={runViewLive && runView ? runView.runId : undefined}>
+            {runViewLive && runView
+              ? (
+                <SessionProvider key={`run:${runView.runId}`} session={runView.reference}>
+                  {sessionSlot}
+                </SessionProvider>
+              )
+              : children}
+          </div>
         </div>
-        <aside className="ec-wb-console-rail" aria-label="运行信息">
-          {error ? <ErrorBox message={`无法读取运行信息：${error}`} onRetry={() => setToken((value) => value + 1)} /> : null}
+        <aside className="ec-wb-console-rail" aria-label={t('rail.materials')} ref={railRef} tabIndex={railDialogOpen ? -1 : undefined}>
+          {/* 基准图 B2：右栏是「工作资料」；分组只是视觉收拢——每张卡片的挂载条件与请求语义
+              原样保留；高优先事项（复核/问答）不藏在默认关闭的深层面板。 */}
+          <h2 className="ec-wb-rail-title">{t('rail.materials')}</h2>
+          <section className="ec-wb-rail-group" aria-labelledby="ec-wb-rail-current">
+            <h2 className="ec-wb-rail-group-title" id="ec-wb-rail-current">{t('rail.currentRun')}</h2>
+            {error ? <ErrorBox message={`无法读取运行信息：${error}`} onRetry={() => setToken((value) => value + 1)} /> : null}
 
-          <section className="ec-wb-card" aria-labelledby="ec-wb-console-state">
+            <section className="ec-wb-card" aria-labelledby="ec-wb-console-state">
             <div className="ec-wb-card-head">
               <h3 id="ec-wb-console-state">运行状态</h3>
             </div>
@@ -3390,7 +3495,7 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onReload,
               ? (
                 <div className="ec-wb-form-actions">
                   <button type="button" className="ec-wb-button"
-                    onClick={() => { setSelectedRunId(activeRun.runId); onFocusRun?.(activeRun.runId) }}>
+                    onClick={() => { void openRunView(activeRun) }}>
                     查看运行记录
                   </button>
                 </div>
@@ -3412,81 +3517,88 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onReload,
               : null}
             {control.error ? <p className="ec-wb-error-text" role="alert">{control.error}</p> : null}
             {control.notice ? <p className="ec-wb-muted" role="status">{control.notice}</p> : null}
+            </section>
+
+            {/* 运行记录只在右栏（2026-11-23：中心永远只有一个原生会话流）：选中运行的对话抄本、
+                事件日志与知识依据都在这里，中心不叠加任何运行视图。 */}
+            {selectedRun
+              ? (
+                <>
+                  <section className="ec-wb-card ec-wb-rail-transcript" aria-labelledby="ec-wb-rail-transcript">
+                    <div className="ec-wb-card-head">
+                      <h3 id="ec-wb-rail-transcript">运行记录</h3>
+                    </div>
+                    <RunTranscript api={api} runId={selectedRun.runId} token={token} onRetryError={() => setToken((current) => current + 1)} />
+                  </section>
+                  <RunEvents api={api} runId={selectedRun.runId} token={token} />
+                  <KnowledgeBasisCard api={api} runId={selectedRun.runId} />
+                </>
+              )
+              : null}
+
+            {selectedRun
+              ? (
+                <ResultViewsCard
+                  api={api}
+                  run={selectedRun}
+                  resultViews={decl?.resultViews ?? []}
+                  comparableRunIds={runs
+                    .filter((candidate) => candidate.runId !== selectedRun.runId && candidate.snapshot?.state === 'SUCCEEDED')
+                    .map((candidate) => ({ runId: candidate.runId, label: `运行 ${candidate.runId.slice(0, 8)} · ${formatTime(candidate.createdAt)}` }))}
+                />
+              )
+              : null}
           </section>
 
-          {/* The selected run's own record sits directly under its facts: selecting a run reveals
-              it without hunting down the rail. The center stays the native conversation. */}
-          {selectedRun
-            ? (
-              <>
-                <section className="ec-wb-card ec-wb-rail-record" aria-labelledby="ec-wb-console-record">
-                  <div className="ec-wb-card-head">
-                    <h3 id="ec-wb-console-record">运行记录 {selectedRun.runId.slice(0, 8)}</h3>
-                    <button type="button" className="ec-wb-link"
-                      onClick={() => { setSelectedRunId(null); onFocusRun?.(null) }}>收起</button>
-                  </div>
-                  <RunTranscript api={api} runId={selectedRun.runId} token={token} onRetryError={() => setToken((value) => value + 1)} />
-                </section>
-                <RunEvents api={api} runId={selectedRun.runId} token={token} />
-                <KnowledgeBasisCard api={api} runId={selectedRun.runId} />
-              </>
-            )
-            : null}
+          <section className="ec-wb-rail-group" aria-labelledby="ec-wb-rail-pending">
+            <h2 className="ec-wb-rail-group-title" id="ec-wb-rail-pending">{t('rail.pending')}</h2>
+            {/* W5 纵向切片——复核在右栏完成：面板先读复核记录携带的目标清单，决定随清单提交。 */}
+            {selectedRun
+              ? <ReviewPanel api={api} run={selectedRun} onChanged={refreshAll} />
+              : null}
 
-          {declError ? <p className="ec-wb-muted" role="status">发布声明读取失败：{declError}。场景与结果视图暂不可选；不显示缓存的旧声明。</p> : null}
-
-          {/* W5 纵向切片——复核在右栏完成：面板先读复核记录携带的目标清单，决定随清单提交。 */}
-          {selectedRun
-            ? <ReviewPanel api={api} run={selectedRun} onChanged={refreshAll} />
-            : null}
-
-          {/* W5——问答回复在右栏完成；答复登记不当作引擎接收，未知不自动重投。 */}
-          {selectedRun
-            ? (
-              <InteractionPanel
-                api={api}
-                runId={selectedRun.runId}
-                refreshToken={interactionToken}
-                onChanged={refreshAll}
-              />
-            )
-            : null}
-
-          {selectedRun
-            ? (
-              <ResultViewsCard
-                api={api}
-                run={selectedRun}
-                resultViews={decl?.resultViews ?? []}
-                comparableRunIds={runs
-                  .filter((candidate) => candidate.runId !== selectedRun.runId && candidate.snapshot?.state === 'SUCCEEDED')
-                  .map((candidate) => ({ runId: candidate.runId, label: `运行 ${candidate.runId.slice(0, 8)} · ${formatTime(candidate.createdAt)}` }))}
-              />
-            )
-            : null}
-
-          <DeliveryPackagesCard api={api} workId={workId} runs={{ total: runsTotal, items: runs }} workArchived={archived} />
-
-          {!archived
-            ? (
-              <>
-                <DraftPanel api={api} workId={workId} onUseDraft={setDraftSeed} />
-                <RunLauncher
+            {/* W5——问答回复在右栏完成；答复登记不当作引擎接收，未知不自动重投。 */}
+            {selectedRun
+              ? (
+                <InteractionPanel
                   api={api}
-                  workId={workId}
-                  catalog={models?.catalog}
-                  preference={models?.preference}
-                  hasWorkspace={!!context?.workspace && !archived}
-                  listingTypes={decl?.listingTypes ?? []}
-                  activeRunId={activeRun?.runId ?? null}
-                  initialText={draftSeed}
-                  onCreated={(runId) => { setSelectedRunId(runId); onFocusRun?.(runId); refreshAll() }}
+                  runId={selectedRun.runId}
+                  refreshToken={interactionToken}
+                  onChanged={refreshAll}
                 />
-              </>
-            )
-            : null}
+              )
+              : null}
 
-          <section className="ec-wb-card" aria-labelledby="ec-wb-console-artifacts">
+            <DeliveryPackagesCard api={api} workId={workId} runs={{ total: runsTotal, items: runs }} workArchived={archived} />
+          </section>
+
+          <section className="ec-wb-rail-group" aria-labelledby="ec-wb-rail-launch">
+            <h2 className="ec-wb-rail-group-title" id="ec-wb-rail-launch">{t('rail.launch')}</h2>
+            {declError ? <p className="ec-wb-muted" role="status">发布声明读取失败：{declError}。场景与结果视图暂不可选；不显示缓存的旧声明。</p> : null}
+
+            {!archived
+              ? (
+                <>
+                  <DraftPanel api={api} workId={workId} onUseDraft={setDraftSeed} />
+                  <RunLauncher
+                    api={api}
+                    workId={workId}
+                    catalog={models?.catalog}
+                    preference={models?.preference}
+                    hasWorkspace={!!context?.workspace && !archived}
+                    listingTypes={decl?.listingTypes ?? []}
+                    activeRunId={activeRun?.runId ?? null}
+                    initialText={draftSeed}
+                    onCreated={(runId) => { closeRunView(); setSelectedRunId(runId); onFocusRun?.(null); refreshAll() }}
+                  />
+                </>
+              )
+              : null}
+          </section>
+
+          <section className="ec-wb-rail-group" aria-labelledby="ec-wb-rail-files">
+            <h2 className="ec-wb-rail-group-title" id="ec-wb-rail-files">{t('rail.files')}</h2>
+            <section className="ec-wb-card" aria-labelledby="ec-wb-console-artifacts">
             <div className="ec-wb-card-head">
               <h3 id="ec-wb-console-artifacts">文件成果</h3>
               <span className="ec-wb-badge">{summary.total}</span>
@@ -3531,15 +3643,21 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onReload,
                     </>
                   )}
             {downloadNotice ? <p className="ec-wb-error-text" role="alert">{downloadNotice}</p> : null}
+            </section>
           </section>
 
-          <section className="ec-wb-card" aria-labelledby="ec-wb-console-runs">
+          <section className="ec-wb-rail-group" aria-labelledby="ec-wb-rail-runs">
+            <h2 className="ec-wb-rail-group-title" id="ec-wb-rail-runs">{t('rail.runs')}</h2>
+            <section className="ec-wb-card ec-wb-runs-card" aria-labelledby="ec-wb-console-runs">
             <div className="ec-wb-card-head">
               <h3 id="ec-wb-console-runs">运行历史</h3>
               <span className="ec-wb-badge">{runsTotal}</span>
             </div>
+            {/* 诚实反馈就地显示：打开运行会话失败（会话未知/无原生会话）不吞掉，也不假装已切换。 */}
+            {viewBusy ? <p className="ec-wb-muted" role="status">正在打开该运行的原生会话…</p> : null}
+            {viewError ? <p className="ec-wb-error-text" role="alert">无法打开该运行的原生会话：{viewError}。对话抄本仍在上方运行记录卡片中。</p> : null}
             <button type="button" className="ec-wb-run-row" aria-current={selectedRunId === null}
-              onClick={() => { setSelectedRunId(null); onFocusRun?.(null) }}>
+              onClick={() => { closeRunView() }}>
               <span className="ec-wb-run-dot" data-tone={selectedRunId === null ? 'ok' : 'muted'} aria-hidden="true" />
               <span className="ec-wb-row-main">
                 <strong>会话对话</strong>
@@ -3551,7 +3669,7 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onReload,
               : runs.map((run) => (
                 <button type="button" className="ec-wb-run-row" key={run.runId}
                   aria-current={run.runId === selectedRunId}
-                  onClick={() => { setSelectedRunId(run.runId); onFocusRun?.(run.runId) }}>
+                  onClick={() => { void openRunView(run) }}>
                   <span className="ec-wb-run-dot" data-tone={runTone(run.snapshot?.state)} aria-hidden="true" />
                   <span className="ec-wb-row-main">
                     <strong>运行 {run.runId.slice(0, 8)}</strong>
@@ -3568,6 +3686,7 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onReload,
             {runsTotal > runsLimit
               ? <p className="ec-wb-muted">已显示最近 {runs.length} 次运行；其余 {runsTotal - runs.length} 次更早的运行未列出。</p>
               : null}
+            </section>
           </section>
 
           {/* 详情在右栏内展开（R4）：打开/切换/收起都不导航、不卸载原生会话；展开的是
@@ -3584,8 +3703,7 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onReload,
                     preference={models?.preference}
                     hasWorkspace={!!context?.workspace && !archived}
                     activeRunId={activeRun?.runId ?? null}
-                    allowRerun={!archived}
-                    onCreated={(runId) => { setSelectedRunId(runId); onFocusRun?.(runId); refreshAll() }}
+onCreated={(runId) => { closeRunView(); setSelectedRunId(runId); onFocusRun?.(null); refreshAll() }}
                   />
                   <RunInputsCard api={api} runId={selectedRun?.runId ?? null} refreshToken={token} />
                 </>
@@ -3604,394 +3722,87 @@ function WorkConsole({ api, workId, title, modelLabel, models, onBack, onReload,
  *  recently (falling back to the published catalogue), never a hard-coded product list. */
 /** One page of the full Works list. The control plane caps a page, so "load all" keeps asking
  *  until it has every record instead of searching a silently truncated set. */
-const WORKS_PAGE = 100
-const WORKS_LOAD_CAP = 5000
-
-/** The Works queue: live search over title/project/application, a state filter and three orders,
- *  one row per Work with its latest recorded run state. A Work with no run record says so instead
- *  of implying progress, and a partially loaded catalogue is labelled as partial. */
-function WorksQueue({ api, data, projectId, latest, onOpenWork, onDetail, opening }: {
+/** 「我的工作」desk content (方案 B/B2/B3): the stage beside the work index. The old home grid
+ *  (priority slip + context rail) folds into the index + brief pair: selection honours the
+ *  priority rule at page level, todos surface for the selected Work, and projects/applications
+ *  keep their own pages. The create wizard renders in the stage and never fights the brief for
+ *  focus; the index column (or the single-column inline index) remains the only list. */
+function WorksPage({ api, data, index, previewRow, previewWork, briefTodos, briefTodosKnown, creating, opening, projectId, initialAppKey, onInspect, onBackToIndex, onOpenWork, onDetail, onOpenPending, onCreate, onCreated, onCancelCreate, onReload }: {
   api: WorkbenchApi
   data: WorkbenchBootstrap
-  projectId: string
-  latest: ReadonlyMap<string, RunSummary>
-  onOpenWork(workId: string, runId?: string): void
-  onDetail(work: WorkbenchItem): void
-  opening: string
-}) {
-  const [query, setQuery] = useState('')
-  const [stateFilter, setStateFilter] = useState<'active' | 'archived' | 'all'>('active')
-  const [sort, setSort] = useState<'recent' | 'title' | 'project'>('recent')
-  const [extra, setExtra] = useState<WorkbenchItem[]>([])
-  const [loadingAll, setLoadingAll] = useState(false)
-  const [loadError, setLoadError] = useState('')
-
-  const projects = data.projects ?? []
-  const projectName = (id: string) => projects.find((project) => project.projectId === id)?.name ?? id
-  const appLabel = (appId: string, appVersion: string) => {
-    const app = (data.apps ?? []).find((candidate) => candidate.appId === appId && candidate.appVersion === appVersion)
-    return app?.displayName ?? appId
-  }
-
-  // Bootstrap records are fresher than anything loaded earlier, so they win on id; records only
-  // present in the extended load are kept so a refresh never shrinks the list back to one page.
-  const merged = new Map<string, WorkbenchItem>()
-  for (const work of extra) merged.set(work.workId, work)
-  for (const work of data.works?.items ?? []) merged.set(work.workId, work)
-  const all = [...merged.values()]
-  const total = Math.max(data.works?.total ?? 0, all.length)
-  const complete = all.length >= total
-
-  const toRow = (work: WorkbenchItem): WorkRow => ({
-    workId: work.workId,
-    title: work.title,
-    state: work.state,
-    ...(work.updatedAt ? { updatedAt: work.updatedAt } : {}),
-    projectId: work.projectId,
-    projectName: projectName(work.projectId),
-    appId: work.appId,
-    appVersion: work.appVersion,
-    appName: appLabel(work.appId, work.appVersion),
-  })
-  const rows: WorkRow[] = all.map(toRow)
-  // E4-3: a search is a server-side query over the whole catalogue, cursor-paginated — it never
-  // depends on which bootstrap page happened to be loaded.
-  const serverQuery = query.trim()
-  const [server, setServer] = useState<{ rows: WorkRow[]; items: WorkbenchItem[]; cursor: string | null } | null>(null)
-  const [serverBusy, setServerBusy] = useState(false)
-  const [serverError, setServerError] = useState('')
-  const serverState = stateFilter === 'active' ? 'ACTIVE' : stateFilter === 'archived' ? 'ARCHIVED' : undefined
-  useEffect(() => {
-    setServer(null)
-    setServerError('')
-    setServerBusy(Boolean(serverQuery || projectId))
-    if (!serverQuery && !projectId) return undefined
-    const controller = new AbortController()
-    const timer = setTimeout(() => {
-      setServerBusy(true)
-      api.queryWorks(
-        { q: serverQuery, projectId, ...(serverState ? { state: serverState } : {}) },
-        controller.signal,
-      )
-        .then((page) => {
-          if (controller.signal.aborted) return
-          setServer({ rows: page.items.map(toRow), items: page.items, cursor: page.nextCursor })
-          setServerError('')
-        })
-        .catch((reason) => {
-          if (controller.signal.aborted || (reason as Error)?.name === 'AbortError') return
-          setServer(null)
-          setServerError(`${t('home.loadError')}: ${errorText(reason)}`)
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) setServerBusy(false)
-        })
-    }, 250)
-    return () => { controller.abort(); clearTimeout(timer) }
-    // toRow/serverState derive from data and stateFilter; the query string is the real trigger.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, serverQuery, projectId, stateFilter])
-  const nextPage = useRef<AbortController | null>(null)
-  useEffect(() => () => nextPage.current?.abort(), [api, serverQuery, projectId, stateFilter])
-  const loadMore = async () => {
-    if (!server?.cursor || serverBusy) return
-    const request = new AbortController()
-    nextPage.current?.abort()
-    nextPage.current = request
-    setServerBusy(true)
-    try {
-      const page = await api.queryWorks({
-        q: serverQuery, projectId,
-        ...(serverState ? { state: serverState } : {}),
-        cursor: server.cursor,
-      }, request.signal)
-      if (request.signal.aborted) return
-      setServer((prev) => (prev
-        ? { rows: [...prev.rows, ...page.items.map(toRow)], items: [...prev.items, ...page.items], cursor: page.nextCursor }
-        : prev))
-    } catch (reason) {
-      if (!request.signal.aborted) setServerError(`${t('home.loadError')}: ${errorText(reason)}`)
-    } finally {
-      if (!request.signal.aborted) setServerBusy(false)
-    }
-  }
-  const serverMode = serverQuery.length > 0 || Boolean(projectId)
-  const visible = serverMode ? (server?.rows ?? []) : selectWorkRows(rows, { query, state: stateFilter, sort })
-  // Server hits may sit outside the bootstrap page; they must still open, so they join byId.
-  const byId = new Map([...all, ...(server?.items ?? [])].map((work) => [work.workId, work]))
-  const archivedCount = all.filter((work) => work.state === 'ARCHIVED').length
-  const filtering = query.trim().length > 0 || stateFilter !== 'active' || sort !== 'recent'
-
-  const loadAll = async () => {
-    setLoadingAll(true)
-    setLoadError('')
-    const collected = new Map<string, WorkbenchItem>()
-    try {
-      let offset = 0
-      for (;;) {
-        const page = await api.listWorks(undefined, { offset, limit: WORKS_PAGE })
-        for (const work of page.items) collected.set(work.workId, work)
-        offset += page.items.length
-        if (page.items.length < WORKS_PAGE || offset >= page.total || offset >= WORKS_LOAD_CAP) break
-      }
-      setExtra([...collected.values()])
-      if (offset >= WORKS_LOAD_CAP && offset < total) {
-        setLoadError(`${t('home.limit')} (${offset}/${total})`)
-      }
-    } catch (reason) {
-      setLoadError(`${t('home.loadError')}: ${errorText(reason)}`)
-    } finally {
-      setLoadingAll(false)
-    }
-  }
-
-  const stateOf = (work: WorkbenchItem): { label: string; tone: string } => {
-    const run = latest.get(work.workId)
-    if (run) return { label: runStateText(run.snapshot?.state), tone: runTone(run.snapshot?.state) }
-    return work.state === 'ARCHIVED' ? { label: t('home.archived'), tone: 'muted' } : { label: t('home.noRun'), tone: 'muted' }
-  }
-
-  const resetFilters = () => { setQuery(''); setStateFilter('active'); setSort('recent') }
-  const missing = Math.max(0, total - all.length)
-
-  return (
-    <section className="ec-wb-card ec-wb-queue" aria-labelledby="ec-wb-queue">
-      <div className="ec-wb-queue-head">
-        <div>
-          <h2 id="ec-wb-queue">{t('home.recent')}</h2>
-        </div>
-        <div className="ec-wb-queue-tools">
-          <div className="ec-wb-search">
-            <span className="ec-wb-search-glyph" aria-hidden="true"><Glyph size={13}>{SEARCH_PATHS}</Glyph></span>
-            <input
-              className="ec-wb-input ec-wb-search-input"
-              type="search"
-              aria-label={t('home.search')}
-              placeholder={t('home.search')}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-            {query
-              ? <button type="button" className="ec-wb-search-clear" aria-label={t('home.clearSearch')} onClick={() => setQuery('')}>×</button>
-              : null}
-          </div>
-          <select className="ec-wb-select ec-wb-queue-select" aria-label={t('home.filter')}
-            value={stateFilter} onChange={(event) => setStateFilter(event.target.value as 'active' | 'archived' | 'all')}>
-            <option value="active">{t('home.active')}</option>
-            <option value="archived">{t('home.archived')}{archivedCount > 0 ? ` (${archivedCount})` : ''}</option>
-            <option value="all">{t('home.allStates')}</option>
-          </select>
-          <select className="ec-wb-select ec-wb-queue-select" aria-label={t('home.sort')}
-            value={sort} disabled={serverMode}
-            title={serverMode ? t('home.serverSort') : undefined}
-            onChange={(event) => setSort(event.target.value as 'recent' | 'title' | 'project')}>
-            <option value="recent">{t('home.activity')}</option>
-            <option value="title">{t('home.name')}</option>
-            <option value="project">{t('home.byProject')}</option>
-          </select>
-        </div>
-      </div>
-      {visible.length === 0
-        ? (
-          <div className="ec-wb-queue-empty">
-            <p className="ec-wb-empty">
-              {serverMode
-                ? (server
-                  ? t('home.noMatches')
-                  : serverError ? t('home.loadError') : t('home.querying'))
-                : all.length === 0
-                  ? t('home.empty')
-                  : filtering && missing > 0
-                    ? `${t('home.partial')} (${all.length}/${total})`
-                    : filtering
-                      ? t('home.noMatches')
-                      : t('home.noActive')}
-            </p>
-            {all.length > 0
-              ? (
-                <div className="ec-wb-form-actions">
-                  {!serverMode && filtering && missing > 0
-                    ? (
-                      <button type="button" className="ec-wb-button ec-wb-primary" disabled={loadingAll}
-                        onClick={() => void loadAll()}>
-                        {loadingAll ? t('home.loading') : `${t('home.more')} (${missing})`}
-                      </button>
-                    )
-                    : null}
-                  {filtering ? <button type="button" className="ec-wb-button" onClick={resetFilters}>{t('home.reset')}</button> : null}
-                  {stateFilter === 'active' && archivedCount > 0
-                    ? <button type="button" className="ec-wb-button" onClick={() => setStateFilter('archived')}>{t('home.archived')} ({archivedCount})</button>
-                    : null}
-                </div>
-              )
-              : null}
-          </div>
-        )
-        : (
-          <div className="ec-wb-table" role="table" aria-label={t('home.recent')} aria-busy={opening !== '' || serverBusy}>
-            <div className="ec-wb-table-head" role="row">
-              <span role="columnheader">{t('home.work')}</span>
-              <span role="columnheader">{t('home.app')}</span>
-              <span role="columnheader">{t('home.run')}</span>
-              <span role="columnheader">{t('home.activity')}</span>
-              <span role="columnheader"><span className="ec-wb-sr">{t('home.actions')}</span></span>
-            </div>
-            {visible.map((row) => {
-              const work = byId.get(row.workId)
-              if (!work) return null
-              const state = stateOf(work)
-              const failedRun = work.state === 'ACTIVE' && latest.get(work.workId)?.snapshot?.state === 'FAILED' ? latest.get(work.workId) : undefined
-              return (
-                <div className="ec-wb-work-row" role="row" key={row.workId}>
-                  <span className="ec-wb-work-name" role="cell">
-                    <span className="ec-wb-work-icon" aria-hidden="true">{monogram(row.title)}</span>
-                    <button type="button" className="ec-wb-work-open" disabled={Boolean(opening)} onClick={() => onOpenWork(row.workId)}>
-                      <strong>{row.title}</strong>
-                      <small>{row.projectName}</small>
-                    </button>
-                  </span>
-                  <span className="ec-wb-app-cell" role="cell">{row.appName}</span>
-                  <span role="cell"><span className="ec-wb-state" data-tone={state.tone}>{state.label}</span></span>
-                  <span className="ec-wb-updated" role="cell">{formatTime(row.updatedAt)}</span>
-                  <span className="ec-wb-work-tail" role="cell">
-                    <button type="button" className="ec-wb-button" disabled={Boolean(opening)} onClick={() => failedRun ? onOpenWork(work.workId, failedRun.runId) : onDetail(work)}>{failedRun ? t('home.failure') : t('home.details')}</button>
-                  </span>
-                </div>
-              )
-            })}
-          </div>
-        )}
-      {serverError ? <p className="ec-wb-error-text ec-wb-queue-note" role="alert">{serverError}</p> : null}
-      {loadError ? <p className="ec-wb-error-text ec-wb-queue-note" role="alert">{loadError}</p> : null}
-      <div className="ec-wb-queue-foot">
-        <i aria-hidden="true" />
-        <span aria-live="polite">
-          {t('home.shown')}: {visible.length}
-          {serverMode || complete ? '' : ` / ${t('home.loaded')}: ${all.length}/${total}`}
-        </span>
-        {serverMode
-          ? (server?.cursor
-            ? (
-              <button type="button" className="ec-wb-text-link ec-wb-foot-right" disabled={serverBusy} onClick={() => void loadMore()}>
-                {serverBusy ? t('home.loading') : t('home.more')}
-              </button>
-            )
-            : server ? <span className="ec-wb-foot-right">{t('home.end')}</span> : null)
-          : !complete
-            ? (
-              <button type="button" className="ec-wb-text-link ec-wb-foot-right" disabled={loadingAll} onClick={() => void loadAll()}>
-                {loadingAll ? t('home.loading') : `${t('home.more')} (${missing})`}
-              </button>
-            )
-            : null}
-      </div>
-    </section>
-  )
-}
-
-function WorksPage({ api, data, onOpenWork, onDetail, onOpenPending, onCreate, onReload, creating, opening, projectId, onProjectChange, initialAppKey, onCreated, onCancelCreate, onNavigate }: {
-  api: WorkbenchApi
-  data: WorkbenchBootstrap
-  onOpenWork(workId: string, runId?: string): void
-  onDetail(work: WorkbenchItem, runId?: string): void
-  onOpenPending(workId: string, runId: string): void
-  onCreate(appKey?: string): void
-  onReload(): Promise<void>
+  index: WorkIndexData
+  previewRow: WorkRow | null
+  previewWork: WorkbenchItem | undefined
+  briefTodos: TodoItem[]
+  briefTodosKnown: boolean
   creating: boolean
   opening: string
   projectId: string
-  onProjectChange(projectId: string): void
   initialAppKey: string
+  onInspect(workId: string): void
+  onBackToIndex(): void
+  onOpenWork(workId: string): void
+  onDetail(work: WorkbenchItem, runId?: string): void
+  onOpenPending(workId: string, runId: string): void
+  onCreate(appKey?: string): void
   onCreated(work: WorkbenchItem): void
   onCancelCreate(): void
-  onNavigate(view: WorkbenchView): void
+  onReload(): Promise<void>
 }) {
-  const projects = data.projects ?? []
-  const works = data.works?.items ?? []
-  const todos = data.todos ?? []
-  const [scope, setScope] = useState('')
-  const selectedScope = projects.some((project) => project.projectId === scope) ? scope : ''
-  const scopedProjects = selectedScope ? projects.filter((project) => project.projectId === selectedScope) : projects
-  const pendingTitles = usePendingWorkTitles(api, todos, works)
-  const activeProject = projects.find((project) => project.projectId === (selectedScope || projectId)) ?? projects[0]
-  const latest = latestHomeRuns(data.runs?.items ?? [])
-  const priority = homePriority(selectedScope ? works.filter((work) => work.projectId === selectedScope) : works, latest, todos)
+  if (creating) {
+    const projects = data.projects ?? []
+    const activeProject = projects.find((project) => project.projectId === projectId) ?? projects[0]
+    return (
+      <div className="ec-wb-brief-stage">
+        <NewWorkForm
+          api={api}
+          data={data}
+          initialProjectId={activeProject?.projectId ?? ''}
+          initialAppKey={initialAppKey}
+          onCreated={onCreated}
+          onReload={onReload}
+          onCancel={onCancelCreate}
+        />
+      </div>
+    )
+  }
+
+  // 宽容器：desk 的索引列显示索引，主区显示选中工作的摘要（或空态引导）。窄容器（<800px）：索引
+  // 作为行内块排到主区上方；选中一行后让位给摘要并给出「返回工作索引」。索引只挂载在 desk 网格里
+  // （见 shell），这里不再渲染第二份；显隐全部由 CSS container query 承担，此处不持宽度状态。
+  const brief = previewRow
+    ? (
+      <WorkBrief
+        api={api}
+        row={previewRow}
+        work={previewWork}
+        todos={briefTodos}
+        todosKnown={briefTodosKnown}
+        opening={opening}
+        onEnter={onOpenWork}
+        onDetail={onDetail}
+        onOpenPending={onOpenPending}
+        onDownload={(runId, name) => saveArtifact(runId, name)}
+      />
+    )
+    : null
 
   return (
     <div className="ec-wb-page ec-wb-page-home">
-      <header className="ec-wb-home-header">
-        <h1>{t('nav.works')}</h1>
-        <div className="ec-wb-home-actions">
-          <select className="ec-wb-select" aria-label={t('home.projectFilter')} value={selectedScope}
-            disabled={creating} onChange={(event) => setScope(event.target.value)}>
-            <option value="">{t('home.allProjects')}</option>
-            {projects.map((project) => <option key={project.projectId} value={project.projectId}>{project.name}</option>)}
-          </select>
-          {!creating ? <button type="button" className="ec-wb-button ec-wb-primary" onClick={() => onCreate()}>{t('home.new')}</button> : null}
-        </div>
-      </header>
-
-      <div className="ec-wb-home-grid">
-        <div className="ec-wb-stack">
-          {creating
-            ? (
-              <NewWorkForm
-                api={api}
-                data={data}
-                initialProjectId={activeProject?.projectId ?? ''}
-                initialAppKey={initialAppKey}
-                onCreated={onCreated}
-                onReload={onReload}
-                onCancel={onCancelCreate}
-              />
-            )
-            : null}
-          {opening ? <p className="ec-wb-muted" role="status">{t('home.opening')}</p> : null}
-          {priority ? (
-            <section className="ec-wb-home-priority" aria-labelledby="ec-wb-home-priority">
-              <h2 id="ec-wb-home-priority">{t('home.priority')}</h2>
-              <div className="ec-wb-home-slip" data-failed={priority.kind === 'failed'}>
-                <div>
-                  <span>{t(priority.kind === 'failed' ? 'status.FAILED' : 'nav.pending')}</span>
-                  <strong>{priority.work.title}</strong>
-                  <p>{t(priority.kind === 'failed' ? 'home.failedHint' : 'home.todoHint')}</p>
-                </div>
-                <button type="button" className="ec-wb-button" disabled={Boolean(opening)} onClick={() => {
-                  if (priority.kind === 'failed') onOpenWork(priority.work.workId, priority.runId)
-                  else onOpenPending(priority.work.workId, priority.runId)
-                }}>{t(priority.kind === 'failed' ? 'home.failure' : 'home.openTodo')}</button>
-              </div>
-            </section>
-          ) : null}
-          <WorksQueue key={selectedScope} api={api} data={data} projectId={selectedScope} latest={latest}
-            onOpenWork={onOpenWork} onDetail={onDetail} opening={opening} />
-        </div>
-
-        <aside className="ec-wb-rail ec-wb-home-context" aria-label={t('home.context')}>
-          <section aria-labelledby="ec-wb-projects-home">
-            <div className="ec-wb-card-head">
-              <h2 id="ec-wb-projects-home">{t('nav.projects')}</h2>
-              <button type="button" className="ec-wb-text-link" onClick={() => onNavigate('projects')}>{t('home.allProjects')}</button>
+      <div className="ec-wb-home-brief" data-home-empty={brief ? undefined : 'true'}>
+        {/* 单列首页的「返回工作索引」：只在窄容器 + brief 形态显示（CSS，形态在 desk 根上）。 */}
+        <button type="button" className="ec-wb-desk-back" onClick={onBackToIndex}>
+          <span aria-hidden="true">←</span> {t('desk.index')}
+        </button>
+        {brief ?? (
+          <div className="ec-wb-brief-stage">
+            <div className="ec-wb-empty-state">
+              <h2>{t('desk.emptyTitle')}</h2>
+              <p>{index.rows.length === 0 && index.loadedCount === 0 ? t('home.empty') : t('home.noActive')}</p>
+              <button type="button" className="ec-wb-button ec-wb-primary" onClick={() => onCreate()}>{t('home.new')}</button>
             </div>
-            {scopedProjects.length === 0 ? <p className="ec-wb-muted">{t('home.noProjects')}</p> : scopedProjects.slice(0, 4).map((project) => (
-              <button type="button" className="ec-wb-project-row" key={project.projectId}
-                onClick={() => { onProjectChange(project.projectId); onNavigate('projects') }}>
-                <span className="ec-wb-row-main"><strong>{project.name}</strong>{project.code ? <small>{project.code}</small> : null}</span>
-                <span className="ec-wb-row-tail" aria-hidden="true">›</span>
-              </button>
-            ))}
-          </section>
-          <section aria-labelledby="ec-wb-pending-home">
-            <div className="ec-wb-card-head">
-              <h2 id="ec-wb-pending-home">{t('nav.pending')}</h2>
-              {data.todos ? <span className="ec-wb-badge">{todos.length}</span> : null}
-            </div>
-            {!data.todos ? <p className="ec-wb-muted">{t('home.todosUnavailable')}</p> : todos.length === 0
-              ? <p className="ec-wb-muted">{t('home.noTodos')}</p>
-              : <UnifiedTodoList items={todos.slice(0, 4)} works={works} titles={pendingTitles} onOpen={onOpenPending} />}
-            {todos.length > 4 ? <button type="button" className="ec-wb-text-link" onClick={() => onNavigate('pending')}>{t('home.allTodos')}</button> : null}
-          </section>
-        </aside>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -4198,6 +4009,143 @@ function PreferencesCard() {
   )
 }
 
+/** L2 我的习惯（开发设计 §2/§5 preferences.*）：服务端按登录主体持久化的类型化偏好。
+ *  仅对本人生效；暂停后新运行不再注入；删除写墓碑（备份恢复不复活，T03）。
+ *  值来自封闭键注册表（服务端仍是权威校验者）；修订冲突如实提示，不用最后写入覆盖。 */
+const HABIT_KEYS: Array<{ key: string; label: string; options: Array<{ value: string; label: string }>; pluginScoped: boolean }> = [
+  {
+    key: 'output.locale',
+    label: '输出语言',
+    options: [{ value: 'zh-CN', label: '中文' }, { value: 'en-US', label: 'English' }],
+    pluginScoped: true,
+  },
+  {
+    key: 'review.summaryOrder',
+    label: '复核摘要排序',
+    options: [
+      { value: 'exceptionsFirst', label: '异常优先' },
+      { value: 'chronological', label: '时间顺序' },
+      { value: 'asIs', label: '按原文' },
+    ],
+    pluginScoped: true,
+  },
+  {
+    key: 'layout.density',
+    label: '界面显示密度（仅全局）',
+    options: [{ value: 'compact', label: '紧凑' }, { value: 'comfortable', label: '舒适' }],
+    pluginScoped: false,
+  },
+]
+
+function MyHabitsCard({ api }: { api: WorkbenchApi }) {
+  const [items, setItems] = useState<PersonalPreferenceItem[] | null>(null)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(async () => {
+    try {
+      setItems((await api.preferences()).items)
+      setError('')
+    } catch (reason) {
+      setError(errorText(reason))
+      setItems(null)
+    }
+  }, [api])
+
+  useEffect(() => { void load() }, [load])
+
+  const mutate = async (action: () => Promise<unknown>, success: string) => {
+    setBusy(true)
+    setError('')
+    setNotice('')
+    try {
+      await action()
+      setNotice(success)
+      await load()
+    } catch (reason) {
+      if (reason instanceof PlatformApiError && reason.code === 'PREFERENCE_REVISION_STALE') {
+        setError('该习惯刚在另一台设备上修改过；请刷新后重试——你的这次覆盖未被采用（不用最后写入覆盖）。')
+      } else {
+        setError(errorText(reason))
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const current = (key: string) => items?.find((item) => item.pluginKey === '' && item.key === key)
+  return (
+    <section className="ec-wb-card" aria-labelledby="ec-wb-habits" data-testid="my-habits">
+      <div className="ec-wb-card-head">
+        <h2 id="ec-wb-habits">我的习惯</h2>
+        <span className="ec-wb-badge">{items ? `${items.length} 项` : '…'}</span>
+      </div>
+      <p className="ec-wb-muted">
+        这里保存的是你个人的协作习惯，只对你自己生效、不参与任何业务验证；他人不可见。暂停后新运行不再应用；
+        删除后即使恢复备份也不会复活。偏好服务不可用时按标准呈现继续工作，并如实标注「未应用个人习惯」。
+      </p>
+      {error ? <p className="ec-wb-error-text" role="alert">{error}</p> : null}
+      {notice ? <p className="ec-wb-muted" role="status">{notice}</p> : null}
+      {items === null && !error ? <p className="ec-wb-empty">{busy ? '读取中…' : ''}</p> : null}
+      {items !== null
+        ? HABIT_KEYS.map((habit) => {
+          const item = current(habit.key)
+          return (
+            <div className="ec-wb-row" key={habit.key} data-testid={`habit-${habit.key}`}>
+              <span className="ec-wb-row-main">
+                <strong>{habit.label}</strong>
+                <small className="ec-wb-muted">
+                  {item
+                    ? `当前：${String(item.value)} · 修订 ${item.revision} · ${item.state === 'PAUSED' ? '已暂停（不再注入新运行）' : '生效中'} · ${formatTime(item.updatedAt)}`
+                    : '未设置（按标准呈现）'}
+                </small>
+              </span>
+              <span className="ec-wb-row-actions">
+                <select
+                  className="ec-wb-select"
+                  value={item && typeof item.value === 'string' ? String(item.value) : ''}
+                  disabled={busy}
+                  onChange={(event) => {
+                    const value = event.target.value
+                    if (!value) return
+                    void mutate(
+                      () => api.setPreference(habit.key, value, { expectedRevision: item?.revision ?? 0 }),
+                      `${habit.label} 已保存（只对本人生效）`,
+                    )
+                  }}
+                >
+                  <option value="" disabled>选择…</option>
+                  {habit.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+                {item ? (
+                  item.state === 'PAUSED' ? (
+                    <button className="ec-wb-btn" type="button" disabled={busy}
+                      onClick={() => void mutate(() => api.setPreference(habit.key, String(item.value), { expectedRevision: item.revision }), `${habit.label} 已恢复`)}>
+                      恢复
+                    </button>
+                  ) : (
+                    <button className="ec-wb-btn" type="button" disabled={busy}
+                      onClick={() => void mutate(() => api.pausePreference(habit.key), `${habit.label} 已暂停`)}>
+                      暂停
+                    </button>
+                  )
+                ) : null}
+                {item ? (
+                  <button className="ec-wb-btn" type="button" disabled={busy}
+                    onClick={() => void mutate(() => api.deletePreference(habit.key), `${habit.label} 已删除（不可恢复，重新设置将从头开始）`)}>
+                    删除
+                  </button>
+                ) : null}
+              </span>
+            </div>
+          )
+        })
+        : null}
+    </section>
+  )
+}
+
 /** Operations panel (E3-1): measured latency distribution, outbox depth, run counts and the
  *  deployment's doctor probe in one authorized read. There are no SLO targets yet, so the card
  *  states that fact and shows measurements — it never renders a green "meeting target" light. */
@@ -4356,6 +4304,51 @@ function AuditPanel({ api }: { api: WorkbenchApi }) {
   )
 }
 
+/** 数据安全开关（与模型无关，由用户自己决定开/关）。状态存在服务端文件 `.runtime/data-boundary.json`，
+ *  业务插件与命令行 `.runtime/data-boundary.cjs` 读的是同一个文件；浏览器本地偏好放不了它。 */
+function DataBoundaryCard({ api }: { api: WorkbenchApi }) {
+  const [state, setState] = useState<Awaited<ReturnType<WorkbenchApi['dataBoundary']>> | null>(null)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    api.dataBoundary().then(
+      (value) => { if (!cancelled) setState(value) },
+      (reason) => { if (!cancelled) setError(String((reason as Error)?.message ?? reason)) },
+    )
+    return () => { cancelled = true }
+  }, [api])
+  const flip = async (dataSecurity: boolean) => {
+    setBusy(true)
+    setError('')
+    try {
+      setState(await api.setDataBoundary(dataSecurity))
+    } catch (reason) {
+      setError(String((reason as Error)?.message ?? reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <section className="ec-wb-card" aria-labelledby="ec-wb-data-boundary">
+      <div className="ec-wb-card-head">
+        <h2 id="ec-wb-data-boundary">数据安全</h2>
+        <span className="ec-wb-badge" data-tone={state && !state.dataSecurity ? 'warn' : undefined}>{state ? (state.dataSecurity ? '已开启' : '已关闭') : '读取中'}</span>
+      </div>
+      <p className="ec-wb-muted">与模型无关，由你决定。开启：插件不读取 Cover / Approval，受试者号与 DM/DBD 评审意见只计数；关闭：以上内容原值可读。</p>
+      <div className="ec-wb-row">
+        <span className="ec-wb-row-main">
+          <strong>脱敏边界{state ? (state.dataSecurity ? '：生效中' : '：已放开') : ''}</strong>
+          <small className="ec-wb-muted">{error || (state?.exists ? '开关文件已保存' : '尚无开关文件，按默认（开启）运行')}</small>
+        </span>
+        <button type="button" className="ec-wb-button" disabled={busy || !state || state.dataSecurity === true} onClick={() => void flip(true)}>开启</button>
+        <button type="button" className="ec-wb-button" disabled={busy || !state || state.dataSecurity === false} onClick={() => void flip(false)}>关闭</button>
+      </div>
+      <p className="ec-wb-muted">改动立即写入开关文件；插件工具的说明在插件加载时选定，重启 WebUI 后完全生效。</p>
+    </section>
+  )
+}
+
 function SettingsPage({ api, data, onReload }: {
   api: WorkbenchApi
   data: WorkbenchBootstrap
@@ -4391,7 +4384,9 @@ function SettingsPage({ api, data, onReload }: {
             <p className="ec-wb-muted">真实企业认证（SSO/多租户）须按 IT 合同另行接入；接入之前界面保持诚实标注，不冒充已启用授权。</p>
           </section>
           <PreferencesCard />
+          <MyHabitsCard api={api} />
           <ModelDefaultPanel api={api} catalog={catalog} preference={data.models?.preference} onReload={onReload} />
+          <DataBoundaryCard api={api} />
           <section className="ec-wb-card" aria-labelledby="ec-wb-model-catalog">
             <div className="ec-wb-card-head"><h2 id="ec-wb-model-catalog">模型目录</h2><span className="ec-wb-badge">{catalog?.entries?.length ?? 0}</span></div>
             <p className="ec-wb-muted">目录只列出经部署登记并接入的模型；选择随运行冻结，切换不会改写已有记录。</p>
@@ -4484,27 +4479,35 @@ const VIEW_TITLES: Record<WorkbenchView, string> = {
   settings: '平台设置',
 }
 
-const PLATFORM_NAV_ICONS: Record<WorkbenchView, ReactNode> = {
-  projects: <Glyph><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></Glyph>,
-  apps: <Glyph><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /></Glyph>,
-  works: <Glyph><line x1="10" y1="6" x2="21" y2="6" /><line x1="10" y1="12" x2="21" y2="12" /><line x1="10" y1="18" x2="21" y2="18" /><path d="M4 6h.01" /><path d="M4 12h.01" /><path d="M4 18h.01" /></Glyph>,
-  sessions: <Glyph><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 8.5-8.5 8.38 8.38 0 0 1 8.5 8.5z" /></Glyph>,
-  pending: <Glyph><circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15.5 13.8" /></Glyph>,
-  settings: <Glyph><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></Glyph>,
+/** 单侧栏架构：企业导航的条目与图标移至 `sidebar-nav.tsx`；主区只保留页面标题与内容。 */
+
+/** One Work's conversation on screen: the retained native reference plus the application the Work
+ *  belongs to (published to conversation entries as the platform fact, see conversation-application.ts). */
+interface SessionWorkEntry {
+  workId: string
+  title: string
+  sessionId: string
+  reference: SessionReference
+  /** Null only when the Work's application could not be resolved; entries then stay unfiltered. */
+  application: ConversationApplication | null
 }
 
-/** Navigation order follows the reviewed draft: work first, then the spaces and tools around it. */
-const PLATFORM_NAV: ReadonlyArray<{ id: WorkbenchView; label: string }> = [
-  { id: 'works', label: '我的工作' },
-  { id: 'sessions', label: '历史会话' },
-  { id: 'projects', label: '项目空间' },
-  { id: 'apps', label: '应用中心' },
-  { id: 'pending', label: '待我处理' },
-  { id: 'settings', label: '平台设置' },
-]
-
-export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, watchWorkSession, createSession, renderSlot, sessionList, refreshSessionList }: WorkbenchPageProps) {
+export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, beginNavigation, watchWorkSession, createSession, renderSlot, sessionList, refreshSessionList, route, platformSelected, publishConversationApplication }: WorkbenchPageProps) {
   const api = useMemo(() => new WorkbenchApi(API_BASE), [])
+  // 单侧栏架构：主区执行侧栏派发的导航命令。命令处理放在 ref 中，任何渲染后都指向最新闭包，
+  // 注册副作用只随 route 变化挂载/卸载一次。
+  const routeCommandRef = useRef<(command: WorkbenchRouteCommand) => void>(() => {})
+  useEffect(() => {
+    route.setHandler((command) => routeCommandRef.current(command))
+    return () => route.setHandler(null)
+  }, [route])
+  // WP3: one gate per page instance. Every async navigation begins an intent on it; only the
+  // newest intent commits page state, so A→B out-of-order returns and host panel switches can
+  // never let a stale navigation win. Unmount disposes it — no commit after teardown.
+  const gate = useMemo(() => new NavigationGate({ beginNavigation }), [])
+  const gateRef = useRef(gate)
+  gateRef.current = gate
+  useEffect(() => () => gateRef.current.dispose(), [])
   const preferences = usePreferences()
   const hasData = useRef(false)
   const [data, setData] = useState<WorkbenchBootstrap | null>(null)
@@ -4520,8 +4523,26 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
   const [startAppKey, setStartAppKey] = useState('')
   const [selectedProjectId, setSelectedProjectId] = useState('')
   const [page, setPage] = useState<WorkbenchView>('works')
-  const [sessionWork, setSessionWork] = useState<{ workId: string; title: string; reference: SessionReference } | null>(null)
+  const [sessionWork, setSessionWork] = useState<SessionWorkEntry | null>(null)
   const [historySession, setHistorySession] = useState<{ sessionId: string; title: string; reference: SessionReference } | null>(null)
+
+  /** 新建工作表单属于「我的工作」首页坐标，不是独立视图。每一条离开该坐标的路径——另一个键控页、
+   *  索引里另一行的摘要、某 Work 的会话/只读详情——都在同一批更新里关闭它，表单不会在员工回来时
+   *  再次出现。2026-11-23 回归：此前 creating 只在表单自己的取消/提交里清除，打开表单后点索引
+   *  另一行只改高亮（摘要被表单挡住），切到其他页面再回来表单仍在。 */
+  const closeCreate = useCallback(() => { setCreating(false); setStartAppKey('') }, [])
+
+  // ── Work desk (方案 B): page-level index + preview ─────────────────────────
+  // 索引查询状态与 previewWorkId 都是页面级（方案 B §4）：首页与会话外壳共享同一份索引，
+  // 预选只是 workId——它永远不决定原生 Session 引用（那是 openWork/绑定既有路径的事）。
+  const [indexFilters, setIndexFilters] = useState<WorkIndexFilters>({ query: '', state: 'active', sort: 'recent', projectId: '' })
+  const [previewWorkId, setPreviewWorkId] = useState<string | null>(null)
+  // 单列首页的「返回索引」：清掉预览展示但不销毁预选；新筛选或新选择会重新允许自动预选。
+  const [previewCleared, setPreviewCleared] = useState(false)
+  const [deskPanel, setDeskPanel] = useState<'index' | 'rail' | null>(null)
+  const [toolsOpen, setToolsOpen] = useState(false)
+  const indexScrollMemory = useRef(0)
+  const index = useWorkIndex(api, data, indexFilters)
 
   // Leaving the session view (nav, back, detail switch) releases the view's retained reference so
   // the embedded factory returns to its session-less posture; unmount releases it too. React
@@ -4532,6 +4553,13 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
     if (!sessionViewOpen) return undefined
     return () => releaseSession()
   }, [sessionViewOpen, releaseSession])
+  // 平台事实（2026-11-24）：把屏幕上这项工作的应用发布给会话内组件（`useConversationApplication`）。
+  // 新会话的输入框与本次提交一同挂载，首轮渲染读到的还是上一个会话的值；在提交阶段（绘制前）发布，
+  // 订阅者会在绘制前同步重渲染，所以不会看到按上一个应用渲染的入口。离开工作会话（历史会话、
+  // 首页）即回到 null。
+  useLayoutEffect(() => {
+    publishConversationApplication(sessionWork?.application ?? null)
+  }, [publishConversationApplication, sessionWork?.application])
 
   const load = useCallback(async () => {
     try {
@@ -4551,6 +4579,37 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
   useEffect(() => {
     if (!selectedProjectId && data?.projects?.[0]) setSelectedProjectId(data.projects[0].projectId)
   }, [data, selectedProjectId])
+
+  // ── Desk width (方案 B §5)：列显隐由 CSS container query 驱动 ────────────────
+  // desk 根是 inline-size 容器，CSS 按容器宽度切换索引列/资料栏形态（≥1120 会话三列、
+  // ≥800 首页两列、840 以下资料面板、800 以下首页单列）。JS 只保留面板的模态语义
+  // （deskPanel 的 Escape/焦点），不再持有宽度状态——测量 stage 自身会造成显隐反馈循环。
+
+  // 优先事项（可见结果内）驱动首次预选；homePriority 的判定保持既有语义（待办 → 失败运行）。
+  const latestRuns = useMemo(() => latestHomeRuns(data?.runs?.items ?? []), [data])
+  const priorityWork = useMemo(() => {
+    const visibleWorks = index.rows
+      .map((row) => index.byId.get(row.workId))
+      .filter((work): work is WorkbenchItem => Boolean(work))
+    return homePriority(visibleWorks, latestRuns, data?.todos ?? [])
+  }, [index.rows, index.byId, latestRuns, data])
+
+  // 预选规则（方案 B §2）：仍可见的预选保留；否则可见的优先事项；否则首项；空集不选。
+  // 等待与失败不算空结果——只有成功返回的新结果集参与重选。
+  useLayoutEffect(() => {
+    if (page !== 'works' || sessionWork || detailWork) return
+    if (previewCleared) return
+    if (previewWorkId && index.rows.some((row) => row.workId === previewWorkId)) return
+    if (index.busy || index.error) return
+    const next = pickPreviewWorkId(index.rows, previewWorkId, priorityWork?.work.workId ?? null)
+    if (next !== previewWorkId) setPreviewWorkId(next)
+  }, [page, sessionWork, detailWork, previewCleared, previewWorkId, index.rows, index.busy, index.error, priorityWork])
+
+  /** 筛选更新：提交新筛选后允许自动预选重新生效（仍可见则保留原预选，否则重选）。 */
+  const updateIndexFilters = (patch: Partial<WorkIndexFilters>) => {
+    setIndexFilters((previous) => ({ ...previous, ...patch }))
+    setPreviewCleared(false)
+  }
 
   /** A cold boot races the native session catalog against this page's first retain: a refresh
    *  restore (or an early click) can reach for a session before `session.list` has landed, and
@@ -4572,14 +4631,42 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
     }
   }, [retainSession, refreshSessionList, sessionList])
 
+  /** The single slot releases the previous reference on every retain, so the Work's stored
+   *  reference goes stale as soon as a run view swaps in. Every way back re-retains the Work
+   *  session and adopts the returned reference here in the same batched continuation — the
+   *  fallback `children` must never render a released reference (ScopeAreaProvider reads the
+   *  binding during render and the harness throws). The epoch bump lets a still-mounted run
+   *  view know its reference was released by this swap and withdraw in the same commit. */
+  const [workEpoch, setWorkEpoch] = useState(0)
+  const adoptWorkReference = useCallback((reference: SessionReference) => {
+    setSessionWork((previous) => (previous ? { ...previous, reference } : previous))
+    setWorkEpoch((epoch) => epoch + 1)
+  }, [])
+  /** openWork/openBoundSession commit a freshly retained Work session through the same epoch
+   *  guard: a run view still mounted under the previous epoch (boot-restore superseded by a
+   *  manual open) withdraws in this batched commit instead of rendering the reference this
+   *  retain just released. */
+  const commitWorkSession = useCallback((entry: SessionWorkEntry) => {
+    setSessionWork(entry)
+    setWorkEpoch((epoch) => epoch + 1)
+    closeCreate()
+  }, [closeCreate])
+
   /** `silent` marks a refresh-restore: a coordinate that no longer resolves is forgotten and the
-   *  shell falls back to the works page instead of announcing a failure for a stale view. */
+   *  shell falls back to the works page instead of announcing a failure for a stale view.
+   *  WP3: the whole navigation runs under one intent — a superseded intent (newer openWork, host
+   *  panel switch, unmount) commits nothing and releases only the reference it retained. */
   const openWork = useCallback(async (workId: string, options?: { focusRunId?: string; silent?: boolean }) => {
     const silent = options?.silent === true
+    const intent = gateRef.current.begin()
     setOpening(workId)
     if (!silent) setNotice('')
     try {
       const context = await api.workContext(workId)
+      // silent = boot restore（restoring 遮罩挡住一切交互）：intent 失效只可能来自宿主自己的
+      // 首屏 panel 动作（selectPanel abort 所有 pending navigation），不是一次新的用户导航，
+      // 所以恢复照常提交；用户点击路径保持 WP3 语义（失效即放弃）。
+      if (!intent.current() && !silent) return
       // 历史只读入口（W5/R4）：归档工作不再挂载原生会话——打开即只读详情页，记录与成果照常
       // 可查，不新建对话，也不会把归档工作送回带运行待办的控制台。
       if (context.work.state === 'ARCHIVED') {
@@ -4612,30 +4699,52 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
         return
       }
       const reference = await retainKnownSession(sessionId)
+      if (!intent.current() && !silent) {
+        // The intent expired while retaining: release only this navigation's own reference.
+        releaseSession(reference)
+        return
+      }
       watchWorkSession({ workId, domainId: context.binding.domainId, sessionId, since: context.binding.createdAt })
       setDetailWork(null)
       setFocusRunId(options?.focusRunId)
-      setSessionWork({ workId, title: context.work.title, reference })
+      commitWorkSession({
+        workId, title: context.work.title, sessionId, reference,
+        application: { appId: context.app.appId, appVersion: context.app.appVersion, displayName: context.app.displayName },
+      })
     } catch (reason) {
       console.error(`[platform-workbench] open work failed: ${errorText(reason)}`)
+      if (!intent.current()) return
       if (silent) clearPersistedView()
       else setNotice(`无法打开工作：${errorText(reason)}`)
     } finally {
-      setOpening('')
+      if (intent.current()) setOpening('')
+      else setOpening((current) => (current === workId ? '' : current))
     }
-  }, [api, retainKnownSession, watchWorkSession])
+  }, [api, retainKnownSession, watchWorkSession, releaseSession, commitWorkSession])
 
   // Open the embedded session view from the Work detail page (bound Session + domain already checked).
   const openBoundSession = useCallback(async (workId: string, sessionId: string, domainId: string, since?: string) => {
+    const intent = gateRef.current.begin()
     setNotice('')
     try {
       const reference = await retainKnownSession(sessionId)
+      if (!intent.current()) {
+        releaseSession(reference)
+        return
+      }
       watchWorkSession({ workId, domainId, sessionId, ...(since ? { since } : {}) })
-      setSessionWork({ workId, title: detailWork?.title ?? '工作', reference })
+      // The detail page carries the release coordinates; the display name comes from the published catalogue.
+      const displayName = detailWork
+        ? (data?.apps ?? []).find((app) => app.appId === detailWork.appId && app.appVersion === detailWork.appVersion)?.displayName ?? detailWork.appId
+        : ''
+      commitWorkSession({
+        workId, title: detailWork?.title ?? '工作', sessionId, reference,
+        application: detailWork ? { appId: detailWork.appId, appVersion: detailWork.appVersion, displayName } : null,
+      })
     } catch (reason) {
-      setNotice(`无法打开会话：${errorText(reason)}`)
+      if (intent.current()) setNotice(`无法打开会话：${errorText(reason)}`)
     }
-  }, [retainKnownSession, watchWorkSession, detailWork])
+  }, [retainKnownSession, watchWorkSession, detailWork, data, releaseSession, commitWorkSession])
 
   /**
    * Create and bind a native Session for an unbound Work. The session is created in the Work's own
@@ -4663,19 +4772,48 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
 
   /** Open a session straight from 历史会话: native Q&A only — no Work binding, no correlation. */
   const openHistorySession = useCallback(async (sessionId: string, title: string) => {
+    const intent = gateRef.current.begin()
     setNotice('')
     try {
       const reference = await retainKnownSession(sessionId)
+      if (!intent.current()) {
+        releaseSession(reference)
+        return
+      }
       setSessionWork(null)
       setDetailWork(null)
       setFocusRunId(undefined)
       setHistorySession({ sessionId, title, reference })
+      closeCreate()
     } catch (reason) {
-      setNotice(`无法打开历史会话：${errorText(reason)}`)
+      if (intent.current()) setNotice(`无法打开历史会话：${errorText(reason)}`)
     }
-  }, [retainKnownSession])
+  }, [retainKnownSession, releaseSession, closeCreate])
 
   const closeHistorySession = useCallback(() => { setHistorySession(null) }, [])
+
+  /** 索引行的「查看…工作摘要」。首页只更新预览；会话中点当前项不重开，点另一行是显式离开
+   *  当前工作——走既有离开/导航清理回工作页，再应用目标预览，绝不自动进入另一个会话。 */
+  const inspectWork = (workId: string) => {
+    setDeskPanel(null)
+    if (sessionWork) {
+      if (sessionWork.workId === workId) return
+      selectPage('works')
+      setPreviewWorkId(workId)
+      setPreviewCleared(false)
+      return
+    }
+    // 首页上选另一行是显式离开创建表单：所选工作的摘要接管 stage。
+    closeCreate()
+    setPreviewWorkId(workId)
+    setPreviewCleared(false)
+  }
+
+  /** 单列首页「返回工作索引」：收起摘要展示，预选保留（宽屏回来仍可见）。 */
+  const backToIndex = () => { setPreviewCleared(true); setDeskPanel(null) }
+
+  /** 摘要的下载走既有 saveArtifact：失败就地反馈，不保存错误页，不自动重试（方案 B §3）。 */
+  const downloadBriefArtifact = (runId: string, name: string) => saveArtifact(runId, name)
 
   const toggleCompact = () => {
     setCompact((previous) => {
@@ -4699,6 +4837,9 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
     setHistorySession(null)
     setDetailWork(null)
     setFocusRunId(undefined)
+    closeCreate()
+    // 换页关掉桌面临时面板（手机上也不与宿主全局抽屉叠开）。
+    setDeskPanel(null)
   }
 
   /** Open the create form, optionally retargeted at the application whose quick target was clicked. */
@@ -4710,6 +4851,7 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
   const openDetail = (work: WorkbenchItem, runId?: string) => {
     setFocusRunId(runId)
     setDetailWork(work)
+    closeCreate()
   }
 
   /** Resolve a Work by id from the loaded page, falling back to its own context so a Work outside
@@ -4731,12 +4873,14 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
   /** 「查看详情」不再从控制台清空 Session（W5/R4：该路径已移除）——控制台的详情是右栏内展开。
    *  待处理入口按工作状态分流：使用中的工作进控制台（原生会话保持挂载），归档工作进只读详情。 */
   const openPendingById = async (workId: string, runId: string) => {
+    const intent = gateRef.current.begin()
     try {
       const work = await resolveWork(workId)
+      if (!intent.current()) return
       if (work.state === 'ARCHIVED') openDetail(work, runId)
       else void openWork(workId, { focusRunId: runId })
     } catch (reason) {
-      setNotice(`无法打开待处理问题：${errorText(reason)}`)
+      if (intent.current()) setNotice(`无法打开待处理问题：${errorText(reason)}`)
     }
   }
 
@@ -4770,8 +4914,12 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
   applyViewRef.current = (view) => {
     if (view.sessionWorkId) void openWork(view.sessionWorkId, { focusRunId: view.focusRunId, silent: true })
     else if (view.historySessionId) void openHistorySession(view.historySessionId, view.historySessionTitle ?? '历史会话')
-    else if (view.detailWorkId) void resolveWork(view.detailWorkId).then((work) => openDetail(work, view.focusRunId)).catch(() => {})
-    else if (view.page && WORKBENCH_VIEWS.includes(view.page as WorkbenchView)) selectPage(view.page as WorkbenchView)
+    else if (view.detailWorkId) {
+      const intent = gateRef.current.begin()
+      void resolveWork(view.detailWorkId)
+        .then((work) => { if (intent.current()) openDetail(work, view.focusRunId) })
+        .catch(() => {})
+    } else if (view.page && WORKBENCH_VIEWS.includes(view.page as WorkbenchView)) selectPage(view.page as WorkbenchView)
   }
 
   // Keyed-page restores are synchronous and apply before the first paint. Everything deeper
@@ -4795,12 +4943,17 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
     const { sessionWorkId, historySessionId, historySessionTitle, detailWorkId, focusRunId } = saved
     void (async () => {
       try {
+        // 首屏面板选择会 abort 打进行中的导航 intent（WP3 宿主合同），恢复必须排在它之后，
+        // 否则 F5/深链的会话恢复会被 selectPanel 静默打断（A07）。
+        await platformSelected
         if (sessionWorkId) {
           await openWork(sessionWorkId, { focusRunId, silent: true })
         } else if (historySessionId) {
           await openHistorySession(historySessionId, historySessionTitle ?? '历史会话')
         } else if (detailWorkId) {
           openDetail(await resolveWork(detailWorkId), focusRunId)
+        } else if (saved.page && WORKBENCH_VIEWS.includes(saved.page as WorkbenchView)) {
+          selectPage(saved.page as WorkbenchView)
         }
       } catch {
         clearPersistedView()
@@ -4853,88 +5006,159 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
   }, [])
 
   const pendingCount = (data?.todos ?? data?.pending ?? []).length
-  // "最近打开" lists work still in use; an archived Work only appears while it is the open one.
-  const recentWorks = byRecent((data?.works?.items ?? [])
-    .filter((work) => work.state !== 'ARCHIVED' || work.workId === sessionWork?.workId)).slice(0, 5)
   const projectName = (projectId: string) =>
     (data?.projects ?? []).find((project) => project.projectId === projectId)?.name ?? projectId
-  const executorLabel = data?.status?.executor && data.status.executor !== 'not-configured'
-    ? `执行器 ${data.status.executor}`
-    : '执行器待配置'
 
-  const shell = (children: ReactNode, options: { session?: boolean } = {}) => (
-    <div className="ec-wb" data-density={compact ? 'compact' : 'normal'} data-expert={expert ? 'on' : 'off'}>
-      {/* E4-4 keyboard path: a skip link lets keyboard users bypass the nav rail (visible on focus). */}
-      <a className="ec-wb-skip" href="#ec-wb-content">跳到主内容</a>
+  // ── Desk index decorations (方案 B) ────────────────────────────────────────
+  // 行内状态标签只保留需要人工处理的语义：warn/error 运行、归档、以及匹配的待复核。
+  const reviewWorkIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const todo of data?.todos ?? []) {
+      if (todo.kind === 'review' && todo.workId) ids.add(todo.workId)
+    }
+    return ids
+  }, [data])
+  const deskIndexChips = useMemo(() => {
+    const map = new Map<string, WorkIndexChip[]>()
+    // 标签文案随界面语言：workRowState / t 的 locale 是显式参数，漏传会回落到 zh-CN（English 模式下
+    // 行内状态标签曾是中文），且 memo 依赖里必须带上语言，切换后才重算。
+    const locale = preferences.locale
+    for (const row of index.rows) {
+      const chips: WorkIndexChip[] = []
+      const state = workRowState(row, latestRuns.get(row.workId), locale)
+      if (state.tone === 'error' || state.tone === 'warn' || row.state === 'ARCHIVED') chips.push(state)
+      if (reviewWorkIds.has(row.workId)) chips.push({ label: t('brief.needsReview', locale), tone: 'warn' })
+      if (chips.length > 0) map.set(row.workId, chips)
+    }
+    return map
+  }, [index.rows, latestRuns, reviewWorkIds, preferences.locale])
+
+  // 预览对象：只在可见行里取（自动预选保证有效性），摘要数据按 workId 由 brief 自行读取。
+  const previewRow = previewWorkId ? index.rows.find((row) => row.workId === previewWorkId) ?? null : null
+  const previewWork = previewWorkId ? index.byId.get(previewWorkId) : undefined
+  const briefTodos = useMemo(
+    () => (data?.todos ?? []).filter((todo) => todo.workId === previewWorkId),
+    [data, previewWorkId],
+  )
+
+  // 单侧栏架构：把当前坐标发布给侧栏（uSES 快照），并执行侧栏派发的导航命令。侧栏不持有业务
+  // 数据——pendingCount/连接状态都是主区读得的服务端事实，侧栏只如实显示。
+  routeCommandRef.current = (command) => {
+    switch (command.kind) {
+      case 'navigate': selectPage(command.page); break
+      case 'create': selectPage('works'); startCreate(command.appKey); break
+      case 'open-work': void openWork(command.workId); break
+    }
+  }
+  const viewKind = sessionWork ? 'work' : historySession ? 'history' : detailWork ? 'detail' : 'page'
+  useEffect(() => {
+    route.publish({
+      page,
+      viewKind,
+      activeWorkId: sessionWork?.workId ?? detailWork?.workId ?? null,
+      activeTitle: sessionWork?.title ?? historySession?.title ?? detailWork?.title ?? null,
+      pendingCount,
+      connected: !error,
+    })
+  })
+
+  // ── Desk shell (方案 B §2): 全局导航(宿主列) | 工作索引 | 工作摘要 或 工作索引 | 原生会话 |
+  // 工作资料。索引只在「我的工作」首页与会话外壳出现——它是「我的工作」的主从列表，不是第二套
+  // 全局导航；其他页面沿用原布局。桌面外壳把顶栏放进 stage 列，与基准图一致。
+  const deskIndexNode = data
+    ? (
+      <WorkIndex
+        index={index}
+        filters={indexFilters}
+        onFiltersChange={updateIndexFilters}
+        selectedId={sessionWork ? sessionWork.workId : previewWorkId}
+        sessionMode={sessionWork !== null}
+        chips={deskIndexChips}
+        busy={Boolean(opening)}
+        projects={data.projects ?? []}
+        onInspect={inspectWork}
+        onCreate={() => { setDeskPanel(null); selectPage('works'); startCreate() }}
+        scrollMemory={indexScrollMemory}
+      />
+    )
+    : null
+
+  const shell = (children: ReactNode, options: { session?: boolean; desk?: boolean } = {}) => {
+    // 基准图 B1/B2：顶栏从「📁 项目名 / 视图名」两级面包屑开始，右侧是「全局搜索 Ctrl K」与
+    // 一个有名称的工具菜单（刷新/紧凑/专家诊断收纳其中，不删除）。连接状态在全局轨底部。
+    const crumbWork = sessionWork ?? null
+    const crumbWorkItem = crumbWork
+      ? index.byId.get(crumbWork.workId)
+      : detailWork ?? previewWork
+    const crumbPrimary = crumbWorkItem
+      ? (data?.projects ?? []).find((project) => project.projectId === crumbWorkItem.projectId)?.name ?? crumbWorkItem.projectId
+      : navLabel(page, preferences.locale)
+    const crumbSecondary = crumbWork
+      ? t('desk.crumbSession', preferences.locale)
+      : detailWork || (options.desk && page === 'works' && previewWork)
+        ? t('desk.crumbDetail', preferences.locale)
+        : navLabel(page, preferences.locale)
+    const topbar = (
       <div className="ec-wb-topbar">
-        <span className="ec-wb-mark" aria-hidden="true">{BRAND_MARK}</span>
-        <span className="ec-wb-wordmark">EMERALD</span>
-        <span className="ec-wb-top-divider" aria-hidden="true" />
         <div className="ec-wb-breadcrumb">
-          <span>企业 AI 平台</span><span aria-hidden="true">/</span>
-          <span>{sessionWork ? sessionWork.title : historySession ? historySession.title : detailWork ? detailWork.title : navLabel(page, preferences.locale)}</span>
+          {options.desk ? (
+            <>
+              <span className="ec-wb-breadcrumb-glyph" aria-hidden="true">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+                </svg>
+              </span>
+              <span className="ec-wb-breadcrumb-root">{crumbPrimary}</span>
+              <span className="ec-wb-breadcrumb-sep" aria-hidden="true">/</span>
+              <span>{crumbSecondary}</span>
+            </>
+          ) : (
+            <span>{sessionWork ? sessionWork.title : historySession ? historySession.title : detailWork ? detailWork.title : navLabel(page, preferences.locale)}</span>
+          )}
         </div>
-        <div className="ec-wb-top-actions">
-          <span className={`ec-wb-conn${error ? ' is-down' : ''}`} role="status">{error ? '平台未连接' : '平台已连接'}</span>
-          <button type="button" className="ec-wb-icon-btn" aria-label="全局搜索（Ctrl+K）" title="全局搜索（Ctrl+K）" onClick={() => setPaletteOpen(true)}>{GLYPH_SEARCH_TOP}</button>
-          <button type="button" className="ec-wb-icon-btn" aria-label="刷新平台数据" title="刷新" onClick={() => void load()}>{GLYPH_REFRESH}</button>
-          <button type="button" className="ec-wb-icon-btn" aria-label="紧凑布局" title="紧凑布局" aria-pressed={compact} onClick={toggleCompact}>{GLYPH_DENSITY}</button>
-          <button type="button" className="ec-wb-icon-btn" aria-label="专家诊断" title="专家诊断（显示路径/会话/摘要等技术细节）" aria-pressed={expert} onClick={toggleExpert}><Glyph size={16}><path d="M8 9l-3 3 3 3M16 9l3 3-3 3M13 7l-2 10" /></Glyph></button>
-          <button type="button" className="ec-wb-icon-btn" aria-label={navLabel('settings', preferences.locale)} title={navLabel('settings', preferences.locale)} onClick={() => selectPage('settings')}>{GLYPH_SETTINGS}</button>
-        </div>
-      </div>
-      <div className="ec-wb-shell">
-        <nav className="ec-wb-nav" aria-label={t('home.navLandmark')}>
-          {/* Brand lives once, in the top bar; the rail starts with the primary action. */}
-          <button type="button" className="ec-wb-nav-new" onClick={() => { selectPage('works'); startCreate() }}>
-            <span className="ec-wb-nav-plus" aria-hidden="true">＋</span>{t('home.newLabel')}
-          </button>
-          <div className="ec-wb-nav-items">
-            {PLATFORM_NAV.map((item) => (
+        {options.desk
+          ? (
+            <>
               <button
                 type="button"
-                key={item.id}
-                className="ec-wb-nav-item"
-                aria-current={!sessionWork && !detailWork && page === item.id ? 'page' : undefined}
-                onClick={() => selectPage(item.id)}
+                className="ec-wb-desk-index-toggle"
+                aria-haspopup="dialog"
+                aria-expanded={deskPanel === 'index'}
+                onClick={() => setDeskPanel(deskPanel === 'index' ? null : 'index')}
               >
-                <span className="ec-wb-nav-glyph" aria-hidden="true">{PLATFORM_NAV_ICONS[item.id]}</span>{navLabel(item.id, preferences.locale)}
-                {item.id === 'pending'
-                  ? <span className="ec-wb-nav-count" data-alert={pendingCount > 0}>{pendingCount}</span>
-                  : null}
+                <Glyph size={14}><rect x="3" y="4" width="18" height="16" rx="2" /><line x1="3" y1="9" x2="21" y2="9" /><line x1="9" y1="9" x2="9" y2="20" /></Glyph>
+                {t('desk.index', preferences.locale)}
               </button>
-            ))}
-          </div>
-          <div className="ec-wb-nav-caption">{t('home.recentOpened')}</div>
-          <div className="ec-wb-recent">
-            {recentWorks.length === 0
-              ? <p className="ec-wb-nav-empty">{t('home.noRecent')}</p>
-              : recentWorks.map((work) => (
-                <button
-                  type="button"
-                  key={work.workId}
-                  className={`ec-wb-recent-item${sessionWork?.workId === work.workId ? ' is-active' : ''}`}
-                  onClick={() => void openWork(work.workId)}
-                >
-                  <strong>{work.title}</strong>
-                  <small>{projectName(work.projectId)} · {relativeTime(work.updatedAt, Date.now())}</small>
+              <div className="ec-wb-top-actions">
+                <button type="button" className="ec-wb-desk-search" onClick={() => setPaletteOpen(true)}>
+                  <Glyph size={14}>{SEARCH_PATHS}</Glyph>
+                  <span>{t('desk.searchGlobal', preferences.locale)}</span>
+                  <kbd aria-hidden="true">Ctrl K</kbd>
                 </button>
-              ))}
-          </div>
-          <button type="button" className="ec-wb-nav-bottom" onClick={() => selectPage('settings')}>
-            <span className="ec-wb-nav-bottom-mark" aria-hidden="true"><Glyph size={13}>{SETTINGS_PATHS}</Glyph></span>
-            <span>
-              <strong>{navLabel('settings', preferences.locale)}</strong>
-              <span className="ec-wb-nav-bottom-sub">{executorLabel}</span>
-            </span>
-            <span className="ec-wb-nav-bottom-arrow" aria-hidden="true">›</span>
-          </button>
-        </nav>
-        <main id="ec-wb-content" className={options.session ? 'ec-wb-main ec-wb-main-session' : 'ec-wb-main'}>
-          {networkHint || notice ? <p className="ec-wb-status" role="status" aria-live="polite">{networkHint || notice}</p> : null}
-          {children}
-        </main>
+                <DeskToolsMenu
+                  open={toolsOpen}
+                  onOpenChange={setToolsOpen}
+                  actions={[
+                    { id: 'refresh', label: '刷新平台数据', onSelect: () => void load() },
+                    { id: 'compact', label: '紧凑布局', checked: compact, onSelect: toggleCompact },
+                    { id: 'expert', label: '专家诊断', checked: expert, onSelect: toggleExpert },
+                  ]}
+                />
+              </div>
+            </>
+          )
+          : (
+            <div className="ec-wb-top-actions">
+              <span className={`ec-wb-conn${error ? ' is-down' : ''}`} role="status">{error ? '平台未连接' : '平台已连接'}</span>
+              <button type="button" className="ec-wb-icon-btn" aria-label="全局搜索（Ctrl+K）" title="全局搜索（Ctrl+K）" onClick={() => setPaletteOpen(true)}>{GLYPH_SEARCH_TOP}</button>
+              <button type="button" className="ec-wb-icon-btn" aria-label="刷新平台数据" title="刷新" onClick={() => void load()}>{GLYPH_REFRESH}</button>
+              <button type="button" className="ec-wb-icon-btn" aria-label="紧凑布局" title="紧凑布局" aria-pressed={compact} onClick={toggleCompact}>{GLYPH_DENSITY}</button>
+              <button type="button" className="ec-wb-icon-btn" aria-label="专家诊断" title="专家诊断（显示路径/会话/摘要等技术细节）" aria-pressed={expert} onClick={toggleExpert}><Glyph size={16}><path d="M8 9l-3 3 3 3M16 9l3 3-3 3M13 7l-2 10" /></Glyph></button>
+            </div>
+          )}
       </div>
+    )
+    const palette = (
       <CommandPalette
         api={api}
         open={paletteOpen}
@@ -4943,8 +5167,61 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
         onOpenRun={(workId, runId) => void openPendingById(workId, runId)}
         onNavigate={selectPage}
       />
-    </div>
-  )
+    )
+    if (options.desk && data) {
+      // 首页形态（只在 <800px 时决定索引让不让位给摘要）：有摘要或创建表单在显示就是 brief。
+      // 「返回工作索引」置 previewCleared——它必须参与这里，否则按钮点了没反应（既有缺陷，
+      // 2026-11-24 修复）；预选本身保留，宽屏回来摘要仍在。创建表单由 WorksPage 提前返回、不带
+      // 首页根节点，所以这个坐标放在 desk 根上。
+      const homeMode = creating || (previewRow && !previewCleared) ? 'brief' : 'index'
+      return (
+        <div className="ec-wb ec-wb-desk-outer">
+          <div
+            className="ec-wb ec-wb-desk"
+            data-density={compact ? 'compact' : 'normal'}
+            data-expert={expert ? 'on' : 'off'}
+            data-desk-view={options.session ? 'session' : 'home'}
+            data-home-mode={homeMode}
+            data-desk-panel={deskPanel === 'index' ? 'index' : undefined}
+          >
+          {/* E4-4 keyboard path: a skip link lets keyboard users bypass the topbar (visible on focus).
+              单侧栏架构：左栏导航由 `sidebar` slot 的企业导航承担；工作索引是主区的主从列表，用带
+              名称的 section 语义与全局导航区分。desk 是命名区域网格（index | top + main），工作索引
+              只挂载这一份——是列、行内块还是收起，全由 container query（CSS）决定（2026-11-24：此前
+              首页同时挂了列与窄屏内联两份 DOM）。 */}
+          <a className="ec-wb-skip" href="#ec-wb-content">跳到主内容</a>
+          {topbar}
+          <section className="ec-wb-desk-index" aria-label={t('desk.index', preferences.locale)}>
+            {deskIndexNode}
+          </section>
+          <main id="ec-wb-content" className={options.session ? 'ec-wb-main ec-wb-main-session' : 'ec-wb-main'}>
+            {networkHint || notice ? <p className="ec-wb-status" role="status" aria-live="polite">{networkHint || notice}</p> : null}
+            {children}
+          </main>
+          {/* 索引收起后的临时面板：与右栏资料面板共用一个槽位（deskPanel），同时只有一个；只在
+              打开期间才存在第二份索引。按钮只在窄容器出现（CSS），宽容器下本面板不会打开。 */}
+          <DeskPanel open={deskPanel === 'index'} onClose={() => setDeskPanel(null)} label={t('desk.index', preferences.locale)}>
+            {deskIndexNode}
+          </DeskPanel>
+          {palette}
+          </div>
+        </div>
+      )
+    }
+    return (
+      <div className="ec-wb" data-density={compact ? 'compact' : 'normal'} data-expert={expert ? 'on' : 'off'}>
+        <a className="ec-wb-skip" href="#ec-wb-content">跳到主内容</a>
+        {topbar}
+        <div className="ec-wb-shell">
+          <main id="ec-wb-content" className={options.session ? 'ec-wb-main ec-wb-main-session' : 'ec-wb-main'}>
+            {networkHint || notice ? <p className="ec-wb-status" role="status" aria-live="polite">{networkHint || notice}</p> : null}
+            {children}
+          </main>
+        </div>
+        {palette}
+      </div>
+    )
+  }
 
   // A refresh restore that needs a server resolution shows the shell with an honest state until
   // the coordinate settles — never the works list flashing past the view the employee was in.
@@ -4969,7 +5246,9 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
   // Embedded native session view (T13 single-page form): the upstream conversation factory lives
   // inside the enterprise shell. The standard-kit SessionProvider binds the view to the Work's
   // retained reference (the ui-sidebar-right explicit-scoping pattern), so the session entry
-  // resolves that exact Session while the native main view stays untouched.
+  // resolves that exact Session while the native main view stays untouched. Desk layout (方案 B):
+  // 工作索引 | 原生会话 | 工作资料 — the index travels with the session, but it only ever
+  // previews; entering another Work still goes through the explicit leave path.
   if (sessionWork) {
     return shell(
       <WorkConsole
@@ -4978,16 +5257,25 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
         title={sessionWork.title}
         modelLabel={defaultModelLabel(data.models)}
         models={data.models}
-        onBack={closeSessionView}
         onReload={load}
         {...(focusRunId ? { initialRunId: focusRunId } : {})}
         onFocusRun={(runId) => setFocusRunId(runId ?? undefined)}
+        SessionProvider={SessionProvider}
+        sessionSlot={renderSlot('workbench.session', {})}
+        workSessionId={sessionWork.sessionId}
+        retainSessionById={retainKnownSession}
+        retainWorkSession={retainSession}
+        adoptWorkReference={adoptWorkReference}
+        workEpoch={workEpoch}
+        releaseRunReference={releaseSession}
+        railPanelOpen={deskPanel === 'rail'}
+        onRailPanelToggle={(open) => setDeskPanel(open ? 'rail' : null)}
       >
         <SessionProvider session={sessionWork.reference}>
           {renderSlot('workbench.session', {})}
         </SessionProvider>
       </WorkConsole>,
-      { session: true },
+      { session: true, desk: true },
     )
   }
 
@@ -5026,19 +5314,24 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
         <WorksPage
           api={api}
           data={data}
-          onOpenWork={(workId, runId) => void openWork(workId, runId ? { focusRunId: runId } : undefined)}
-          onDetail={openDetail}
-          onOpenPending={(workId, runId) => void openPendingById(workId, runId)}
-          onCreate={startCreate}
-          onReload={load}
+          index={index}
+          previewRow={previewRow}
+          previewWork={previewWork}
+          briefTodos={briefTodos}
+          briefTodosKnown={data.todos != null}
           creating={creating}
           opening={opening}
           projectId={selectedProjectId}
-          onProjectChange={setSelectedProjectId}
           initialAppKey={startAppKey}
-          onCreated={(work) => { setCreating(false); setStartAppKey(''); openDetail(work) }}
-          onCancelCreate={() => setCreating(false)}
-          onNavigate={selectPage}
+          onInspect={inspectWork}
+          onBackToIndex={backToIndex}
+          onOpenWork={(workId) => void openWork(workId)}
+          onDetail={openDetail}
+          onOpenPending={(workId, runId) => void openPendingById(workId, runId)}
+          onCreate={startCreate}
+          onCreated={openDetail}
+          onCancelCreate={closeCreate}
+          onReload={load}
         />
       ) : null}
       {page === 'sessions' ? (
@@ -5055,5 +5348,6 @@ export function WorkbenchPage({ SessionProvider, retainSession, releaseSession, 
       {page === 'pending' ? <PendingPage api={api} data={data} onOpen={(workId, runId) => void openPendingById(workId, runId)} /> : null}
       {page === 'settings' ? <SettingsPage api={api} data={data} onReload={load} /> : null}
     </>,
+    { desk: page === 'works' },
   )
 }

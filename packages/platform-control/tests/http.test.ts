@@ -39,6 +39,7 @@ const setup = async (options: { appDir?: string } = {}) => {
   const root = await mkdtemp(join(tmpdir(), 'platform-http-'));
   const service = new PlatformControlService(join(root, 'control.sqlite'));
   service.registerApp(draft(), operator);
+  service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
   service.registerModelCatalog(catalogDraft, operator);
   const api: RunningWorkbenchApi = await startWorkbenchServer({
     service,

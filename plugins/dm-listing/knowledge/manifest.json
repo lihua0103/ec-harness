@@ -18,78 +18,356 @@
       "pk-sad-mad"
     ],
     "scenarioAliases": {
-      "manual": ["review"],
-      "medical": ["review"],
-      "pk": ["pk-common"],
-      "be": ["pk-common"],
-      "sad-mad": ["pk-common"]
+      "manual": [
+        "review"
+      ],
+      "medical": [
+        "review"
+      ],
+      "pk": [
+        "pk-common"
+      ],
+      "be": [
+        "pk-common"
+      ],
+      "sad-mad": [
+        "pk-common"
+      ]
     }
   },
   "seeds": [
-    { "knowledgeId": "dm-listing.review.methods", "topics": ["manual", "medical", "row-logic", "output-qc"] },
-    { "knowledgeId": "dm-listing.intake.methods", "topics": ["intake", "als", "sas", "runtime"], "claims": 3, "validator": "dm-listing.intake-suite" },
-    { "knowledgeId": "dm-listing.pk.common", "topics": ["pk", "output-qc"] },
-    { "knowledgeId": "dm-listing.pk.be", "topics": ["pk-be"] },
-    { "knowledgeId": "dm-listing.pk.sad-mad", "topics": ["pk-sad-mad"] }
+    {
+      "knowledgeId": "dm-listing.review.methods",
+      "topics": [
+        "manual",
+        "medical",
+        "row-logic",
+        "output-qc"
+      ]
+    },
+    {
+      "knowledgeId": "dm-listing.intake.methods",
+      "topics": [
+        "intake",
+        "als",
+        "sas",
+        "runtime"
+      ],
+      "claims": 3,
+      "validator": "dm-listing.intake-suite"
+    },
+    {
+      "knowledgeId": "dm-listing.batch-comparison.methods",
+      "topics": [
+        "manual",
+        "medical",
+        "row-logic",
+        "output-qc"
+      ],
+      "claims": 5,
+      "validator": "dm-listing.comparison-suite"
+    },
+    {
+      "knowledgeId": "dm-listing.pk.common",
+      "topics": [
+        "pk",
+        "output-qc"
+      ]
+    },
+    {
+      "knowledgeId": "dm-listing.pk.be",
+      "topics": [
+        "pk-be"
+      ]
+    },
+    {
+      "knowledgeId": "dm-listing.pk.sad-mad",
+      "topics": [
+        "pk-sad-mad"
+      ]
+    }
   ],
   "validators": [
-    { "id": "dm-listing.intake-suite", "version": "1.1.0", "covers": ["dm-listing.intake.methods"] }
+    {
+      "id": "dm-listing.intake-suite",
+      "version": "1.1.0",
+      "covers": [
+        "dm-listing.intake.methods"
+      ]
+    },
+    {
+      "id": "dm-listing.comparison-suite",
+      "version": "1.0.0",
+      "covers": [
+        "dm-listing.batch-comparison.methods"
+      ]
+    }
   ],
   "capabilities": [
-    { "tool": "dm_listing_read_requirements", "topics": ["manual"] },
-    { "tool": "dm_listing_save_requirements", "topics": ["manual"] },
-    { "tool": "dm_listing_manual_methods", "topics": ["manual", "medical", "row-logic"] },
-    { "tool": "dm_listing_scenario_methods", "topics": ["manual", "medical", "pk", "pk-be", "pk-sad-mad", "intake"] },
-    { "tool": "dm_listing_scan_project", "topics": ["intake", "als"] },
-    { "tool": "dm_listing_read_workbook", "topics": ["intake", "als", "sas"] },
-    { "tool": "dm_listing_read_sheet", "topics": ["intake", "als", "sas"] },
-    { "tool": "dm_listing_overview", "topics": ["intake", "als"] },
-    { "tool": "dm_listing_read_artifact", "topics": ["intake", "runtime"] },
-    { "tool": "dm_listing_describe_dataset", "topics": ["als", "sas"] },
-    { "tool": "dm_listing_inspect", "topics": ["als", "sas", "runtime"] },
-    { "tool": "dm_listing_save_program", "topics": ["runtime"] },
-    { "tool": "dm_listing_validate_synthetic", "topics": ["output-qc"] },
-    { "tool": "dm_listing_prepare_delivery", "topics": ["runtime", "output-qc"] },
-    { "tool": "dm_listing_recover_interrupted", "topics": ["runtime"] }
+    {
+      "tool": "dm_listing_read_requirements",
+      "topics": [
+        "manual"
+      ]
+    },
+    {
+      "tool": "dm_listing_save_requirements",
+      "topics": [
+        "manual"
+      ]
+    },
+    {
+      "tool": "dm_listing_manual_methods",
+      "topics": [
+        "manual",
+        "medical",
+        "row-logic"
+      ]
+    },
+    {
+      "tool": "dm_listing_scenario_methods",
+      "topics": [
+        "manual",
+        "medical",
+        "pk",
+        "pk-be",
+        "pk-sad-mad",
+        "intake"
+      ]
+    },
+    {
+      "tool": "dm_listing_scan_project",
+      "topics": [
+        "intake",
+        "als"
+      ]
+    },
+    {
+      "tool": "dm_listing_read_workbook",
+      "topics": [
+        "intake",
+        "als",
+        "sas"
+      ]
+    },
+    {
+      "tool": "dm_listing_read_sheet",
+      "topics": [
+        "intake",
+        "als",
+        "sas"
+      ]
+    },
+    {
+      "tool": "dm_listing_overview",
+      "topics": [
+        "intake",
+        "als"
+      ]
+    },
+    {
+      "tool": "dm_listing_read_artifact",
+      "topics": [
+        "intake",
+        "runtime"
+      ]
+    },
+    {
+      "tool": "dm_listing_describe_dataset",
+      "topics": [
+        "als",
+        "sas"
+      ]
+    },
+    {
+      "tool": "dm_listing_inspect",
+      "topics": [
+        "als",
+        "sas",
+        "runtime"
+      ]
+    },
+    {
+      "tool": "dm_listing_save_program",
+      "topics": [
+        "runtime"
+      ]
+    },
+    {
+      "tool": "dm_listing_validate_synthetic",
+      "topics": [
+        "output-qc"
+      ]
+    },
+    {
+      "tool": "dm_listing_prepare_delivery",
+      "topics": [
+        "runtime",
+        "output-qc"
+      ]
+    },
+    {
+      "tool": "dm_listing_recover_interrupted",
+      "topics": [
+        "runtime"
+      ]
+    }
   ],
   "noMethodKnowledge": [
-    { "tool": "dm_listing_list_tasks", "reason": "会话任务清单管理，无领域方法语义" },
-    { "tool": "dm_listing_open_demo", "reason": "内置合成示例入口，演示流程不属于方法沉淀" },
-    { "tool": "dm_listing_status", "reason": "状态与种子导入报告，无方法语义" }
+    {
+      "tool": "dm_listing_list_tasks",
+      "reason": "会话任务清单管理，无领域方法语义"
+    },
+    {
+      "tool": "dm_listing_open_demo",
+      "reason": "内置合成示例入口，演示流程不属于方法沉淀"
+    },
+    {
+      "tool": "dm_listing_status",
+      "reason": "状态与种子导入报告，无方法语义"
+    }
   ],
   "agent": {
     "id": "dm-listing.agent",
     "version": "1.0.0",
     "owner": "dm-listing 维护者",
-    "topics": ["manual", "medical", "row-logic", "output-qc", "intake", "als", "sas", "runtime", "pk", "pk-be", "pk-sad-mad"],
+    "topics": [
+      "manual",
+      "medical",
+      "row-logic",
+      "output-qc",
+      "intake",
+      "als",
+      "sas",
+      "runtime",
+      "pk",
+      "pk-be",
+      "pk-sad-mad"
+    ],
     "tools": [
-      { "tool": "dm_listing_manual_methods", "topics": ["manual", "medical", "row-logic"] },
-      { "tool": "dm_listing_scenario_methods", "topics": ["manual", "medical", "pk", "pk-be", "pk-sad-mad", "intake"] },
-      { "tool": "dm_listing_scan_project", "topics": ["intake", "als"] },
-      { "tool": "dm_listing_describe_dataset", "topics": ["als", "sas"] },
-      { "tool": "dm_listing_validate_synthetic", "topics": ["output-qc"] },
-      { "tool": "dm_listing_prepare_delivery", "topics": ["runtime", "output-qc"] },
-      { "tool": "dm_listing_recover_interrupted", "topics": ["runtime"] }
+      {
+        "tool": "dm_listing_manual_methods",
+        "topics": [
+          "manual",
+          "medical",
+          "row-logic"
+        ]
+      },
+      {
+        "tool": "dm_listing_scenario_methods",
+        "topics": [
+          "manual",
+          "medical",
+          "pk",
+          "pk-be",
+          "pk-sad-mad",
+          "intake"
+        ]
+      },
+      {
+        "tool": "dm_listing_scan_project",
+        "topics": [
+          "intake",
+          "als"
+        ]
+      },
+      {
+        "tool": "dm_listing_describe_dataset",
+        "topics": [
+          "als",
+          "sas"
+        ]
+      },
+      {
+        "tool": "dm_listing_validate_synthetic",
+        "topics": [
+          "output-qc"
+        ]
+      },
+      {
+        "tool": "dm_listing_prepare_delivery",
+        "topics": [
+          "runtime",
+          "output-qc"
+        ]
+      },
+      {
+        "tool": "dm_listing_recover_interrupted",
+        "topics": [
+          "runtime"
+        ]
+      }
     ],
     "noMethodTools": [
-      { "tool": "dm_listing_list_tasks", "reason": "会话任务清单管理，无领域方法语义" },
-      { "tool": "dm_listing_open_demo", "reason": "内置合成示例入口，演示流程不属于方法沉淀" },
-      { "tool": "dm_listing_status", "reason": "状态与种子导入报告，无方法语义" }
+      {
+        "tool": "dm_listing_list_tasks",
+        "reason": "会话任务清单管理，无领域方法语义"
+      },
+      {
+        "tool": "dm_listing_open_demo",
+        "reason": "内置合成示例入口，演示流程不属于方法沉淀"
+      },
+      {
+        "tool": "dm_listing_status",
+        "reason": "状态与种子导入报告，无方法语义"
+      }
     ]
   },
   "feedback": {
-    "events": ["run.failed", "qc.completed", "business.clarified"],
+    "events": [
+      "run.failed",
+      "qc.completed",
+      "business.clarified"
+    ],
     "projectionVersion": "1"
   },
   "goldenSet": {
     "id": "dm-listing.golden",
     "version": "1",
     "cases": [
-      { "query": "flag=duplicated", "expect": ["dm-listing.review.methods"] },
-      { "query": "sidecar", "expect": ["dm-listing.intake.methods"] },
-      { "query": "BQL", "expect": ["dm-listing.pk.common"] },
-      { "query": "完全不存在的黄金集探针词", "expect": [], "expectEmpty": true }
+      {
+        "query": "flag=duplicated",
+        "expect": [
+          "dm-listing.review.methods"
+        ]
+      },
+      {
+        "query": "静态键配置",
+        "expect": [
+          "dm-listing.batch-comparison.methods"
+        ]
+      },
+      {
+        "query": "sidecar",
+        "expect": [
+          "dm-listing.intake.methods"
+        ]
+      },
+      {
+        "query": "BQL",
+        "expect": [
+          "dm-listing.pk.common"
+        ]
+      },
+      {
+        "query": "完全不存在的黄金集探针词",
+        "expect": [],
+        "expectEmpty": true
+      },
+      {
+        "query": "SAD/MAD 队列",
+        "expect": [
+          "dm-listing.pk.sad-mad"
+        ]
+      },
+      {
+        "query": "入排标准",
+        "expect": [],
+        "expectEmpty": true
+      }
     ]
   },
-  "scope": { "projects": "all" }
+  "scope": {
+    "projects": "all"
+  }
 }

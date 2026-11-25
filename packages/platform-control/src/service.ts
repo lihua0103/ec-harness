@@ -6,7 +6,15 @@ import { RunError } from '../../platform-runtime/src/run.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
-import { AuthorizationError, LocalOperatorPolicy, type PlatformAction, type PlatformPolicy, type Principal } from './policy.js';
+import {
+  AuthorizationError,
+  LocalOperatorPolicy,
+  type KnowledgeDeploymentScope,
+  type KnowledgeTenantScope,
+  type PlatformAction,
+  type PlatformPolicy,
+  type Principal,
+} from './policy.js';
 import { ApplicationRegistry, PlatformError } from './registry.js';
 import { RunRepository, runInputDigest } from './runs.js';
 import { WorkRepository, type WorkDraft } from './works.js';
@@ -22,6 +30,12 @@ import { InputBaselineRepository, type InputBaselineDraft } from './input-baseli
 import { DeliveryPackageRepository, deliveryPackageDigest } from './delivery.js';
 import type { DeliveryPackageRecord, DeterministicCheck, EvaluationCheckResult, EvaluationRunRecord, EvaluationSetRecord } from './store.js';
 import type { ExecutionDomainRecord, ExecutionDomainState, InputBaselineRecord, WorkSessionBindingRecord } from './store.js';
+// 学习平台 L1/L2/L3：知识权威服务访问面（进程内或 HTTP 实现共用同一合同）与数据合同类型。
+import type { KnowledgeAccess } from '../../platform-knowledge/src/access.js';
+import type { KnowledgePrincipal } from '../../platform-knowledge/src/identity-scope.js';
+import type { KnowledgeContext } from '../../platform-knowledge/src/schema.js';
+import type { KnowledgeReleaseRecord, LearningCaseSourceEvent, LearningCaseStatus } from '../../platform-knowledge/src/learning.js';
+import type { PersonalDraftRecord, PersonalSettingRecord } from '../../platform-knowledge/src/preferences.js';
 import {
   findCatalogEntry,
   modelCatalogDigest,
@@ -68,6 +82,11 @@ const MAX_SEALED_TOTAL_BYTES = 256 * 1024 * 1024;
 const OUTBOX_MAX_ATTEMPTS = 5;
 const OUTBOX_CLAIM_TTL_MS = 5 * 60 * 1000;
 const OUTBOX_RETRY_BASE_MS = 15 * 1000;
+// 知识捕获 outbox（T04）：先入队再投递；有限重试 + 死信 + 人工重放。
+const KNOWLEDGE_OUTBOX_MAX_ATTEMPTS = 5;
+const KNOWLEDGE_OUTBOX_CLAIM_TTL_MS = 5 * 60 * 1000;
+const KNOWLEDGE_OUTBOX_RETRY_BASE_MS = 2 * 1000;
+const KNOWLEDGE_OUTBOX_RETRY_MAX_MS = 60 * 1000;
 const OUTBOX_RETRY_MAX_MS = 10 * 60 * 1000;
 const LAUNCH_LEASE_TTL_MS = 2 * 60 * 1000;
 
@@ -264,7 +283,7 @@ export interface CancelResult {
 /** Trusted run facts handed to a deployment-owned knowledge sink for candidate capture. The sink
  *  must bind runId/inputDigest/artifact digests itself; a model cannot supply them. */
 export interface KnowledgeCaptureEvent {
-  kind: 'run.failed' | 'run.unknown' | 'run.succeeded' | 'run.cancelled';
+  kind: 'run.failed' | 'run.unknown' | 'run.succeeded' | 'run.cancelled' | 'qc.completed';
   runId: string;
   workId: string | null;
   appId: string;
@@ -275,6 +294,8 @@ export interface KnowledgeCaptureEvent {
   inputDigest: string;
   artifactDigests: string[];
   reason?: string;
+  /** 复核决定（kind=qc.completed）：reviewId 与决定本身都是可信事实，决定不回写、不可重复投递。 */
+  review?: { reviewId: string; decision: 'APPROVED' | 'REJECTED'; note?: string };
   at: string;
 }
 
@@ -303,8 +324,16 @@ export class PlatformControlService {
    *  artifacts drain under their original locks and a run whose artifact is missing never
    *  starts, never falls back to another version's worker. */
   private readonly executorsByDigest = new Map<string, RunExecutor>();
-  private knowledgeSource?: (app: AppRecord, projectId: string) => RunRecord['knowledge'] | undefined;
-  private knowledgeCaptureSink?: (event: KnowledgeCaptureEvent) => void | Promise<void>;
+  private knowledgeSource?: (
+    app: AppRecord,
+    projectId: string,
+    scope: KnowledgeTenantScope,
+    options?: { actorId?: string },
+  ) => RunRecord['knowledge'] | undefined;
+  private knowledgeScope?: KnowledgeDeploymentScope;
+  private knowledgeCaptureSink?: (event: KnowledgeCaptureEvent) => { outcome?: string } | void | Promise<{ outcome?: string } | void>;
+  /** L1/L2/L3 知识权威服务访问面（进程内或 HTTP）；未装配时交互端点 503 降级（§5 故障语义）。 */
+  private knowledgeAccess?: KnowledgeAccess;
   private closed = false;
   private readonly conversationActivities = new Map<string, NonNullable<RunOutcome['activities']>>();
   /** Live activity feed (E4-7): cursor-tagged entries so SSE can resume without re-reading the run. */
@@ -314,7 +343,6 @@ export class PlatformControlService {
   private readonly conversationInputs = new Map<string, Array<{ role: 'user'; text: string; createdAt: string }>>();
   /** Live waiters for SDK user questions; persistence is the durable inbox the UI reads. */
   private readonly interactionWaiters = new Map<string, (result: UserQuestionResult) => void>();
-  private readonly capturedKnowledgeRuns = new Set<string>();
   private readonly sealRoot: string;
   constructor(
     path: string,
@@ -370,16 +398,57 @@ export class PlatformControlService {
    *  plane never writes the knowledge store (single-writer stays with KnowledgeService). */
   setKnowledgeSnapshotSource(
     source:
-      | ((app: AppRecord, projectId: string) => RunRecord['knowledge'] | undefined)
+      | ((
+          app: AppRecord,
+          projectId: string,
+          scope: KnowledgeTenantScope,
+          options?: { actorId?: string },
+        ) => RunRecord['knowledge'] | undefined)
       | null,
   ): void {
     this.knowledgeSource = source ?? undefined;
   }
+  /** Deployment seam (WP2): the trusted knowledge tenant scope from the assembly/identity channel.
+   *  Business callers can only narrow it; the scope is never accepted from run input. */
+  setKnowledgeScope(scope: KnowledgeDeploymentScope | undefined): void {
+    this.knowledgeScope = scope;
+  }
+  /** WP2: derive the trusted tenant scope for a run creator. Enterprise deployments may only
+   *  narrow the configured ceiling — a principal claiming a different org/region is refused as
+   *  an escalation. When neither the deployment nor the identity supplies an org/region, run
+   *  creation for a knowledge-declaring app fails with a diagnosable state instead of binding
+   *  records across tenants. Local mode binds the explicit standalone (unscoped) snapshot. */
+  private effectiveKnowledgeScope(principal: Principal): KnowledgeTenantScope {
+    const scope = this.knowledgeScope;
+    if (!scope || scope.mode === 'local') return {};
+    if (scope.orgId !== undefined && principal.orgId !== undefined && principal.orgId !== scope.orgId) {
+      throw new PlatformError('KNOWLEDGE_SCOPE_ESCALATION', principal.orgId);
+    }
+    if (scope.region !== undefined && principal.region !== undefined && principal.region !== scope.region) {
+      throw new PlatformError('KNOWLEDGE_SCOPE_ESCALATION', principal.region);
+    }
+    const orgId = scope.orgId ?? principal.orgId;
+    const region = scope.region ?? principal.region;
+    if (orgId === undefined && region === undefined) {
+      throw new PlatformError('KNOWLEDGE_SCOPE_UNAVAILABLE', '无可信组织/区域：部署与身份均未提供企业范围');
+    }
+    return {
+      ...(orgId !== undefined ? { orgId } : {}),
+      ...(region !== undefined ? { region } : {}),
+    };
+  }
   /** Deployment seam: a sink may create CANDIDATE knowledge from trusted terminal run facts. It
    *  receives digests and identifiers only; it never receives run input text, and it can never
    *  activate knowledge (activation stays with KnowledgeService and its validation receipts). */
-  setKnowledgeCaptureSink(sink: ((event: KnowledgeCaptureEvent) => void | Promise<void>) | null): void {
+  setKnowledgeCaptureSink(
+    sink: ((event: KnowledgeCaptureEvent) => { outcome?: string } | void | Promise<{ outcome?: string } | void>) | null,
+  ): void {
     this.knowledgeCaptureSink = sink ?? undefined;
+  }
+  /** L1/L2/L3：装配知识权威服务访问面（InProcessKnowledgeAccess 或 HttpKnowledgeAccess）。
+   *  未装配时偏好/学习/发布交互端点 503 降级——工作台可按标准呈现继续工作（§5）。 */
+  setKnowledgeAccess(access: KnowledgeAccess | null): void {
+    this.knowledgeAccess = access ?? undefined;
   }
   /** Persist worker process-exit evidence so cancels remain settleable across control restarts. */
   recordExitEvidence(launchId: string, proven: boolean): void {
@@ -388,6 +457,161 @@ export class PlatformControlService {
   }
   readExitEvidence(launchId: string): boolean | null {
     return this.store.attemptExitProven(launchId);
+  }
+
+  // ── L1/L2/L3 知识权威服务交互面（开发设计 §5 行为合同） ──────────────────────────
+  /** owner/租户一律从已验证身份派生；未装配访问面时 503 降级（偏好服务不可用→按标准呈现继续工作）。 */
+  private requireKnowledgeAccess(): KnowledgeAccess {
+    if (!this.knowledgeAccess) throw new PlatformError('KNOWLEDGE_SERVICE_UNAVAILABLE', '知识权威服务未装配');
+    return this.knowledgeAccess;
+  }
+  private toKnowledgePrincipal(principal: Principal): KnowledgePrincipal {
+    return {
+      actorId: principal.actorId,
+      ...(principal.orgId !== undefined ? { orgId: principal.orgId } : {}),
+      ...(principal.region !== undefined ? { region: principal.region } : {}),
+    };
+  }
+  /** 学习个案的检索上下文：插件/项目来自调用参数，租户来自可信部署范围（企业模式缺失可诊断失败）。 */
+  private learningContext(principal: Principal, input: { pluginId: string; projectId?: string }): KnowledgeContext {
+    const scope = this.effectiveKnowledgeScope(principal);
+    return {
+      pluginId: input.pluginId,
+      ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+      ...scope,
+    };
+  }
+  preferencesGetMine(principal: Principal, options: { pluginId?: string } = {}): Promise<PersonalSettingRecord[]> {
+    this.policy.authorize(principal, 'preference.read');
+    return this.requireKnowledgeAccess().preferencesGetMine(this.toKnowledgePrincipal(principal), options);
+  }
+  preferencesSetMine(
+    principal: Principal,
+    input: { key: string; value: unknown; pluginId?: string; expectedRevision: number },
+  ): Promise<PersonalSettingRecord> {
+    this.policy.authorize(principal, 'preference.write');
+    return this.requireKnowledgeAccess().preferencesSetMine(this.toKnowledgePrincipal(principal), input);
+  }
+  preferencesPauseMine(principal: Principal, key: string, pluginId?: string): Promise<PersonalSettingRecord> {
+    this.policy.authorize(principal, 'preference.write');
+    return this.requireKnowledgeAccess().preferencesPauseMine(this.toKnowledgePrincipal(principal), key, pluginId);
+  }
+  preferencesDeleteMine(principal: Principal, key: string, pluginId?: string): Promise<PersonalSettingRecord> {
+    this.policy.authorize(principal, 'preference.write');
+    return this.requireKnowledgeAccess().preferencesDeleteMine(this.toKnowledgePrincipal(principal), key, pluginId);
+  }
+  personalDraftCreate(
+    principal: Principal,
+    input: { pluginId?: string; title: string; body: string },
+  ): Promise<PersonalDraftRecord> {
+    this.policy.authorize(principal, 'preference.write');
+    return this.requireKnowledgeAccess().personalDraftCreate(this.toKnowledgePrincipal(principal), input);
+  }
+  personalDraftListMine(principal: Principal): Promise<PersonalDraftRecord[]> {
+    this.policy.authorize(principal, 'preference.read');
+    return this.requireKnowledgeAccess().personalDraftListMine(this.toKnowledgePrincipal(principal));
+  }
+  personalDraftUpdateMine(
+    principal: Principal,
+    draftId: string,
+    expectedRevision: number,
+    patch: { title?: string; body?: string },
+  ): Promise<PersonalDraftRecord> {
+    this.policy.authorize(principal, 'preference.write');
+    return this.requireKnowledgeAccess().personalDraftUpdateMine(this.toKnowledgePrincipal(principal), draftId, expectedRevision, patch);
+  }
+  personalDraftDeleteMine(principal: Principal, draftId: string): Promise<PersonalDraftRecord> {
+    this.policy.authorize(principal, 'preference.write');
+    return this.requireKnowledgeAccess().personalDraftDeleteMine(this.toKnowledgePrincipal(principal), draftId);
+  }
+  learningCasesList(
+    principal: Principal,
+    input: { pluginId: string; projectId?: string; status?: LearningCaseStatus; limit?: number },
+  ) {
+    this.policy.authorize(principal, 'learning.case.read');
+    return this.requireKnowledgeAccess().learningCases(this.learningContext(principal, input), {
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.limit !== undefined ? { limit: input.limit } : {}),
+    });
+  }
+  learningCaseOpen(
+    principal: Principal,
+    input: { pluginId: string; projectId?: string; sourceEvent: LearningCaseSourceEvent; hypothesisKey: string; category?: string },
+  ) {
+    this.policy.authorize(principal, 'learning.case.propose');
+    return this.requireKnowledgeAccess().learningCaseOpen(this.learningContext(principal, input), {
+      sourceEvent: input.sourceEvent,
+      hypothesisKey: input.hypothesisKey,
+      ...(input.category !== undefined ? { category: input.category } : {}),
+    });
+  }
+  learningCaseDispose(
+    principal: Principal,
+    input: { pluginId: string; projectId?: string; caseId: string; disposition: 'NO_REUSABLE' | 'PENDING' | 'CONFLICT'; reason?: string },
+  ) {
+    this.policy.authorize(principal, 'learning.case.propose');
+    return this.requireKnowledgeAccess().learningCaseDispose(
+      this.learningContext(principal, input),
+      input.caseId,
+      input.disposition,
+      input.reason,
+    );
+  }
+  learningProposeFromCase(
+    principal: Principal,
+    input: {
+      pluginId: string;
+      projectId?: string;
+      caseId: string;
+      contributionConfirmed: boolean;
+      idempotencyKey: string;
+      draft: Record<string, unknown>;
+    },
+  ) {
+    this.policy.authorize(principal, 'learning.case.propose');
+    return this.requireKnowledgeAccess().proposeFromCase(this.learningContext(principal, input), this.toKnowledgePrincipal(principal), {
+      caseId: input.caseId,
+      contributionConfirmed: input.contributionConfirmed,
+      idempotencyKey: input.idempotencyKey,
+      draft: input.draft,
+    });
+  }
+  releasesList(principal: Principal, input: { pluginId: string; state?: KnowledgeReleaseRecord['state']; limit?: number }) {
+    this.policy.authorize(principal, 'knowledge.release.read');
+    return this.requireKnowledgeAccess().releasesList(this.toKnowledgePrincipal(principal), input);
+  }
+  knowledgeReleasePublish(
+    principal: Principal,
+    input: {
+      pluginId: string;
+      audience: string;
+      entries: Array<{ knowledgeId: string; revision: number }>;
+      evalReportRef?: string;
+      expectedVersion: number;
+    },
+  ) {
+    this.policy.authorize(principal, 'knowledge.release.publish');
+    return this.requireKnowledgeAccess().publishRelease(this.toKnowledgePrincipal(principal), input);
+  }
+  knowledgeReleaseWithdraw(principal: Principal, releaseId: string, reason: string) {
+    this.policy.authorize(principal, 'knowledge.release.withdraw');
+    return this.requireKnowledgeAccess().withdrawRelease(this.toKnowledgePrincipal(principal), releaseId, reason);
+  }
+  knowledgeReleaseRollback(
+    principal: Principal,
+    input: { pluginId: string; expectedVersion: number; toReleaseId?: string; reason: string },
+  ) {
+    this.policy.authorize(principal, 'knowledge.release.rollback');
+    return this.requireKnowledgeAccess().rollbackRelease(this.toKnowledgePrincipal(principal), input);
+  }
+  knowledgeReleasePointer(principal: Principal, pluginId: string) {
+    this.policy.authorize(principal, 'knowledge.release.read');
+    return this.requireKnowledgeAccess().releasePointerInfo(this.toKnowledgePrincipal(principal), pluginId);
+  }
+  /** 发布撤回影响面（T06）：受影响 Run 待复核清单；不重写运行事实。 */
+  knowledgeReleaseImpact(principal: Principal, releaseId: string): { runs: string[] } {
+    this.policy.authorize(principal, 'knowledge.release.read');
+    return { runs: this.store.runsBoundToRelease(releaseId) };
   }
 
   // ── Release approvals ──────────────────────────────────────────────────────
@@ -785,6 +1009,7 @@ export class PlatformControlService {
       });
       return next;
     });
+    this.captureReviewDecision(run, saved);
     return saved;
   }
   reviewsForRun(runId: string, principal: Principal): ReviewRecord[] {
@@ -1928,8 +2153,12 @@ export class PlatformControlService {
         projectId: work.projectId, workspaceId: workspace.workspaceId,
       });
       const history = this.runs.forWork(workId, 0, 20);
-      // KA11：Run 创建时绑定知识快照（只读摘要）。未配置源或应用未声明知识域时缺省，不伪造绑定。
-      const knowledge = this.knowledgeSource?.(app, work.projectId);
+      // KA11/WP2：Run 创建时绑定知识快照（只读摘要）与可信租户范围。仅当应用声明知识域时才要求
+      // 企业范围：缺失时以 KNOWLEDGE_SCOPE_UNAVAILABLE 可诊断拒绝，而不是静默绑定跨租户记录；
+      // 本地模式绑定显式的无租户快照（单机部署），不猜测归属。
+      const knowledge = this.knowledgeSource && app.draft.descriptor.knowledgePluginId
+        ? this.knowledgeSource(app, work.projectId, this.effectiveKnowledgeScope(principal), { actorId: principal.actorId })
+        : undefined;
       // Freeze the input revision and the Run in one transaction: the baseline digest IS the
       // canonical digest the Run records as inputDigest, so the work ledger and the execution
       // agree on exactly what was frozen, and a rebatch appends a new revision — it never
@@ -2313,7 +2542,7 @@ export class PlatformControlService {
    * than leaked; an unreadable record never becomes a count.
    */
   pendingTodos(principal: Principal): Array<{
-    kind: 'question' | 'review' | 'delivery-receipt';
+    kind: 'question' | 'review' | 'delivery-receipt' | 'model-approval';
     id: string;
     runId: string | null;
     workId: string | null;
@@ -2323,7 +2552,7 @@ export class PlatformControlService {
     resolveHint: string;
   }> {
     const items: Array<{
-      kind: 'question' | 'review' | 'delivery-receipt';
+      kind: 'question' | 'review' | 'delivery-receipt' | 'model-approval';
       id: string;
       runId: string | null;
       workId: string | null;
@@ -2389,6 +2618,36 @@ export class PlatformControlService {
         summary: `交付包已送达等待接收确认（封存人 ${pkg.sealedBy}，当前 revision ${pkg.revision}）`,
         resolveHint: 'POST /api/delivery-packages/:packageId/acknowledge（需 expectedRevision）',
       });
+    }
+    // Model approvals (E2-4/E3-4): only when this deployment gates runs on approvals, and only
+    // for principals the policy lets approve — a todo nobody can act on is not listed.
+    if (this.requireModelApproval) {
+      const catalog = this.store.modelCatalogGet();
+      if (catalog) {
+        for (const entry of catalog.entries) {
+          if (!entry.enabled) continue;
+          try {
+            this.policy.authorize(principal, 'model.approve', { modelSelectionId: entry.selectionId });
+          } catch (error) {
+            if (error instanceof AuthorizationError) continue; // 该 selection 不在此主体可批准范围内
+            throw error;
+          }
+          const approval = this.store.modelApprovalGet(entry.selectionId);
+          const expired = approval?.expiresAt !== undefined && Date.parse(approval.expiresAt) <= Date.now();
+          if (approval?.state === 'ACTIVE' && !expired) continue;
+          items.push({
+            kind: 'model-approval',
+            id: entry.selectionId,
+            runId: null,
+            workId: null,
+            createdAt: catalog.updatedAt,
+            summary: approval
+              ? `模型 ${entry.displayName} 的审批已过期，运行会被 MODEL_APPROVAL_EXPIRED 拒绝`
+              : `模型 ${entry.displayName} 已登记但无生效审批，运行会被 MODEL_APPROVAL_REQUIRED 拒绝`,
+            resolveHint: 'POST /api/models/:selectionId/approval（绑定具体 selection）',
+          });
+        }
+      }
     }
     items.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
     return items;
@@ -2978,10 +3237,10 @@ export class PlatformControlService {
       }
     }
   }
-  /** Hand trusted terminal run facts to the deployment sink at most once per run. The sink may
-   *  create CANDIDATE knowledge; it cannot activate it, and a sink failure never changes the run. */
+  /** Terminal run facts are captured DURABLY: the outbox row is the dedup truth ((kind,eventId)),
+   *  delivery happens via drainKnowledgeCaptureOutbox — a consumer crash loses nothing (T04) and
+   *  a sink failure never changes the run or the review decision. */
   private captureKnowledge(run: RunRecord): void {
-    if (!this.knowledgeCaptureSink) return;
     const state = run.snapshot.state;
     const kind: KnowledgeCaptureEvent['kind'] | null =
       state === 'SUCCEEDED' ? 'run.succeeded'
@@ -2989,8 +3248,7 @@ export class PlatformControlService {
           : state === 'UNKNOWN' ? 'run.unknown'
             : state === 'CANCELLED' ? 'run.cancelled'
               : null;
-    if (!kind || this.capturedKnowledgeRuns.has(run.runId)) return;
-    this.capturedKnowledgeRuns.add(run.runId);
+    if (!kind) return;
     const event: KnowledgeCaptureEvent = {
       kind,
       runId: run.runId,
@@ -3004,18 +3262,83 @@ export class PlatformControlService {
       ...(run.snapshot.reason ? { reason: run.snapshot.reason } : {}),
       at: new Date().toISOString(),
     };
-    try {
-      void Promise.resolve(this.knowledgeCaptureSink(event)).catch((error: unknown) => {
-        if (this.closed) return;
-        this.store.audit('service:platform-control', 'KNOWLEDGE_CAPTURE_SINK_FAILED', run.runId, {
-          error: error instanceof Error ? error.message.slice(0, 1000) : 'UNKNOWN',
-        });
-      });
-    } catch (error) {
-      this.store.audit('service:platform-control', 'KNOWLEDGE_CAPTURE_SINK_FAILED', run.runId, {
-        error: error instanceof Error ? error.message.slice(0, 1000) : 'UNKNOWN',
-      });
+    this.enqueueKnowledge(event);
+  }
+  /** M2-02：复核决定（QC）是可信事件。它投影为待分析事实、不直接产生候选，也不改写 Run 状态。 */
+  private captureReviewDecision(run: RunRecord, review: ReviewRecord): void {
+    const event: KnowledgeCaptureEvent = {
+      kind: 'qc.completed',
+      runId: run.runId,
+      workId: run.workId,
+      appId: run.appId,
+      appVersion: run.appVersion,
+      ...(run.workspace?.projectId ? { projectId: run.workspace.projectId } : {}),
+      ...(run.knowledge?.pluginId ? { pluginId: run.knowledge.pluginId } : {}),
+      inputDigest: run.inputDigest,
+      artifactDigests: this.store.artifacts(run.runId).map((artifact) => artifact.digest),
+      review: {
+        reviewId: review.reviewId,
+        decision: review.state === 'APPROVED' ? 'APPROVED' : 'REJECTED',
+        ...(review.note ? { note: review.note } : {}),
+      },
+      at: new Date().toISOString(),
+    };
+    this.enqueueKnowledge(event);
+  }
+  /** T04：先持久入队（消费崩溃不丢失）。幂等键 (kind,eventId)：run 终态用 runId，复核决定用 review:<id>，
+   *  与知识投影合同一致；重复投递由知识服务按同一键去重，业务 Run 状态不受影响。 */
+  private enqueueKnowledge(event: KnowledgeCaptureEvent): void {
+    if (this.closed) return;
+    const eventId = event.kind === 'qc.completed' && event.review ? `review:${event.review.reviewId}` : event.runId;
+    this.store.knowledgeOutboxEnqueue(event.kind, eventId, event, new Date().toISOString());
+  }
+  /** T04 泵：把 outbox 中的可信观测投递给知识捕获 sink。RETRY_REQUIRED（知识服务显式要求重试）
+   *  与 sink 抛错按退避重试；超预算死信并审计。未配置 sink 时如实返回零投递，不丢弃事件。 */
+  async drainKnowledgeCaptureOutbox(
+    options: { limit?: number; now?: Date } = {},
+  ): Promise<{ claimed: number; done: number; retried: number; dead: number }> {
+    if (!this.knowledgeCaptureSink) return { claimed: 0, done: 0, retried: 0, dead: 0 };
+    const limit = Math.min(Math.max(options.limit ?? 10, 1), 100);
+    const now = options.now ?? new Date();
+    const claimed = this.store.knowledgeOutboxClaim(now.toISOString(), limit, KNOWLEDGE_OUTBOX_CLAIM_TTL_MS);
+    const result = { claimed: claimed.length, done: 0, retried: 0, dead: 0 };
+    for (const message of claimed) {
+      const event = message.payload as KnowledgeCaptureEvent;
+      try {
+        const outcome = await Promise.resolve(this.knowledgeCaptureSink(event));
+        const code =
+          outcome && typeof outcome === 'object' && 'outcome' in outcome ? String((outcome as { outcome?: unknown }).outcome) : 'DELIVERED';
+        if (code === 'RETRY_REQUIRED') throw new PlatformError('KNOWLEDGE_PROJECTION_RETRY_REQUIRED');
+        this.store.knowledgeOutboxComplete(message.messageId);
+        result.done++;
+      } catch (error) {
+        const reason = `${error instanceof PlatformError ? error.code : 'KNOWLEDGE_DELIVERY_FAILED'}: ${
+          error instanceof Error ? error.message.slice(0, 500) : 'UNKNOWN'
+        }`;
+        if (message.attempts >= KNOWLEDGE_OUTBOX_MAX_ATTEMPTS) {
+          this.store.knowledgeOutboxDeadLetter(message.messageId, reason);
+          this.store.audit('service:platform-control', 'KNOWLEDGE_CAPTURE_DEAD_LETTERED', event.runId ?? message.eventId, {
+            messageId: message.messageId,
+            kind: message.kind,
+            attempts: message.attempts,
+          });
+          result.dead++;
+          continue;
+        }
+        const delay = Math.min(KNOWLEDGE_OUTBOX_RETRY_MAX_MS, KNOWLEDGE_OUTBOX_RETRY_BASE_MS * 2 ** (message.attempts - 1));
+        this.store.knowledgeOutboxRetry(message.messageId, reason, new Date(now.getTime() + delay).toISOString());
+        result.retried++;
+      }
     }
+    return result;
+  }
+  /** 人工重放死信（§5：持久游标、有限重试、死信与人工重放）；证据保留，不删 last_error。 */
+  replayKnowledgeCaptureDeadLetters(options: { now?: Date } = {}): { replayed: number } {
+    if (this.closed) return { replayed: 0 };
+    return { replayed: this.store.knowledgeOutboxReplayDead((options.now ?? new Date()).toISOString()) };
+  }
+  knowledgeCaptureOutboxStatus(): Record<string, number> {
+    return this.store.knowledgeOutboxCounts();
   }
   private async observeOutcomeInternal(runId: string, launchId: string, fencingToken: number, promise: Promise<RunOutcome>): Promise<void> {
     let outcome: RunOutcome;

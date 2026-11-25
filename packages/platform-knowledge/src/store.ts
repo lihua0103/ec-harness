@@ -2,11 +2,22 @@ import { DatabaseSync, type StatementSync, type SQLInputValue } from 'node:sqlit
 import { mkdirSync, lstatSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { canonical, digest, normalizeDraft, type KnowledgeDraft, type KnowledgeRecord, type State } from './schema.js';
+import type { PersonalDraftRecord, PersonalSettingRecord } from './preferences.js';
+import type {
+  KnowledgeReleaseEntry,
+  KnowledgeReleasePointer,
+  KnowledgeReleaseRecord,
+  LearningCaseProposal,
+  LearningCaseRecord,
+  LearningCaseStatus,
+} from './learning.js';
 const APPLICATION_ID = 1162038091;
 /** v1: 修订/事件/验证/种子/快照表。v2: 作用域索引、FTS5 trigram 全文索引与标签表。v3: 文档语料分片表。
  *  v4: 租户 org/region 列与索引（KA07/08）。
- *  v5: 事件投影去重（M2-02）、一次性验证回执（M2-03）与引用对账（M1-03）。 */
-const SCHEMA_VERSION = 5;
+ *  v5: 事件投影去重（M2-02）、一次性验证回执（M2-03）与引用对账（M1-03）。
+ *  v6: 学习平台数据面（L2/L3）：个人偏好、私人草稿、学习个案、提案幂等台账、
+ *      不可变发布清单 + 当前指针 + 撤回台账（ADR-0004）。 */
+const SCHEMA_VERSION = 6;
 /** FTS 正文：覆盖 canonical 记录的全部字段值（不含 JSON 键名）；与查询侧同样做 NFKC + 小写折叠。 */
 export function searchText(record: KnowledgeRecord | KnowledgeDraft): string {
   const parts = [
@@ -113,14 +124,78 @@ function decodeReceipt(row: Record<string, unknown>): ReceiptRecord {
     appliedAt: String(row.applied_at),
   };
 }
+function decodeSetting(row: Record<string, unknown>): PersonalSettingRecord {
+  return {
+    orgId: String(row.org_id),
+    region: String(row.region),
+    owner: String(row.owner),
+    pluginKey: String(row.plugin_key),
+    key: String(row.key),
+    revision: Number(row.revision),
+    value: row.value_json === null ? null : (JSON.parse(String(row.value_json)) as string | boolean),
+    state: String(row.state) as PersonalSettingRecord['state'],
+    updatedAt: String(row.updated_at),
+  };
+}
+function decodeDraft(row: Record<string, unknown>): PersonalDraftRecord {
+  const body = JSON.parse(String(row.body)) as { title: string; body: string; pluginId?: string };
+  return {
+    draftId: String(row.draft_id),
+    orgId: String(row.org_id),
+    region: String(row.region),
+    owner: String(row.owner),
+    ...(body.pluginId !== undefined ? { pluginId: body.pluginId } : {}),
+    revision: Number(row.revision),
+    title: body.title,
+    body: body.body,
+    digest: String(row.digest),
+    state: String(row.state) as PersonalDraftRecord['state'],
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+function decodeCase(row: Record<string, unknown>): LearningCaseRecord {
+  return {
+    caseId: String(row.case_id),
+    orgId: String(row.org_id),
+    region: String(row.region),
+    pluginId: String(row.plugin_id),
+    ...(row.project_id === null ? {} : { projectId: String(row.project_id) }),
+    sourceEvent: JSON.parse(String(row.source_event)) as LearningCaseRecord['sourceEvent'],
+    hypothesisKey: String(row.hypothesis_key),
+    ...(row.category === null || row.category === undefined ? {} : { category: String(row.category) }),
+    status: String(row.status) as LearningCaseStatus,
+    ...(row.proposal === null ? {} : { proposal: JSON.parse(String(row.proposal)) as LearningCaseProposal }),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+function decodeRelease(row: Record<string, unknown>): KnowledgeReleaseRecord {
+  return {
+    releaseId: String(row.release_id),
+    pluginId: String(row.plugin_id),
+    orgId: String(row.org_id),
+    region: String(row.region),
+    audience: String(row.audience),
+    entries: JSON.parse(String(row.entries)) as KnowledgeReleaseEntry[],
+    manifestDigest: String(row.manifest_digest),
+    ...(row.eval_report_ref === null || row.eval_report_ref === undefined ? {} : { evalReportRef: String(row.eval_report_ref) }),
+    approver: String(row.approver),
+    ...(row.prev_release_id === null ? {} : { prevReleaseId: String(row.prev_release_id) }),
+    state: String(row.state) as KnowledgeReleaseRecord['state'],
+    createdAt: String(row.created_at),
+  };
+}
 export class KnowledgeStore {
   private readonly db: DatabaseSync;
+  private readonly dbPath: string;
   private closed = false;
   /** FTS5 + trigram 是否可用（运行时探测；不可用时检索降级为作用域子串扫描并如实上报）。 */
   readonly ftsEnabled: boolean;
   /** 文档语料 FTS 是否可用。 */
   readonly chunksFtsEnabled: boolean;
   constructor(path: string) {
+    this.dbPath = path;
     mkdirSync(dirname(path), { recursive: true });
     let existing = false;
     try {
@@ -226,6 +301,108 @@ export class KnowledgeStore {
       if (!revisionColumns.has('org_id')) this.db.exec('ALTER TABLE knowledge_revisions ADD COLUMN org_id TEXT');
       if (!revisionColumns.has('region')) this.db.exec('ALTER TABLE knowledge_revisions ADD COLUMN region TEXT');
       this.db.exec('CREATE INDEX IF NOT EXISTS kr_tenant ON knowledge_revisions(org_id,region,plugin_id,scope);');
+      // v6（学习平台数据面）：租户列统一 NOT NULL DEFAULT ''（''=未声明，避免 NULL 主键歧义）。
+      // 个人偏好：唯一 (tenant, owner, plugin-or-global, key)；删除=墓碑（state DELETED 且值清空），
+      // 备份恢复不复活（T03）。值 schema 由 preferences.ts 封闭注册表校验，库里只存已通过校验的标量。
+      this.db.exec(`CREATE TABLE IF NOT EXISTS personal_settings(
+        org_id TEXT NOT NULL DEFAULT '',
+        region TEXT NOT NULL DEFAULT '',
+        owner TEXT NOT NULL,
+        plugin_key TEXT NOT NULL DEFAULT '',
+        key TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        value_json TEXT,
+        state TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(org_id,region,owner,plugin_key,key),
+        CHECK(state IN ('ACTIVE','PAUSED','DELETED'))
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS ps_owner ON personal_settings(org_id,region,owner);
+      -- 私人方法草稿：仅本人可读写；不入 knowledge_fts、不进快照，不当作事实或组织标准。
+      CREATE TABLE IF NOT EXISTS personal_drafts(
+        draft_id TEXT NOT NULL,
+        org_id TEXT NOT NULL DEFAULT '',
+        region TEXT NOT NULL DEFAULT '',
+        owner TEXT NOT NULL,
+        plugin_id TEXT,
+        revision INTEGER NOT NULL,
+        body TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(draft_id,revision),
+        CHECK(state IN ('ACTIVE','DELETED'))
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS pd_owner ON personal_drafts(org_id,region,owner,state);
+      -- 学习个案：同 (tenant, pluginId, eventId, hypothesisKey) 唯一；来源事件与投影台账同标识。
+      CREATE TABLE IF NOT EXISTS learning_cases(
+        case_id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL DEFAULT '',
+        region TEXT NOT NULL DEFAULT '',
+        plugin_id TEXT NOT NULL,
+        project_id TEXT,
+        event_id TEXT NOT NULL,
+        source_event TEXT NOT NULL,
+        hypothesis_key TEXT NOT NULL,
+        category TEXT,
+        status TEXT NOT NULL,
+        proposal TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK(status IN ('PENDING','NO_REUSABLE','PROPOSED','CONFLICT'))
+      ) STRICT;
+      CREATE UNIQUE INDEX IF NOT EXISTS lc_event ON learning_cases(org_id,region,plugin_id,event_id,hypothesis_key);
+      -- 学习提案幂等台账（§5：同幂等键同内容→原回执；不同内容→冲突，不用最后写入覆盖）。
+      CREATE TABLE IF NOT EXISTS learning_proposals(
+        org_id TEXT NOT NULL DEFAULT '',
+        region TEXT NOT NULL DEFAULT '',
+        idempotency_key TEXT NOT NULL,
+        case_id TEXT NOT NULL,
+        knowledge_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        content_digest TEXT NOT NULL,
+        draft_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(org_id,region,idempotency_key)
+      ) STRICT;
+      -- 不可变发布清单：行内容一经写入不可改（manifest 内容寻址）。
+      CREATE TABLE IF NOT EXISTS knowledge_releases(
+        release_id TEXT PRIMARY KEY,
+        plugin_id TEXT NOT NULL,
+        org_id TEXT NOT NULL DEFAULT '',
+        region TEXT NOT NULL DEFAULT '',
+        audience TEXT NOT NULL,
+        entries TEXT NOT NULL,
+        manifest_digest TEXT NOT NULL,
+        eval_report_ref TEXT,
+        approver TEXT NOT NULL,
+        prev_release_id TEXT,
+        state TEXT NOT NULL DEFAULT 'CURRENT',
+        created_at TEXT NOT NULL,
+        CHECK(state IN ('CURRENT','WITHDRAWN'))
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS krl_plugin ON knowledge_releases(plugin_id,org_id,region,state);
+      -- 当前指针：expectedVersion 原子切换（RELEASE_VERSION_STALE）。
+      CREATE TABLE IF NOT EXISTS knowledge_release_pointers(
+        plugin_id TEXT NOT NULL,
+        org_id TEXT NOT NULL DEFAULT '',
+        region TEXT NOT NULL DEFAULT '',
+        release_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(plugin_id,org_id,region)
+      ) STRICT;
+      -- 撤回台账：撤回是逐 (release, knowledgeId, revision) 的显式失效；回滚切换指针也不复活这些条目。
+      CREATE TABLE IF NOT EXISTS knowledge_release_withdrawals(
+        release_id TEXT NOT NULL,
+        knowledge_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        withdrawn_at TEXT NOT NULL,
+        PRIMARY KEY(release_id,knowledge_id,revision)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS krw_entry ON knowledge_release_withdrawals(knowledge_id,revision);`);
       // FTS5/trigram 在部分构建中不可用；建表失败不阻断存储，只降级检索路径。
       const ftsExisted = this.db.prepare("SELECT 1 FROM sqlite_schema WHERE name='knowledge_fts'").get() !== undefined;
       let fts = true;
@@ -271,6 +448,10 @@ export class KnowledgeStore {
       this.db.close();
       this.closed = true;
     }
+  }
+  /** 库文件路径：快照公式共用（service.createSnapshot 委托 snapshot-readonly.readSnapshot 保证逐字节一致）。 */
+  get path(): string {
+    return this.dbPath;
   }
   transaction<T>(action: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -616,6 +797,17 @@ export class KnowledgeStore {
     const row = this.db.prepare('SELECT * FROM knowledge_projections WHERE projection_key=?').get(key);
     return row ? decodeProjection(row) : undefined;
   }
+  /** 按插件的投影台账（M2-02 智能体侧读取）：最近在前，可按结局过滤。 */
+  projectionsFor(pluginId: string, limit: number, outcome?: ProjectionOutcome): ProjectionRecord[] {
+    const rows = outcome
+      ? this.db
+          .prepare('SELECT * FROM knowledge_projections WHERE plugin_id=? AND outcome=? ORDER BY created_at DESC, projection_key DESC LIMIT ?')
+          .all(pluginId, outcome, limit)
+      : this.db
+          .prepare('SELECT * FROM knowledge_projections WHERE plugin_id=? ORDER BY created_at DESC, projection_key DESC LIMIT ?')
+          .all(pluginId, limit);
+    return rows.map((row) => decodeProjection(row as Record<string, unknown>));
+  }
   recordProjection(value: ProjectionRecord): void {
     this.db
       .prepare(
@@ -680,6 +872,337 @@ export class KnowledgeStore {
       citedBy: String(row.cited_by),
       citedAt: String(row.cited_at),
     }));
+  }
+  // ---------- L2 个人偏好：owner 由服务层从可信身份派生；唯一 (tenant, owner, plugin-or-global, key) ----------
+  personalSetting(
+    tenant: { orgId?: string; region?: string },
+    owner: string,
+    pluginKey: string,
+    key: string,
+  ): PersonalSettingRecord | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM personal_settings WHERE org_id=? AND region=? AND owner=? AND plugin_key=? AND key=?')
+      .get(tenant.orgId ?? '', tenant.region ?? '', owner, pluginKey, key);
+    return row ? decodeSetting(row as Record<string, unknown>) : undefined;
+  }
+  /** 未删除（ACTIVE/PAUSED）的全部本人偏好；墓碑不出现。 */
+  personalSettingsForOwner(tenant: { orgId?: string; region?: string }, owner: string): PersonalSettingRecord[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM personal_settings WHERE org_id=? AND region=? AND owner=? AND state!='DELETED' ORDER BY plugin_key,key",
+        )
+        .all(tenant.orgId ?? '', tenant.region ?? '', owner) as Array<Record<string, unknown>>
+    ).map(decodeSetting);
+  }
+  /** 版本比较更新（§5）：同键不同 expectedRevision 拒绝，不用最后写入覆盖。
+   *  墓碑上的重写是一次显式新选择，必须 expectedRevision=0 从修订 1 重新开始。 */
+  personalSettingUpsert(
+    input: { orgId?: string; region?: string; owner: string; pluginKey: string; key: string; value: string | boolean },
+    expectedRevision: number,
+  ): PersonalSettingRecord {
+    return this.transaction(() => {
+      const now = new Date().toISOString();
+      const existing = this.personalSetting(input, input.owner, input.pluginKey, input.key);
+      if (existing) {
+        if (existing.state === 'DELETED') {
+          if (expectedRevision !== 0) throw new Error('PREFERENCE_REVISION_STALE');
+        } else if (existing.revision !== expectedRevision) throw new Error('PREFERENCE_REVISION_STALE');
+        const revision = existing.state === 'DELETED' ? 1 : existing.revision + 1;
+        this.db
+          .prepare(
+            "UPDATE personal_settings SET revision=?, value_json=?, state='ACTIVE', updated_at=? WHERE org_id=? AND region=? AND owner=? AND plugin_key=? AND key=?",
+          )
+          .run(
+            revision, canonical(input.value), now,
+            input.orgId ?? '', input.region ?? '', input.owner, input.pluginKey, input.key,
+          );
+        return {
+          orgId: input.orgId ?? '', region: input.region ?? '', owner: input.owner,
+          pluginKey: input.pluginKey, key: input.key, revision, value: input.value, state: 'ACTIVE' as const, updatedAt: now,
+        };
+      }
+      if (expectedRevision !== 0) throw new Error('PREFERENCE_REVISION_STALE');
+      this.db
+        .prepare(
+          "INSERT INTO personal_settings(org_id,region,owner,plugin_key,key,revision,value_json,state,updated_at) VALUES(?,?,?,?,?,1,?,'ACTIVE',?)",
+        )
+        .run(input.orgId ?? '', input.region ?? '', input.owner, input.pluginKey, input.key, canonical(input.value), now);
+      return {
+        orgId: input.orgId ?? '', region: input.region ?? '', owner: input.owner,
+        pluginKey: input.pluginKey, key: input.key, revision: 1, value: input.value, state: 'ACTIVE' as const, updatedAt: now,
+      };
+    });
+  }
+  /** 暂停/恢复保留值与修订；删除写墓碑（state DELETED、值清空、修订+1）。重复同状态幂等返回原记录。 */
+  personalSettingSetState(
+    tenant: { orgId?: string; region?: string },
+    owner: string,
+    pluginKey: string,
+    key: string,
+    state: 'PAUSED' | 'ACTIVE' | 'DELETED',
+  ): PersonalSettingRecord {
+    return this.transaction(() => {
+      const existing = this.personalSetting(tenant, owner, pluginKey, key);
+      if (!existing) throw new Error('PREFERENCE_NOT_FOUND');
+      if (existing.state === state) return existing;
+      const now = new Date().toISOString();
+      if (state === 'DELETED') {
+        this.db
+          .prepare(
+            "UPDATE personal_settings SET state='DELETED', value_json=NULL, revision=revision+1, updated_at=? WHERE org_id=? AND region=? AND owner=? AND plugin_key=? AND key=?",
+          )
+          .run(now, tenant.orgId ?? '', tenant.region ?? '', owner, pluginKey, key);
+      } else {
+        this.db
+          .prepare(
+            'UPDATE personal_settings SET state=?, updated_at=? WHERE org_id=? AND region=? AND owner=? AND plugin_key=? AND key=?',
+          )
+          .run(state, now, tenant.orgId ?? '', tenant.region ?? '', owner, pluginKey, key);
+      }
+      return this.personalSetting(tenant, owner, pluginKey, key)!;
+    });
+  }
+  // ---------- L2 私人方法草稿：仅本人可见；不入检索面、不进快照 ----------
+  personalDraftInsert(input: {
+    draftId: string; orgId?: string; region?: string; owner: string; pluginId?: string; title: string; body: string; digest: string;
+  }): PersonalDraftRecord {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "INSERT INTO personal_drafts(draft_id,org_id,region,owner,plugin_id,revision,body,digest,state,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,'ACTIVE',?,?)",
+      )
+      .run(
+        input.draftId, input.orgId ?? '', input.region ?? '', input.owner, input.pluginId ?? null,
+        canonical({ title: input.title, body: input.body, ...(input.pluginId !== undefined ? { pluginId: input.pluginId } : {}) }),
+        input.digest, now, now,
+      );
+    return this.personalDraftGet(input.draftId)!;
+  }
+  personalDraftGet(draftId: string): PersonalDraftRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM personal_drafts WHERE draft_id=?').get(draftId);
+    return row ? decodeDraft(row as Record<string, unknown>) : undefined;
+  }
+  personalDraftsForOwner(tenant: { orgId?: string; region?: string }, owner: string): PersonalDraftRecord[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM personal_drafts WHERE org_id=? AND region=? AND owner=? AND state='ACTIVE' ORDER BY updated_at DESC,draft_id",
+        )
+        .all(tenant.orgId ?? '', tenant.region ?? '', owner) as Array<Record<string, unknown>>
+    ).map(decodeDraft);
+  }
+  personalDraftUpdate(
+    draftId: string,
+    owner: string,
+    expectedRevision: number,
+    patch: { title: string; body: string; digest: string },
+  ): PersonalDraftRecord {
+    return this.transaction(() => {
+      const existing = this.personalDraftGet(draftId);
+      if (!existing || existing.owner !== owner || existing.state !== 'ACTIVE') throw new Error('PERSONAL_DRAFT_NOT_FOUND');
+      if (existing.revision !== expectedRevision) throw new Error('PERSONAL_DRAFT_REVISION_STALE');
+      const now = new Date().toISOString();
+      const body = canonical({
+        title: patch.title,
+        body: patch.body,
+        ...(existing.pluginId !== undefined ? { pluginId: existing.pluginId } : {}),
+      });
+      this.db
+        .prepare('UPDATE personal_drafts SET revision=revision+1, body=?, digest=?, updated_at=? WHERE draft_id=?')
+        .run(body, patch.digest, now, draftId);
+      return this.personalDraftGet(draftId)!;
+    });
+  }
+  /** 删除=墓碑（state DELETED）；重复删除幂等。备份恢复先重放墓碑（T03）。 */
+  personalDraftDelete(draftId: string, owner: string): PersonalDraftRecord {
+    return this.transaction(() => {
+      const existing = this.personalDraftGet(draftId);
+      if (!existing || existing.owner !== owner) throw new Error('PERSONAL_DRAFT_NOT_FOUND');
+      if (existing.state === 'DELETED') return existing;
+      this.db
+        .prepare("UPDATE personal_drafts SET state='DELETED', updated_at=? WHERE draft_id=?")
+        .run(new Date().toISOString(), draftId);
+      return this.personalDraftGet(draftId)!;
+    });
+  }
+  // ---------- L3 学习个案：幂等键 (tenant, pluginId, eventId, hypothesisKey) ----------
+  learningCaseInsert(record: LearningCaseRecord): void {
+    this.db
+      .prepare(
+        'INSERT INTO learning_cases(case_id,org_id,region,plugin_id,project_id,event_id,source_event,hypothesis_key,category,status,proposal,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        record.caseId, record.orgId, record.region, record.pluginId, record.projectId ?? null,
+        record.sourceEvent.eventId, canonical(record.sourceEvent), record.hypothesisKey, record.category ?? null,
+        record.status, record.proposal ? canonical(record.proposal) : null, record.createdAt, record.updatedAt,
+      );
+  }
+  learningCaseByEventKey(
+    tenant: { orgId?: string; region?: string },
+    pluginId: string,
+    eventId: string,
+    hypothesisKey: string,
+  ): LearningCaseRecord | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM learning_cases WHERE org_id=? AND region=? AND plugin_id=? AND event_id=? AND hypothesis_key=?')
+      .get(tenant.orgId ?? '', tenant.region ?? '', pluginId, eventId, hypothesisKey);
+    return row ? decodeCase(row as Record<string, unknown>) : undefined;
+  }
+  learningCaseGet(caseId: string): LearningCaseRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM learning_cases WHERE case_id=?').get(caseId);
+    return row ? decodeCase(row as Record<string, unknown>) : undefined;
+  }
+  learningCasesList(
+    tenant: { orgId?: string; region?: string },
+    pluginId: string,
+    options: { status?: LearningCaseStatus; limit?: number } = {},
+  ): LearningCaseRecord[] {
+    const limit = Math.min(Math.max(Math.trunc(options.limit ?? 50), 1), 200);
+    const rows = options.status
+      ? this.db
+          .prepare(
+            'SELECT * FROM learning_cases WHERE org_id=? AND region=? AND plugin_id=? AND status=? ORDER BY created_at DESC,case_id LIMIT ?',
+          )
+          .all(tenant.orgId ?? '', tenant.region ?? '', pluginId, options.status, limit)
+      : this.db
+          .prepare(
+            'SELECT * FROM learning_cases WHERE org_id=? AND region=? AND plugin_id=? ORDER BY created_at DESC,case_id LIMIT ?',
+          )
+          .all(tenant.orgId ?? '', tenant.region ?? '', pluginId, limit);
+    return (rows as Array<Record<string, unknown>>).map(decodeCase);
+  }
+  learningCaseUpdateStatus(caseId: string, status: LearningCaseStatus, proposal?: LearningCaseProposal): LearningCaseRecord {
+    return this.transaction(() => {
+      const existing = this.learningCaseGet(caseId);
+      if (!existing) throw new Error('LEARNING_CASE_NOT_FOUND');
+      this.db
+        .prepare('UPDATE learning_cases SET status=?, proposal=?, updated_at=? WHERE case_id=?')
+        .run(status, proposal ? canonical(proposal) : existing.proposal ? canonical(existing.proposal) : null, new Date().toISOString(), caseId);
+      return this.learningCaseGet(caseId)!;
+    });
+  }
+  // ---------- L3 提案幂等台账：同幂等键同内容返回原回执，不同内容冲突 ----------
+  learningProposalGet(
+    tenant: { orgId?: string; region?: string },
+    idempotencyKey: string,
+  ): { caseId: string; knowledgeId: string; revision: number; contentDigest: string; draftDigest: string } | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM learning_proposals WHERE org_id=? AND region=? AND idempotency_key=?')
+      .get(tenant.orgId ?? '', tenant.region ?? '', idempotencyKey);
+    if (!row) return undefined;
+    return {
+      caseId: String(row.case_id),
+      knowledgeId: String(row.knowledge_id),
+      revision: Number(row.revision),
+      contentDigest: String(row.content_digest),
+      draftDigest: String(row.draft_digest),
+    };
+  }
+  learningProposalInsert(input: {
+    orgId?: string; region?: string; idempotencyKey: string; caseId: string; knowledgeId: string;
+    revision: number; contentDigest: string; draftDigest: string;
+  }): void {
+    this.db
+      .prepare(
+        'INSERT INTO learning_proposals(org_id,region,idempotency_key,case_id,knowledge_id,revision,content_digest,draft_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        input.orgId ?? '', input.region ?? '', input.idempotencyKey, input.caseId,
+        input.knowledgeId, input.revision, input.contentDigest, input.draftDigest, new Date().toISOString(),
+      );
+  }
+  // ---------- L3 发布清单：不可变清单 + expectedVersion 指针 + 撤回台账 ----------
+  releaseInsert(record: KnowledgeReleaseRecord): void {
+    this.db
+      .prepare(
+        "INSERT INTO knowledge_releases(release_id,plugin_id,org_id,region,audience,entries,manifest_digest,eval_report_ref,approver,prev_release_id,state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,'CURRENT',?)",
+      )
+      .run(
+        record.releaseId, record.pluginId, record.orgId, record.region, record.audience,
+        canonical(record.entries), record.manifestDigest, record.evalReportRef ?? null,
+        record.approver, record.prevReleaseId ?? null, record.createdAt,
+      );
+  }
+  releaseGet(releaseId: string): KnowledgeReleaseRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM knowledge_releases WHERE release_id=?').get(releaseId);
+    return row ? decodeRelease(row as Record<string, unknown>) : undefined;
+  }
+  releasesList(
+    tenant: { orgId?: string; region?: string },
+    pluginId: string,
+    options: { state?: KnowledgeReleaseRecord['state']; limit?: number } = {},
+  ): KnowledgeReleaseRecord[] {
+    const limit = Math.min(Math.max(Math.trunc(options.limit ?? 50), 1), 200);
+    const rows = options.state
+      ? this.db
+          .prepare(
+            'SELECT * FROM knowledge_releases WHERE org_id=? AND region=? AND plugin_id=? AND state=? ORDER BY created_at DESC,release_id LIMIT ?',
+          )
+          .all(tenant.orgId ?? '', tenant.region ?? '', pluginId, options.state, limit)
+      : this.db
+          .prepare(
+            'SELECT * FROM knowledge_releases WHERE org_id=? AND region=? AND plugin_id=? ORDER BY created_at DESC,release_id LIMIT ?',
+          )
+          .all(tenant.orgId ?? '', tenant.region ?? '', pluginId, limit);
+    return (rows as Array<Record<string, unknown>>).map(decodeRelease);
+  }
+  releasePointer(pluginId: string, tenant: { orgId?: string; region?: string }): KnowledgeReleasePointer | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT p.release_id AS release_id, p.version AS version, r.manifest_digest AS manifest_digest
+         FROM knowledge_release_pointers p JOIN knowledge_releases r ON r.release_id=p.release_id
+         WHERE p.plugin_id=? AND p.org_id=? AND p.region=?`,
+      )
+      .get(pluginId, tenant.orgId ?? '', tenant.region ?? '');
+    if (!row) return undefined;
+    return { releaseId: String(row.release_id), version: Number(row.version), manifestDigest: String(row.manifest_digest) };
+  }
+  /** expectedVersion 原子切换（§4：当前版本指针带 expectedVersion）。无指针时 expectedVersion 必须 0。
+   *  不自开事务：publishRelease 在外层事务内调用；CAS 由 UPDATE ... WHERE version=? 单语句保证。 */
+  releasePointerSwitch(
+    pluginId: string,
+    tenant: { orgId?: string; region?: string },
+    releaseId: string,
+    manifestDigest: string,
+    expectedVersion: number,
+  ): KnowledgeReleasePointer {
+    const now = new Date().toISOString();
+    if (expectedVersion === 0) {
+      const existing = this.releasePointer(pluginId, tenant);
+      if (existing) throw new Error('RELEASE_VERSION_STALE');
+      this.db
+        .prepare('INSERT INTO knowledge_release_pointers(plugin_id,org_id,region,release_id,version,updated_at) VALUES(?,?,?,?,1,?)')
+        .run(pluginId, tenant.orgId ?? '', tenant.region ?? '', releaseId, now);
+      return { releaseId, version: 1, manifestDigest };
+    }
+    const result = this.db
+      .prepare(
+        'UPDATE knowledge_release_pointers SET release_id=?, version=version+1, updated_at=? WHERE plugin_id=? AND org_id=? AND region=? AND version=?',
+      )
+      .run(releaseId, now, pluginId, tenant.orgId ?? '', tenant.region ?? '', expectedVersion);
+    if (Number(result.changes) !== 1) throw new Error('RELEASE_VERSION_STALE');
+    return { releaseId, version: expectedVersion + 1, manifestDigest };
+  }
+  /** 撤回：发布置 WITHDRAWN，条目逐条入台账（先阻止新取用，T06/§5 release.withdraw）。 */
+  releaseWithdraw(releaseId: string, entries: KnowledgeReleaseEntry[], reason: string): void {
+    this.transaction(() => {
+      const withdrawnAt = new Date().toISOString();
+      this.db.prepare("UPDATE knowledge_releases SET state='WITHDRAWN' WHERE release_id=? AND state='CURRENT'").run(releaseId);
+      const row = this.db.prepare('SELECT state FROM knowledge_releases WHERE release_id=?').get(releaseId);
+      if (!row || String(row.state) !== 'WITHDRAWN') throw new Error('RELEASE_WITHDRAW_CONFLICT');
+      const insert = this.db.prepare(
+        'INSERT OR IGNORE INTO knowledge_release_withdrawals(release_id,knowledge_id,revision,reason,withdrawn_at) VALUES(?,?,?,?,?)',
+      );
+      for (const entry of entries) insert.run(releaseId, entry.knowledgeId, entry.revision, reason, withdrawnAt);
+    });
+  }
+  /** 撤回台账查询：任何发布撤回过该 (knowledgeId, revision) 即失效——同一记录在同一租户内是同一事实。 */
+  releaseWithdrawal(knowledgeId: string, revision: number): { releaseId: string; reason: string } | undefined {
+    const row = this.db
+      .prepare('SELECT release_id,reason FROM knowledge_release_withdrawals WHERE knowledge_id=? AND revision=? LIMIT 1')
+      .get(knowledgeId, revision);
+    return row ? { releaseId: String(row.release_id), reason: String(row.reason) } : undefined;
   }
   /** KA16：事务一致备份到新文件（SQLite VACUUM INTO），不修改源库。 */
   backup(targetPath: string): void {

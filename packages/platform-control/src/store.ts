@@ -150,14 +150,21 @@ export interface RunRecord {
   workspace?: WorkspaceRecord;
   context?: { goal: string; previousRuns: Array<{ runId: string; input: unknown; result: RunRecord['result'] }>; truncated: boolean };
   /** Run 创建时绑定的知识快照（KA11）：只读摘要，在途运行不随知识更新漂移；未配置知识源时缺省。
-   *  records 是实际修订集合（M1-02）：Run 可据此重放固定知识，而不只是校验一个摘要。 */
+   *  records 是实际修订集合（M1-02）：Run 可据此重放固定知识，而不只是校验一个摘要。
+   *  orgId/region 是绑定时的可信租户范围（WP2）：快照按它过滤，重放按同一规则校验。
+   *  LearningBinding（开发设计 §4）：release 是发布清单指针引用；preferences 是本人 ACTIVE 偏好的
+   *  受限引用（只有键与修订）——共享运行记录不暴露私有偏好正文，撤权/删除后也不得重取正文。 */
   knowledge?: {
     snapshotDigest: string;
     total: number;
     pluginId: string;
     projectId?: string;
+    orgId?: string;
+    region?: string;
     boundAt: string;
     records?: Array<{ knowledgeId: string; revision: number; contentDigest: string }>;
+    release?: { releaseId: string; version: number; manifestDigest: string };
+    preferences?: Array<{ key: string; pluginKey: string; revision: number }>;
   };
   runId: string;
   workId: string | null;
@@ -279,6 +286,23 @@ export interface OutboxMessage {
   nextAttemptAt: string;
   claimedBy?: string;
   claimExpiresAt?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** L3/T04 知识捕获 outbox：终端运行事实先持久入队（消费崩溃不丢失），泵投递 + 有限重试 + 死信 + 人工重放。
+ *  幂等键 (kind, eventId)：同一终态/复核决定重复投递只占一条；DONE 不复活。 */
+export interface KnowledgeOutboxMessage {
+  messageId: string;
+  kind: string;
+  eventId: string;
+  state: OutboxState;
+  attempts: number;
+  nextAttemptAt: string;
+  claimedBy?: string;
+  claimExpiresAt?: string;
+  payload: unknown;
   lastError?: string;
   createdAt: string;
   updatedAt: string;
@@ -587,6 +611,21 @@ const decodeOutbox = (row: Record<string, unknown>): OutboxMessage => ({
   updatedAt: String(row.updated_at),
 });
 
+const decodeKnowledgeOutbox = (row: Record<string, unknown>): KnowledgeOutboxMessage => ({
+  messageId: String(row.message_id),
+  kind: String(row.kind),
+  eventId: String(row.event_id),
+  state: String(row.state) as OutboxState,
+  attempts: Number(row.attempts),
+  nextAttemptAt: String(row.next_attempt_at),
+  ...(row.claimed_by ? { claimedBy: String(row.claimed_by) } : {}),
+  ...(row.claim_expires_at ? { claimExpiresAt: String(row.claim_expires_at) } : {}),
+  payload: JSON.parse(String(row.payload)),
+  ...(row.last_error ? { lastError: String(row.last_error) } : {}),
+  createdAt: String(row.created_at),
+  updatedAt: String(row.updated_at),
+});
+
 export class PlatformStore {
   private readonly db: DatabaseSync;
   private readonly storeLocation: string;
@@ -823,6 +862,22 @@ export class PlatformStore {
           CHECK(state IN ('PENDING','CLAIMED','DONE','DEAD')),
           CHECK(kind IN ('run.dispatch'))
         ) STRICT;
+        CREATE TABLE IF NOT EXISTS knowledge_capture_outbox(
+          message_id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          event_id TEXT NOT NULL,
+          state TEXT NOT NULL,
+          attempts INTEGER NOT NULL,
+          next_attempt_at TEXT NOT NULL,
+          claimed_by TEXT,
+          claim_expires_at TEXT,
+          payload TEXT NOT NULL,
+          last_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK(state IN ('PENDING','CLAIMED','DONE','DEAD'))
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS kco_due ON knowledge_capture_outbox(state, next_attempt_at);
         CREATE TABLE IF NOT EXISTS release_approvals(
           app_id TEXT NOT NULL,
           app_version TEXT NOT NULL,
@@ -2101,6 +2156,99 @@ export class PlatformStore {
       count: number;
     }>;
     return Object.fromEntries(rows.map((row) => [String(row.state), Number(row.count)]));
+  }
+
+  // ── Knowledge capture outbox (L3/T04)：先持久入队，泵投递；消费崩溃不丢失 ──────────────
+  /** 同一 (kind, eventId) 只占一条：重复终态/重投幂等；已 DONE 不复活，未 DONE 保持原状态与预算。 */
+  knowledgeOutboxEnqueue(kind: string, eventId: string, payload: unknown, at: string): 'new' | 'existing' | 'done' {
+    const messageId = `kcap:${kind}:${eventId}`;
+    const result = this.db
+      .prepare(
+        "INSERT OR IGNORE INTO knowledge_capture_outbox(message_id,kind,event_id,state,attempts,next_attempt_at,payload,created_at,updated_at) VALUES(?,?,?,'PENDING',0,?,?,?,?)",
+      )
+      .run(messageId, kind, eventId, at, JSON.stringify(payload ?? null), at, at);
+    if (Number(result.changes) === 1) return 'new';
+    const row = this.db.prepare('SELECT state FROM knowledge_capture_outbox WHERE message_id=?').get(messageId) as
+      | { state: string }
+      | undefined;
+    return row && row.state === 'DONE' ? 'done' : 'existing';
+  }
+  knowledgeOutboxReclaimStale(nowIso: string): void {
+    this.db
+      .prepare(
+        "UPDATE knowledge_capture_outbox SET state='PENDING', claimed_by=NULL, claim_expires_at=NULL, updated_at=? WHERE state='CLAIMED' AND claim_expires_at IS NOT NULL AND claim_expires_at<=?",
+      )
+      .run(nowIso, nowIso);
+  }
+  knowledgeOutboxClaim(nowIso: string, limit: number, claimTtlMs: number): KnowledgeOutboxMessage[] {
+    return this.transaction(() => {
+      this.knowledgeOutboxReclaimStale(nowIso);
+      const due = this.db
+        .prepare(
+          "SELECT * FROM knowledge_capture_outbox WHERE state='PENDING' AND next_attempt_at<=? ORDER BY next_attempt_at, created_at LIMIT ?",
+        )
+        .all(nowIso, limit) as Array<Record<string, unknown>>;
+      const expires = new Date(Date.parse(nowIso) + claimTtlMs).toISOString();
+      const claimed: KnowledgeOutboxMessage[] = [];
+      const claim = this.db.prepare(
+        "UPDATE knowledge_capture_outbox SET state='CLAIMED', claimed_by='knowledge-pump', claim_expires_at=?, attempts=attempts+1, updated_at=? WHERE message_id=? AND state='PENDING'",
+      );
+      for (const row of due) {
+        const result = claim.run(expires, nowIso, String(row.message_id));
+        if (Number(result.changes) === 1) {
+          const claimedRow = this.db.prepare('SELECT * FROM knowledge_capture_outbox WHERE message_id=?').get(String(row.message_id));
+          if (claimedRow) claimed.push(decodeKnowledgeOutbox(claimedRow as Record<string, unknown>));
+        }
+      }
+      return claimed;
+    });
+  }
+  knowledgeOutboxComplete(messageId: string): void {
+    this.db
+      .prepare(
+        "UPDATE knowledge_capture_outbox SET state='DONE', claimed_by=NULL, claim_expires_at=NULL, updated_at=? WHERE message_id=?",
+      )
+      .run(new Date().toISOString(), messageId);
+  }
+  knowledgeOutboxRetry(messageId: string, error: string, nextAttemptAt: string): void {
+    this.db
+      .prepare(
+        "UPDATE knowledge_capture_outbox SET state='PENDING', claimed_by=NULL, claim_expires_at=NULL, last_error=?, next_attempt_at=?, updated_at=? WHERE message_id=?",
+      )
+      .run(error.slice(0, 2000), nextAttemptAt, new Date().toISOString(), messageId);
+  }
+  knowledgeOutboxDeadLetter(messageId: string, error: string): void {
+    this.db
+      .prepare(
+        "UPDATE knowledge_capture_outbox SET state='DEAD', claimed_by=NULL, claim_expires_at=NULL, last_error=?, updated_at=? WHERE message_id=?",
+      )
+      .run(error.slice(0, 2000), new Date().toISOString(), messageId);
+  }
+  /** 人工重放（§5 故障语义）：死信回到队列并重置预算；证据不删（last_error 保留）。 */
+  knowledgeOutboxReplayDead(nowIso: string): number {
+    const result = this.db
+      .prepare(
+        "UPDATE knowledge_capture_outbox SET state='PENDING', attempts=0, next_attempt_at=?, claimed_by=NULL, claim_expires_at=NULL, updated_at=? WHERE state='DEAD'",
+      )
+      .run(nowIso, nowIso);
+    return Number(result.changes);
+  }
+  knowledgeOutboxCounts(): Record<string, number> {
+    const rows = this.db.prepare('SELECT state, COUNT(*) AS count FROM knowledge_capture_outbox GROUP BY state').all() as Array<{
+      state: string;
+      count: number;
+    }>;
+    return Object.fromEntries(rows.map((row) => [String(row.state), Number(row.count)]));
+  }
+  /** 发布撤回影响面（T06）：绑定该发布的 Run 待复核清单（不重写运行事实）。 */
+  runsBoundToRelease(releaseId: string): string[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT run_id FROM runs WHERE json_extract(body,'$.knowledge.release.releaseId')=? ORDER BY created_at DESC LIMIT 500",
+        )
+        .all(releaseId) as Array<{ run_id: string }>
+    ).map((row) => String(row.run_id));
   }
 
   // ── Release approvals ──────────────────────────────────────────────────────

@@ -6,13 +6,13 @@ import { PlatformControlService, type ControlStatus } from './service.js';
 import { PlatformError } from './registry.js';
 import { AuthorizationError, LocalOperatorPolicy, type Principal } from './policy.js';
 import { RunError } from '../../platform-runtime/src/run.js';
-import { resolve } from 'node:path';
-import { resolveKnowledgeStorePath, resolveControlHome, resolveStorePath, validateConfig, type Config } from './config.js';
-import { readSnapshot } from '../../platform-knowledge/src/snapshot-readonly.js';
+import { resolveStorePath, validateConfig, type Config } from './config.js';
+import { configureControlService, startControlRuntime } from './bootstrap.js';
 import { publicCatalog } from './models.js';
-import { DshProfileExecutor } from './worker.js';
-import { ChildProcessWorkerExecutor } from './child-worker.js';
-import { RunScheduler } from './scheduler.js';
+import { InProcessKnowledgeAccess } from '../../platform-knowledge/src/access.js';
+import type { KnowledgeService } from '../../platform-knowledge/src/service.js';
+import type { KnowledgeContext } from '../../platform-knowledge/src/schema.js';
+import type { KnowledgeSnapshot } from '../../platform-knowledge/src/snapshot-readonly.js';
 import type { AppState, AppReleaseDraft, WorkState } from './store.js';
 
 export type { Config } from './config.js';
@@ -64,60 +64,69 @@ export function apply(ctx: Context, config: Config = {}): void {
       ...(validated.maxConcurrentRuns !== undefined ? { maxConcurrentRuns: validated.maxConcurrentRuns } : {}),
     },
   );
-  if (validated.worker) {
-    // Persist exit evidence in launch_attempts so it survives control-process restarts.
-    const evidence = {
-      record: (launchId: string, proven: boolean) => service.recordExitEvidence(launchId, proven),
-      read: (launchId: string) => service.readExitEvidence(launchId),
-    };
-    service.setExecutor(
-      validated.worker.mode === 'child-process'
-        ? new ChildProcessWorkerExecutor(validated.worker, evidence)
-        : new DshProfileExecutor(validated.worker, undefined, evidence),
-    );
+  // WP4: shared assembly — executor, knowledge scope and read-only snapshot source are wired by
+  // the same bootstrap the HTTP entry uses, so the two entries cannot drift.
+  configureControlService(service, validated);
+  // L1/L2/L3：知识服务与控制面同进程（DSH bundle）时注入进程内访问面；
+  // 分进程部署时由 bootstrap 按 config.knowledgeServiceUrl 注入 HTTP 访问面。
+  const clinicalKnowledge = ctx.get('clinicalKnowledge') as KnowledgeService | undefined;
+  if (clinicalKnowledge && !validated.knowledgeServiceUrl) {
+    service.setKnowledgeAccess(new InProcessKnowledgeAccess(clinicalKnowledge));
   }
-  // KA11：Run 创建时绑定知识快照（默认路径 = DSH_HOME/platform/knowledge.sqlite，与知识 bundle 一致）。
-  // 控制面只读知识库（摘要与服务端逐字节一致）；知识库唯一写者仍是 KnowledgeService。
-  const knowledgeStorePath =
-    resolveKnowledgeStorePath(validated) ?? resolve(resolveControlHome(), 'platform', 'knowledge.sqlite');
-  if (knowledgeStorePath) {
-    service.setKnowledgeSnapshotSource((app, projectId) => {
-      const pluginId = app.draft.descriptor.knowledgePluginId;
-      if (!pluginId) return undefined;
-      const snapshot = readSnapshot(knowledgeStorePath, { pluginId, projectId });
-      if (!snapshot) return undefined;
-      return {
-        snapshotDigest: snapshot.snapshotDigest,
-        total: snapshot.total,
-        pluginId,
-        projectId,
-        boundAt: new Date().toISOString(),
-        // 实际修订集合（M1-02）：Run 可据此重放固定知识，而不只是一个完整性摘要。
-        records: snapshot.records.map((record) => ({
-          knowledgeId: record.knowledgeId,
-          revision: record.revision,
-          contentDigest: record.contentDigest,
-        })),
-      };
+  // §5 run.bindLearning：服务端按 runRef 还原绑定快照——不信任客户端自带的 scope 或快照。
+  if (clinicalKnowledge) {
+    clinicalKnowledge.setRunSnapshotResolver((runId: string): { snapshot: KnowledgeSnapshot; context: KnowledgeContext } | undefined => {
+      try {
+        const record = service.getRun(runId, { actorId: 'service:knowledge-binding', kind: 'service' });
+        const knowledge = record.knowledge;
+        if (!knowledge) return undefined;
+        const context: KnowledgeContext = {
+          pluginId: knowledge.pluginId,
+          ...(knowledge.projectId !== undefined ? { projectId: knowledge.projectId } : {}),
+          ...(knowledge.orgId !== undefined ? { orgId: knowledge.orgId } : {}),
+          ...(knowledge.region !== undefined ? { region: knowledge.region } : {}),
+        };
+        const snapshot: KnowledgeSnapshot = {
+          context,
+          records: (knowledge.records ?? []).map((ref) => ({ ...ref })),
+          snapshotDigest: knowledge.snapshotDigest,
+        };
+        return { snapshot, context };
+      } catch {
+        return undefined;
+      }
     });
   }
   // KA12/M2-02：把终端运行事实投影为“待分析”事件——不是候选，也不改写 Run 状态。
   // 知识智能体随后按同一 eventId 提出候选；重复投递由知识服务按 (eventId, contributor, version) 去重。
+  // T04：控制面已把事件持久入队（knowledge_capture_outbox），本 sink 在泵投递时执行；
+  // 返回 outcome 让泵区分交付成功 / RETRY_REQUIRED / 已记录的显式冲突结局。
   service.setKnowledgeCaptureSink((event) => {
-    if (event.kind !== 'run.failed' && event.kind !== 'run.unknown') return;
+    if (event.kind !== 'run.failed' && event.kind !== 'run.unknown' && event.kind !== 'qc.completed') return;
     if (!event.pluginId || !event.projectId) return;
     const knowledge = ctx.get('clinicalKnowledge') as
-      | { captureFromProjection: (context: { pluginId: string; projectId: string }, input: unknown) => unknown }
+      | {
+          captureFromProjection: (
+            context: { pluginId: string; projectId: string },
+            input: unknown,
+          ) => { outcome?: string } | void;
+        }
       | undefined;
     if (!knowledge) return;
-    knowledge.captureFromProjection(
+    // 知识事件合同只认 run.failed / program.revised / qc.completed / business.clarified；
+    // run.unknown 投影为 run.failed（同一去重键与处置），复核决定投影为 qc.completed，事件 ID 用 reviewId。
+    const knowledgeKind = event.kind === 'qc.completed' ? 'qc.completed' : 'run.failed';
+    const eventId = event.kind === 'qc.completed' && event.review
+      ? `review:${event.review.reviewId}`
+      : event.runId;
+    return knowledge.captureFromProjection(
       { pluginId: event.pluginId, projectId: event.projectId },
       {
         event: {
-          eventId: event.runId,
+          eventId,
           contributor: 'platform-control',
           projectionVersion: '1',
-          kind: 'run.failed',
+          kind: knowledgeKind,
           runId: event.runId,
           inputDigest: event.inputDigest,
         },
@@ -127,17 +136,9 @@ export function apply(ctx: Context, config: Config = {}): void {
   });
   ctx.provide('platformControl', service);
   ctx.effect(() => () => service.close());
-  if (validated.reconcileOnStartup) {
-    service.reconcileOrphans({ actorId: 'service:startup', kind: 'service' });
-  }
-  if (validated.worker && validated.scheduler?.enabled !== false) {
-    const scheduler = new RunScheduler(service, validated.scheduler?.intervalMs ?? 5000, {
-      actorId: 'service:scheduler',
-      kind: 'service',
-    });
-    const stop = scheduler.start();
-    ctx.effect(() => stop);
-  }
+  // WP4: identical reconcile-before-schedule ordering as the HTTP entry.
+  const runtime = startControlRuntime(service, validated);
+  ctx.effect(() => () => runtime.stop());
   const run = async (action: () => unknown | Promise<unknown>): Promise<string> => {
     try {
       return JSON.stringify(await action());

@@ -4,7 +4,7 @@
 
 ## 0. 2026-11-20 实施快照（工程合同，不是验收）
 
-已完成并过本机包测试与门禁的**代码合同**：智能体定义 v2 与注册表、可信范围派生、快照实际消费与固定集合检索、证据/引用对账、事件投影幂等、一次性回执、发布覆盖门禁（`knowledge-assembly.json` + `scripts/verify-knowledge-coverage.mjs`）。四个业务插件的定义已升级到 v2；平台控制面/知识服务/工作台登记为 `platform-pending`，`--release` 下阻断发布。
+已完成并过本机包测试与门禁的**代码合同**：智能体定义 v2 与注册表、可信范围派生、快照实际消费与固定集合检索、证据/引用对账、事件投影幂等、一次性回执、发布覆盖门禁（`knowledge-assembly.json` + `scripts/verify-knowledge-coverage.mjs`）。7 个纳管插件（4 业务 + 3 平台）均有 v2 定义与黄金集；平台控制面/知识服务/工作台在本轮补齐运行与故障处置种子后登记为 `managed`。
 
 **未完成、不得报告为通过**：A01–A16 全部 `NOT_RUN`（除 A15 的本机工程门禁部分）；真实宿主双样本、工作台知识依据界面、身份接线与验证执行器部署、区域/恢复演练、领域黄金集扩充与领域负责人签收。工单级状态见 §5。
 
@@ -115,16 +115,16 @@ node scripts/verify-all.cjs
 
 | 工单 | 代码/交付状态 | 已落地 | 仍未完成 |
 |---|---|---|---|
-| M0-01 资产清点 | 部分 | 仓库根 `knowledge-assembly.json` 登记 12 个目录（4 managed、3 platform-pending、4 library、1 application）；门禁输出机器可读清单 | 真实发布组合、版本兼容矩阵与负责人签收 |
+| M0-01 资产清点 | 部分 | 仓库根 `knowledge-assembly.json` 登记 12 个目录（7 managed、4 library、1 application）；门禁输出机器可读清单 | 真实发布组合、版本兼容矩阵与负责人签收 |
 | M0-02 建立基线 | 未完成 | 本机门禁可复跑 | 制品摘要、评测集版本、隔离/回滚夹具冻结 |
 | M1-01 服务端范围 | 代码完成 | `KnowledgeScopeBoundary`/`deriveContext`；工具配置 `scopes` 与语料前缀；未声明即失败关闭 | 部署侧身份接线（Principal → scope 声明） |
 | M1-02 快照实际消费 | 代码完成 | `readSnapshot` 返回实际修订集合；控制面写入 `run.knowledge.records`；`searchPinned` 固定集合检索，撤回/撤权逐条排除 | 真实宿主回放与重启重放证据 |
-| M1-03 证据与降级 | 代码完成 | `evidence`（BOUND/EMPTY/DEGRADED/UNBOUND + excluded 原因）、`cite` 引用台账、`reconcileCitations` | 工作台「知识依据/治理区」界面 |
+| M1-03 证据与降级 | 代码完成 | `evidence`（BOUND/EMPTY/DEGRADED/UNBOUND + excluded 原因）、`cite` 引用台账、`reconcileCitations`；工作台运行详情新增「知识依据」卡（显示绑定快照/未绑定，`src/client/knowledge-evidence.ts` + `run-insights.tsx`） | 真实宿主上核对检索证据来源；被排除条目的展示需要服务端把检索证据随运行保存 |
 | M2-01 智能体注册合同 | 代码完成 | manifest v2 + `KnowledgeAgentRegistry`（多版本并存、显式激活、冲突拒绝、停用留痕）；4 个业务插件已升级 | 平台控制面/知识服务/工作台 3 个 pending 定义 |
-| M2-02 事件到候选 | 代码完成 | `captureFromProjection` 幂等投影；控制面在 run.failed/run.unknown 终结时投影 `PENDING_ANALYSIS` | QC/复核事件消费者；插件智能体提出候选的真实链路 |
+| M2-02 事件到候选 | 代码完成 | `captureFromProjection` 幂等投影；控制面在 run.failed/run.unknown 终结时投影 `PENDING_ANALYSIS`；复核决定（APPROVED/REJECTED）投影为 `qc.completed`，事件 ID 为 `review:<reviewId>`，同一决定只投一次且不回写决定；`platform_knowledge_projections` 工具按插件只读列出投影台账（可按结局筛选），供智能体提炼候选 | 真实宿主上由插件智能体读取台账、提出候选并走验证的端到端验证 |
 | M2-03 验证到激活 | 代码完成 | 回执台账、重复回执幂等、同一请求第二份回执拒绝、过期/覆盖不足/未批准执行器不激活 | 独立验证执行域部署、执行身份与版本证据 |
 | M2-04 双样本 | 未完成 | DVP `dm_dvp_methods` 支持 `snapshotJson` 固定集合检索并标注 `retrieval` | DVP + 工作台真实宿主双样本（A10–A12） |
-| M3-01 分批补齐 | 部分 | 4 个业务插件 v2 定义 + 黄金集（含 expectEmpty 负例） | 领域负例/边界样本扩充；3 个平台插件定义 |
+| M3-01 分批补齐 | 部分 | 7 个插件的 v2 定义与黄金集（每插件含 `expectEmpty` 负例与至少一条边界正例，测试按 manifest 声明执行，不另写一份查询表）；3 个平台插件补齐运行/故障处置种子（控制面 6、知识服务 6、工作台 6） | 真实宿主的领域质量签收；更多边界样本随实战复盘补充 |
 | M3-02 发布门禁 | 代码完成 | `scripts/verify-knowledge-coverage.mjs`（含 `--release`、`--json`、`--report`）、自测、`verify-all` 接入 | 发布流程中的实际阻断与签收 |
 | M4-01 运维与试点 | 未开始 | — | 压测、区域驻留、备份恢复与回退演练、试点范围 |
 

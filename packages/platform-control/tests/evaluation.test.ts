@@ -68,6 +68,7 @@ const setup = async () => {
     { requireArtifacts: true },
   );
   service.registerApp(draft(), operator);
+  service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
   const work = service.createWork(
     { projectId: 'SYN-001', appId: 'listing', appVersion: '1.0.0', title: '评测工作' },
     operator,

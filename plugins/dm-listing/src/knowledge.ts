@@ -1,5 +1,5 @@
 /** Scenario routing knowledge; never an authorization or a substitute for the current spec. */
-export const KNOWLEDGE_VERSION = '2026.11.09.2';
+export const KNOWLEDGE_VERSION = '2026.11.23.1';
 export const SCENARIOS = ['medical', 'manual', 'report', 'pk'] as const;
 export type Scenario = typeof SCENARIOS[number];
 export type PkType = 'be' | 'sad-mad';
@@ -28,5 +28,6 @@ Manual/Medical按需加载dm-listing-manual-methods技能或dm_listing_manual_me
 允许先写草稿，逐条补需求映射与反例，不以IR完整作为写码门槛。代码逻辑从当前spec/ALS/SAS数据事实推导，不能照抄旧项目业务区或以固定示例Subject/Visit列代替真实输出要求。
 目标交付单文件自包含R：参数/配置指定项目根、数据日期、旧版日期、输入输出，不依赖DSH/Node/Python或source本机脚本。声明最小R依赖，日志/报错用于自主修错；输入不误覆盖，已有正式结果输出新版本。
 Excel与RDS按各自项目合同独立读取检查：工件全集、sheet/对象名和顺序、列/行、class/label、NA和空串、精度及实际值。RDS可为命名listing列表，不强迫单表。交付前在另一目录以服务器配置实际R复跑，记录未执行或未解决业务问题，不把模型自报当QC证据。
+Manual/Medical批次交付还含(vs旧批次)新旧比对着色件：由同一单文件程序的比对段产出，主件FLAG列只是占位；交付核对以比对件实际存在和比对段日志为准，不能只看程序退出码。
 Manual/PK BE/PK SAD-MAD历史成功经验只作方法参考，当前spec和明确用户裁定优先；report缺成熟业务样例不能凭惯例补分母、期间或阈值。`;
 

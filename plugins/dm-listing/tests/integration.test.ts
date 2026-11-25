@@ -7,7 +7,7 @@ import Skills from '@deepseek-ai/dsh-skill';
 import Questions from '@deepseek-ai/dsh-user-questions';
 import * as Plugin from '../src/index.ts';
 import * as PlatformKnowledge from '../../../packages/platform-knowledge/src/cordis.ts';
-import {mkdtemp,rm} from 'node:fs/promises';
+import {mkdtemp,readFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 
@@ -34,7 +34,7 @@ test('real Cordis services mount and dispose tools/knowledge without changing or
     assert.equal((await ctx.skills.list()).length,0);
     assert(ctx.tools.get('platform_knowledge_search'),'platform tools survive Listing disposal');
     assert(ctx.clinicalKnowledge);
-    assert.equal(ctx.clinicalKnowledge.search({pluginId:'dm-listing'},{states:['CANDIDATE']}).total,5,'seed history survives contribution disposal');
+    assert.equal(ctx.clinicalKnowledge.search({pluginId:'dm-listing'},{states:['CANDIDATE']}).total,6,'seed history survives contribution disposal');
   }finally{
     await ctx.fiber.dispose();
     if(previousHome===undefined)delete process.env.DSH_HOME;else process.env.DSH_HOME=previousHome;
@@ -51,4 +51,9 @@ test('real question service dispatches trusted answers and rejects cancelled req
     const controller=new AbortController();controller.abort();
     await assert.rejects(ctx.userQuestions.ask({questions:[{id:'select',question:'Which sheet?'}],signal:controller.signal}),/aborted/);
   }finally{await ctx.fiber.dispose();}
+});
+test('reported plugin version follows the shipped package.json instead of a hardcoded copy',async()=>{
+  const manifest=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8')) as {version?:unknown};
+  assert.equal(typeof manifest.version,'string');
+  assert.equal(Plugin.LISTING_PLUGIN_VERSION,manifest.version);
 });

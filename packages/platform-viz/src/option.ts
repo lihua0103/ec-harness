@@ -7,6 +7,7 @@ import { fail } from './errors.js';
 import {
   columnOf,
   datasetOf,
+  normalizeAggregate,
   validateSpec,
   type Aggregate,
   type Bundle,
@@ -72,7 +73,7 @@ function wideTable(dataset: Dataset, spec: ChartSpec): CategoryTable {
   const slots = spec.slots!;
   const categoryIndex = cellIndex(dataset, slots.category!);
   const definitions = (slots.values ?? []).map((value) => ({
-    aggregate: value.aggregate ?? 'SUM',
+    aggregate: normalizeAggregate(value.aggregate),
     index: cellIndex(dataset, value.column),
     name: value.label ?? columnOf(dataset, value.column).label,
   }));
@@ -107,7 +108,7 @@ function longTable(dataset: Dataset, spec: ChartSpec): CategoryTable {
   const seriesIndex = cellIndex(dataset, slots.series!);
   const definition = slots.values![0]!;
   const valueIndex = cellIndex(dataset, definition.column);
-  const aggregate = definition.aggregate ?? 'SUM';
+  const aggregate = normalizeAggregate(definition.aggregate);
   const categories: string[] = [];
   const categorySeen = new Set<string>();
   const seriesNames: string[] = [];
@@ -224,7 +225,7 @@ function heatmapOption(entry: CatalogEntry, dataset: Dataset, spec: ChartSpec, p
   const xIndex = cellIndex(dataset, slots.category!);
   const yIndex = cellIndex(dataset, slots.series!);
   const valueIndex = cellIndex(dataset, slots.values![0]!.column);
-  const aggregate = slots.values![0]!.aggregate ?? 'SUM';
+  const aggregate = normalizeAggregate(slots.values![0]!.aggregate);
   const xs: string[] = [];
   const xSeen = new Set<string>();
   const ys: string[] = [];
@@ -308,7 +309,7 @@ function graphOption(entry: CatalogEntry, dataset: Dataset, spec: ChartSpec, pre
   const sourceIndex = cellIndex(dataset, slots.source!);
   const targetIndex = cellIndex(dataset, slots.target!);
   const valueIndex = cellIndex(dataset, slots.values![0]!.column);
-  const aggregate = slots.values![0]!.aggregate ?? 'SUM';
+  const aggregate = normalizeAggregate(slots.values![0]!.aggregate);
   const nodes: string[] = [];
   const nodeSeen = new Set<string>();
   const buckets = new Map<string, CellValue[]>();

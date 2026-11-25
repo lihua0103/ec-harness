@@ -3,15 +3,18 @@
 临床数据管理 DVP（数据核查计划）内容生成插件：方案 PDF 文本层读取、公司 DVP 模板工作簿
 解析/写出、fire-when 逻辑校验与目标 EDC 渲染、测试用例候选、方法知识沉淀。
 模板结构与实例测量（TAISHAN-304 V2.0）见仓库根 `docs/DVP-TEMPLATE-SCHEMA.md`；
-方法研究见 `docs/DVP-GENERATION-RESEARCH.md`。版本 0.3.0（2026-11-11 整改：ObjStm 页对象修复、真分页、
+方法研究见 `docs/DVP-GENERATION-RESEARCH.md`。版本 0.3.9（2026-11-24：新增输入发现 `dm_dvp_scan`、
+通用工作簿读取 `dm_dvp_read_workbook` 与 Web 客户端员工入口「DM DVP」；2026-11-11 整改：ObjStm 页对象修复、真分页、
 知识claims语义、公共平台包独立装入）。
 
-## 工具（11 个）
+## 工具（14 个；下表 13 行，两个知识验证工具并在一行）
 
 | 工具 | 作用 |
 | --- | --- |
-| `dm_dvp_status` | 版本、模板 schema 依据、数据边界、知识种子状态与候选纪律 |
+| `dm_dvp_status` | 版本（读随包 package.json）、模板 schema 依据、数据边界、知识种子状态与候选纪律 |
+| `dm_dvp_scan` | 列出工作目录内的输入文件：方案 PDF（protocol）、可读工作簿 .xlsx/.xlsm（workbook）、旧版/二进制工作簿 .xls/.xlsb 等（unsupportedWorkbook，只列存在）；其他类型按扩展名计数。只看存在、大小、修改时间，不读内容；不跟随符号链接，跳过点开头目录与 node_modules；`recursive`/`maxDepth` 控制范围；相关文件超过 500 个时截断并在 notices 标明 |
 | `dm_dvp_read_protocol` | 读方案 PDF 文本层（语言随项目，window 页区间）；扫描件 NEEDS_OCR、加密拒绝、缺 ToUnicode 以 U+FFFD 占位并计数；解析 /Type /ObjStm 压缩页对象，页树声明数与实际页数不一致时显式告警 |
+| `dm_dvp_read_workbook` | 读取非 DVP 模板工作簿（ALS / 数据库结构等）的任意 sheet：省略 `sheetId` 返回 sheet 清单；给 `sheetId` 返回整表，或 `startRow`/`endRow` 行窗口内的单元格（坐标、值、类型；公式只给表达式不给缓存值）、合并区、隐藏行列与警告。DVP 模板工作簿一律拒绝（`DVP_TEMPLATE_USE_DEDICATED_TOOLS`）；名为 Cover/Approval 的 sheet 不读（`SHEET_CONTENT_NOT_READ`）；仅 .xlsx/.xlsm |
 | `dm_dvp_overview` | 列出 workbook 全部 sheet 及角色分类（含 Cover）；不读任何单元格 |
 | `dm_dvp_parse_workbook` | 解析为规则 IR：跨字段规则（fire-when 结构化解析）、字段级规格、人工评审、动态、版本历史 + 逐条诊断；`limit` + `section`/`offset` 真分页，`paging.nextOffset` 续读，`total` 覆盖全量 |
 | `dm_dvp_validate_rules` | 规则完整性诊断 + fire-when 结构化解析（只报诊断，不改语义） |
@@ -24,11 +27,21 @@
 
 内置 bundled skill `dm-dvp`：方法流程、fire-when 方言要点、四枚举 Query Type 与边界纪律。
 
+## Web 客户端员工入口
+
+Web 组合（`dsh.client.platform: web`）下，会话输入框的工具行提供「DM DVP」按钮：点击把 DVP 任务可用的
+**真实**能力清单插入输入框（中英文随宿主语言）。工具名与 `dm_dvp_status` 的清单一致性由测试锁定——模型不会再
+去猜并不存在的工具名。会话属于另一项应用时入口自动隐藏：工作台把"当前会话所属应用"作为平台事实公开
+（标准工具包钩子 `useConversationApplication`），本插件只比较自己 `application.json` 的 appId，平台不认识本插件；
+没有该事实（历史会话、不在工作台里运行）时入口照常显示。入口挂在公开的 `conversation.input.right` 列表槽位。
+
 ## 数据边界（不可协商）
 
 - Cover sheet 内容**永不读取**；Approval 签署内容不读取；
 - Manual Review for Programming 的 TEST CASE 受试者号与 DM/DBD 评审意见**只计数、不回传**；
 - 未识别 sheet 只记录存在，不读取内容；
+- 通用读取 `dm_dvp_read_workbook` 不绕过上述边界：DVP 模板工作簿一律拒绝并指向 `dm_dvp_overview` /
+  `dm_dvp_parse_workbook`；任何工作簿里名为 Cover / Approval 的 sheet 都不读；
 - 方案 PDF 只读文本层：扫描件 NEEDS_OCR（不做 OCR、不凭图猜内容），加密 PDF 拒绝；
 - 全部生成物是候选（CANDIDATE），不是已验证 DVP；不伪报验证结果；渲染结果是配置参考，不写生产 EDC；
 - UAT 用例留档遵循公司流程：由项目团队在 Manual Review for Programming 行内 TEST CASE 区执行归档。
@@ -43,7 +56,8 @@ cd plugins/dm-dvp && pnpm install
 cd plugins/dm-dvp && PATH="/d/package/Nvm/nvm/v24.9.0:$PATH" npm run verify
 ```
 
-verify = typecheck（tsc --noEmit）→ test（node:test + tsx）→ build（esbuild 单文件 bundle）。
+verify = typecheck（tsc --noEmit）→ test（node:test + tsx）→ build（esbuild：host 单文件 bundle + 浏览器端
+client-module factory `lib/client.js`；React 与 `@deepseek-ai` 客户端包由 Web 外壳的模块表提供，不打包）。
 
 ## 发布候选包
 
@@ -59,8 +73,8 @@ cd plugins/dm-dvp && PATH="/d/package/Nvm/nvm/v24.9.0:$PATH" node scripts/releas
 cd plugins/dm-dvp && PATH="/d/package/Nvm/nvm/v24.9.0:$PATH" node scripts/release.mjs approve <candidate.zip> <approved.zip> "<provenance>"
 ```
 
-候选包 = host 单 bundle（运行时依赖 fflate/yauzl/fast-xml-parser 已捆绑，DSH peer 服务由宿主
-固定版本提供）+ release-manifest.json（源码清单、校验和、upstream commit、CANDIDATE 状态）。
+候选包 = host 单 bundle + client-module factory `lib/client.js`（运行时依赖 fflate/yauzl/fast-xml-parser 已捆绑，
+DSH peer 服务由宿主固定版本提供）+ release-manifest.json（源码清单、校验和、upstream commit、CANDIDATE 状态）。
 `licenses/` 版本化捆绑依赖的许可证文本，构建不依赖可变的 node_modules。写文件一律 flag `wx`
 （绝不覆盖）。**候选完整性 ≠ 部署批准 ≠ 业务验收**：state 恒为 CANDIDATE，
 productionDataEnabled 恒为 false，approve 只改 distribution 标记并记录操作者来源。

@@ -23,6 +23,10 @@ export interface PersistedView {
   focusRunId?: string
 }
 
+/** The workbench's keyed pages. Defined here (the view-coordinate module) so the sidebar and
+ *  the route store can share it without importing the page component. */
+export type WorkbenchView = 'works' | 'sessions' | 'projects' | 'apps' | 'pending' | 'settings'
+
 const VIEW_KEY = 'ec-wb-view'
 
 const isNonEmptyString = (value: unknown): value is string => typeof value === 'string' && value !== ''

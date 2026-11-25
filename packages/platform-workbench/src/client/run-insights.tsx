@@ -6,9 +6,10 @@
  */
 import { useEffect, useState } from 'react'
 import type { RunDetail, RunKnowledgeBinding, WorkbenchApi } from '../api.js'
-import { snapshotLine } from './knowledge-evidence.js'
+import { learningUsageLines, snapshotLine } from './knowledge-evidence.js'
 
 export function KnowledgeBasisPanel({ snapshot }: { snapshot?: RunKnowledgeBinding }) {
+  const usage = learningUsageLines(snapshot)
   return (
     <section className="ec-wb-card" aria-labelledby="ec-wb-knowledge-basis" data-testid="knowledge-basis">
       <div className="ec-wb-card-head">
@@ -16,6 +17,12 @@ export function KnowledgeBasisPanel({ snapshot }: { snapshot?: RunKnowledgeBindi
         <span className="ec-wb-badge">{snapshot ? '已绑定' : '未绑定'}</span>
       </div>
       <p className="ec-wb-muted">{snapshotLine(snapshot)}</p>
+      <p className="ec-wb-muted" data-testid="knowledge-usage">
+        <strong>本次使用说明：</strong>
+        {usage.map((line) => (
+          <span key={line} className="ec-wb-usage-line">{line}</span>
+        ))}
+      </p>
     </section>
   )
 }

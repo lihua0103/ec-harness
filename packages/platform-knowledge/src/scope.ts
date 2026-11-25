@@ -127,6 +127,10 @@ export class KnowledgeScopeBoundary {
     assertSnapshotInScope(this.declaration, snapshot);
     return this.service.searchPinned(this.context(request), snapshot, options);
   }
+  /** 服务端按 runRef 还原绑定快照（解析器由控制面装配注入，§5：不信任客户端自带快照）。 */
+  searchPinnedForRun(request: ScopeRequest, runId: string, options?: SearchOptions) {
+    return this.service.searchPinnedForRun(this.context(request), runId, options);
+  }
   get(request: ScopeRequest, knowledgeId: string, revision?: number): KnowledgeRecord {
     return this.service.get(this.context(request), knowledgeId, revision);
   }

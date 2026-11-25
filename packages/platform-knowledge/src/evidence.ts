@@ -8,7 +8,7 @@ export interface KnowledgeRef {
   revision: number;
   contentDigest: string;
 }
-export type ExclusionReason = 'REVOKED' | 'CONFLICT' | 'UNAVAILABLE' | 'NOT_VISIBLE' | 'TAMPERED';
+export type ExclusionReason = 'REVOKED' | 'CONFLICT' | 'UNAVAILABLE' | 'NOT_VISIBLE' | 'TAMPERED' | 'WITHDRAWN';
 export interface KnowledgeEvidence {
   /** BOUND：快照固定集合可用；EMPTY：集合可用但无命中；DEGRADED：存在被排除的绑定修订；
    *  UNBOUND：未绑定快照（只做活库检索时如实标注）。 */

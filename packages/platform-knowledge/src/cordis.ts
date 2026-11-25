@@ -8,6 +8,9 @@ import { KnowledgeService } from './service.js';
 import { KnowledgeScopeBoundary, validateScopeDeclaration, type KnowledgeScopeDeclaration } from './scope.js';
 import type { KnowledgeSnapshot } from './snapshot-readonly.js';
 import type { KnowledgeDraft } from './schema.js';
+import type { ProjectionOutcome } from './store.js';
+import { createKnowledgeServiceServer, headerIdentityAuthenticator } from './http.js';
+import type { Server } from 'node:http';
 
 export const name = 'ec-platform-knowledge';
 export const inject = ['tools'];
@@ -23,13 +26,31 @@ export interface Config {
   scopes?: KnowledgeScopeDeclaration[];
   /** 语料入口默认前缀；每个 scope 可覆盖。未声明则语料检索整体拒绝。 */
   corpusDocPrefixes?: string[];
+  /** L1 权威服务 HTTP 面（可选）：让控制面/工作台经认证访问同一服务实例（§3）。
+   *  token 校验通道；主体来自上游认证方转发的 x-dsh-subject 头（合同见 ADR-0004）。 */
+  http?: { port: number; token?: string; host?: string };
 }
-const validateConfig = (config: Config): { storePath: string; scopes: KnowledgeScopeDeclaration[] } => {
+const validateConfig = (
+  config: Config,
+): { storePath: string; scopes: KnowledgeScopeDeclaration[]; http?: { port: number; token?: string; host?: string } } => {
   if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('KNOWLEDGE_CONFIG_INVALID');
   for (const key of Object.keys(config))
-    if (key !== 'storePath' && key !== 'scopes' && key !== 'corpusDocPrefixes') throw new Error(`KNOWLEDGE_CONFIG_INVALID:${key}`);
+    if (key !== 'storePath' && key !== 'scopes' && key !== 'corpusDocPrefixes' && key !== 'http')
+      throw new Error(`KNOWLEDGE_CONFIG_INVALID:${key}`);
   if (config.storePath !== undefined && (typeof config.storePath !== 'string' || !config.storePath.trim())) {
     throw new Error('KNOWLEDGE_CONFIG_INVALID:storePath');
+  }
+  if (config.http !== undefined) {
+    const http = config.http as Record<string, unknown>;
+    if (!http || typeof http !== 'object' || Array.isArray(http)) throw new Error('KNOWLEDGE_CONFIG_INVALID:http');
+    for (const key of Object.keys(http))
+      if (key !== 'port' && key !== 'token' && key !== 'host') throw new Error(`KNOWLEDGE_CONFIG_INVALID:http.${key}`);
+    if (!Number.isSafeInteger(http.port) || Number(http.port) < 1 || Number(http.port) > 65535)
+      throw new Error('KNOWLEDGE_CONFIG_INVALID:http.port');
+    if (http.token !== undefined && (typeof http.token !== 'string' || !http.token))
+      throw new Error('KNOWLEDGE_CONFIG_INVALID:http.token');
+    if (http.host !== undefined && (typeof http.host !== 'string' || !http.host))
+      throw new Error('KNOWLEDGE_CONFIG_INVALID:http.host');
   }
   const scopes = config.scopes ?? [];
   if (!Array.isArray(scopes)) throw new Error('KNOWLEDGE_CONFIG_INVALID:scopes');
@@ -49,6 +70,7 @@ const validateConfig = (config: Config): { storePath: string; scopes: KnowledgeS
   return {
     storePath: config.storePath ? resolve(home, config.storePath) : resolve(home, 'platform', 'knowledge.sqlite'),
     scopes: [...byPlugin.values()],
+    ...(config.http !== undefined ? { http: config.http } : {}),
   };
 };
 
@@ -60,6 +82,16 @@ export function apply(ctx: Context, config: Config = {}): void {
   const service = new KnowledgeService(validated.storePath);
   ctx.provide('clinicalKnowledge', service);
   ctx.effect(() => () => service.close());
+  // L1 权威服务 HTTP 面（可选）：控制面/工作台经认证访问同一服务实例（§3）。
+  // token 校验通道；主体来自上游认证方转发的 x-dsh-subject 头（合同见 ADR-0004）。
+  if (validated.http) {
+    const server = createKnowledgeServiceServer({
+      service,
+      authenticator: headerIdentityAuthenticator({ token: validated.http.token }),
+    });
+    server.listen(validated.http.port, validated.http.host ?? '127.0.0.1');
+    ctx.effect(() => () => server.close());
+  }
   const boundaries = new Map<string, KnowledgeScopeBoundary>(
     validated.scopes.map((scope) => [scope.pluginId, new KnowledgeScopeBoundary(service, scope)]),
   );
@@ -146,6 +178,31 @@ export function apply(ctx: Context, config: Config = {}): void {
             limit: args.limit,
           });
         }),
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_knowledge_search_run',
+      description:
+        '在指定 Run 服务端绑定的知识快照内检索（runId）。快照由服务端按 Run 还原，不信任客户端自带快照；参数只能收窄查询。返回 evidence：实际返回与被排除（撤回/撤权/不可用/已发布撤回）逐条可对账。',
+      parameters: {
+        ...scope,
+        runId: { ...string, required: true },
+        query: string,
+        topic: string,
+        offset: { type: 'number' },
+        limit: { type: 'number' },
+      },
+      output,
+      execute: async (args) =>
+        run(() =>
+          boundaryFor(args.pluginId).searchPinnedForRun(request(args), args.runId, {
+            query: args.query,
+            topics: args.topic ? [args.topic] : undefined,
+            offset: args.offset,
+            limit: args.limit,
+          }),
+        ),
     }),
   );
   ctx.tools.register(
@@ -257,6 +314,30 @@ export function apply(ctx: Context, config: Config = {}): void {
         run(() => {
           const agents = service.agents.list();
           return { agents: args.pluginId ? agents.filter((agent) => agent.pluginId === args.pluginId) : agents };
+        }),
+    }),
+  );
+  ctx.tools.register(
+    defineTool({
+      name: 'platform_knowledge_projections',
+      description:
+        '本插件的可信事件投影台账（M2-02）：run 失败/未知或复核决定会留下 PENDING_ANALYSIS，供智能体提炼候选。只读；同 (eventId,contributor,version) 只记一次；提出候选仍走 capture 与验证器，不接受自报通过。',
+      parameters: {
+        ...scope,
+        outcome: { type: 'string', enum: ['PENDING_ANALYSIS', 'CANDIDATE', 'NO_REUSABLE_CONCLUSION', 'CONFLICT', 'RETRY_REQUIRED'] },
+        limit: { type: 'number' },
+      },
+      output,
+      execute: async (args) =>
+        run(() => {
+          const boundary = boundaryFor(args.pluginId);
+          const projections = service.listProjections(request(args), {
+            ...(args.outcome ? { outcome: args.outcome as ProjectionOutcome } : {}),
+            ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
+          });
+          // 边界只负责建立/校验范围；投影本身按 pluginId 过滤，不回传其他插件的事故。
+          void boundary;
+          return { projections };
         }),
     }),
   );

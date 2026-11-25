@@ -138,7 +138,7 @@ test('v1 database migrates in place: FTS backfilled, revisions untouched, schema
     assert.equal(hit.total, 1, '存量修订必须被回填进全文索引');
     const db = new DatabaseSync(path, { readOnly: true });
     try {
-      assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 5);
+      assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 6);
     } finally {
       db.close();
     }

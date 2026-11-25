@@ -5,7 +5,7 @@ import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {KnowledgeService} from '../../../packages/platform-knowledge/src/service.js';
-import {listingMethodSuite} from '../src/knowledge-validators.ts';
+import {listingMethodSuite,listingMethodSuites} from '../src/knowledge-validators.ts';
 import {listingSeeds,LISTING_PLUGIN_ID,LISTING_SEED_VERSION} from '../src/knowledge-seeds.ts';
 
 let root:string,service:KnowledgeService;
@@ -14,7 +14,7 @@ const ctx={pluginId:LISTING_PLUGIN_ID};
 before(async()=>{
   root=await mkdtemp(join(tmpdir(),'km-loop-'));
   service=new KnowledgeService(join(root,'knowledge.sqlite'));
-  service.registerValidator(LISTING_PLUGIN_ID,listingMethodSuite);
+  for(const suite of listingMethodSuites)service.registerValidator(LISTING_PLUGIN_ID,suite);
 });
 
 after(()=>{service.close();return rm(root,{recursive:true,force:true});});
@@ -26,19 +26,19 @@ test('validator suite cases reproduce installed helpers: positive, negative, bou
   }
 });
 
-test('seeded intake method runs installed helper cases but stays CANDIDATE without declared claims',async()=>{
+test('seeded intake method declares narrow claims covered by the installed suite and activates',async()=>{
   const imported=service.importSeeds(LISTING_PLUGIN_ID,LISTING_SEED_VERSION,listingSeeds);
   assert.equal(imported.conflicts.length,0);
   const record=service.get(ctx,'dm-listing.intake.methods');
   assert.equal(record.state,'CANDIDATE');
+  assert.ok((record.claims?.length??0)>=3,'intake 种子必须声明可复现窄声明');
   const receipt=await service.validate(ctx,'dm-listing.intake.methods',record.revision,'dm-listing.intake-suite');
   assert.equal(receipt.passed,true);
-  assert.equal(receipt.validationScope,'TOOL_REGRESSION_ONLY');
-  assert.equal(receipt.state,'CANDIDATE');
-  assert.ok(receipt.results.length>=3);
-  assert.ok(receipt.results.every(r=>r.passed));
-  // Helper regression passing is not evidence that the wide method text is correct.
-  assert.equal(service.search(ctx,{topics:['intake']}).total,0);
+  assert.equal(receipt.validationScope,'CONTENT_CLAIMS');
+  assert.equal(receipt.state,'ACTIVE');
+  assert.deepEqual(receipt.claims.uncovered,[]);
+  // 激活后默认检索可见；验证范围以回执为准，宽方法正文未被证明。
+  assert.equal(service.search(ctx,{topics:['intake']}).total,1);
 });
 
 test('claims fully covered by the installed suite activate; uncovered claims do not',async()=>{
@@ -93,9 +93,25 @@ test('stale revision is not activated mid-flight',async()=>{
     /KNOWLEDGE_NOT_FOUND/);
 });
 
-test('events feed lists capture and validation-scope history for the seeded method',()=>{
+test('events feed lists capture, activation and validation history for the seeded method',()=>{
   const feed=service.events(ctx,'dm-listing.intake.methods');
   const ops=feed.items.map(e=>e.operation);
-  assert.ok(ops.includes('VALIDATION_SCOPE_INSUFFICIENT'));
-  assert.ok(!ops.includes('ACTIVE'));
+  assert.ok(ops.includes('CANDIDATE_CAPTURED'));
+  assert.ok(ops.includes('ACTIVE'));
+  assert.ok(!ops.includes('VALIDATION_SCOPE_INSUFFICIENT'),'全部窄声明被覆盖时不应出现激活范围不足事件');
+});
+
+test('comparison seed declares claims covered by the comparison suite and activates',async()=>{
+  const imported=service.importSeeds(LISTING_PLUGIN_ID,LISTING_SEED_VERSION,listingSeeds);
+  assert.equal(imported.conflicts.length,0);
+  const record=service.get(ctx,'dm-listing.batch-comparison.methods');
+  assert.equal(record.state,'CANDIDATE');
+  assert.equal(record.claims?.length,5);
+  const receipt=await service.validate(ctx,'dm-listing.batch-comparison.methods',record.revision,'dm-listing.comparison-suite');
+  assert.equal(receipt.passed,true);
+  assert.equal(receipt.validationScope,'CONTENT_CLAIMS');
+  assert.equal(receipt.state,'ACTIVE');
+  assert.deepEqual(receipt.claims.uncovered,[]);
+  // 激活后默认检索可见；验证范围以回执为准，宽方法正文未被证明。
+  assert.equal(service.search(ctx,{topics:['output-qc'],states:['ACTIVE']}).items.some(i=>i.knowledgeId==='dm-listing.batch-comparison.methods'),true);
 });

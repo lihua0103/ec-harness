@@ -32,6 +32,7 @@ const setup = async () => {
   const path = join(root, 'control.sqlite');
   const service = new PlatformControlService(path, executor);
   service.registerApp(draft(), operator);
+  service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
   return { root, path, executor, service };
 };
 

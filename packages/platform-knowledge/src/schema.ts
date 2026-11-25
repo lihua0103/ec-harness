@@ -7,12 +7,36 @@ export interface KnowledgeContext {
   projectId?: string;
   scenario?: string;
   edc?: string;
+  /** 租户与区域（KA07/08）：服务端从 Principal 派生；工具参数只能收窄，永不扩大。 */
+  orgId?: string;
+  region?: string;
+  /** 查询语言面（KA09）：'zh-CN' / 'en-US' 等；缺失时不按语言过滤。 */
+  locale?: string;
+}
+/** 语言面（KA09）：语言与作用域正交；别名只参与检索召回，不替代正文。 */
+export interface KnowledgeI18n {
+  primaryLocale: string;
+  locales: string[];
+  aliases: Record<string, string[]>;
+  translation?: { fromLocale: string; fromRevision: number; state: 'authored' | 'translated' | 'stale' };
+}
+/** 运行事件绑定（KA12）：候选必须带真实 runId 与输入/产物摘要，模型不能自报事件。 */
+export interface KnowledgeEventRef {
+  kind: 'run.failed' | 'program.revised' | 'qc.completed' | 'business.clarified';
+  runId: string;
+  inputDigest?: string;
+  artifactDigest?: string;
+  at?: string;
 }
 export interface KnowledgeDraft {
   knowledgeId: string;
   scope: Scope;
   pluginId?: string;
   projectId?: string;
+  orgId?: string;
+  region?: string;
+  i18n?: KnowledgeI18n;
+  eventRef?: KnowledgeEventRef;
   kind: KnowledgeKind;
   title: string;
   problemSignal: string;
@@ -47,6 +71,18 @@ export interface MethodCase {
   input: unknown;
   expected: unknown;
 }
+export interface ClaimEvidence {
+  /** 该 claim 必须由哪条已安装套件的哪些用例证明。模型不能自行提供 expected 或 execute。 */
+  suiteId: string;
+  suiteVersion: string;
+  caseIds: readonly string[];
+}
+export interface ClaimCoverage {
+  knowledgeId: string;
+  candidateDigest: string;
+  claims: readonly string[];
+  evidence?: readonly ClaimEvidence[];
+}
 export interface ValidationSuite {
   id: string;
   version: string;
@@ -54,7 +90,7 @@ export interface ValidationSuite {
   cases: readonly MethodCase[];
   /** Claims reproduced for one exact normalized candidate draft. A missing or mismatched binding
    *  makes this suite tool-regression-only; bindings are installed metadata, never model input. */
-  coverage?: readonly { knowledgeId: string; candidateDigest: string; claims: readonly string[] }[];
+  coverage?: readonly ClaimCoverage[];
   /** Installed code supplies actual execution; not callable or replaceable from model JSON. */
   execute: (record: Readonly<KnowledgeRecord>, testCase: Readonly<MethodCase>) => Promise<unknown>;
 }
@@ -84,6 +120,58 @@ export function validateContext(context: KnowledgeContext): void {
   if (context.projectId !== undefined) identifier(context.projectId);
   if (context.scenario !== undefined) identifier(context.scenario);
   if (context.edc !== undefined) identifier(context.edc);
+  if (context.orgId !== undefined) identifier(context.orgId);
+  if (context.region !== undefined) identifier(context.region);
+  if (context.locale !== undefined && (typeof context.locale !== 'string' || !/^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})?$/.test(context.locale)))
+    throw new Error('KNOWLEDGE_LOCALE_INVALID');
+}
+/** 租户/区域：可选但一旦提供必须稳定；shared 记录归属平台租户。 */
+function tenantFields(value: KnowledgeDraft, result: Record<string, unknown>): void {
+  if (value.orgId !== undefined) {
+    identifier(value.orgId);
+    result.orgId = value.orgId;
+  }
+  if (value.region !== undefined) {
+    identifier(value.region);
+    result.region = value.region;
+  }
+  if (value.i18n !== undefined) {
+    const i18n = value.i18n;
+    if (!i18n || typeof i18n !== 'object' || Array.isArray(i18n)) throw new Error('KNOWLEDGE_I18N_INVALID');
+    if (!/^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})?$/.test(i18n.primaryLocale ?? '')) throw new Error('KNOWLEDGE_I18N_INVALID');
+    if (!Array.isArray(i18n.locales) || i18n.locales.length > 32 || i18n.locales.some((l) => typeof l !== 'string' || !/^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})?$/.test(l)))
+      throw new Error('KNOWLEDGE_I18N_INVALID');
+    if (!i18n.aliases || typeof i18n.aliases !== 'object' || Array.isArray(i18n.aliases)) throw new Error('KNOWLEDGE_I18N_INVALID');
+    const aliases: Record<string, string[]> = {};
+    for (const [locale, values] of Object.entries(i18n.aliases)) {
+      if (!/^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})?$/.test(locale) || !Array.isArray(values) || values.length > 128 || values.some((v) => typeof v !== 'string' || !v.trim() || v.length > 256))
+        throw new Error('KNOWLEDGE_I18N_INVALID');
+      aliases[locale] = [...new Set(values)];
+    }
+    result.i18n = { primaryLocale: i18n.primaryLocale, locales: [...new Set(i18n.locales)], aliases };
+    if (i18n.translation !== undefined) {
+      const translation = i18n.translation;
+      if (!translation || typeof translation !== 'object' || !/^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})?$/.test(translation.fromLocale ?? '') ||
+        !Number.isSafeInteger(translation.fromRevision) || translation.fromRevision < 1 ||
+        !['authored', 'translated', 'stale'].includes(translation.state))
+        throw new Error('KNOWLEDGE_I18N_INVALID');
+      (result.i18n as KnowledgeI18n).translation = { ...translation };
+    }
+  }
+  if (value.eventRef !== undefined) {
+    const ref = value.eventRef;
+    if (!ref || typeof ref !== 'object' ||
+      !['run.failed', 'program.revised', 'qc.completed', 'business.clarified'].includes(ref.kind) ||
+      typeof ref.runId !== 'string' || !ref.runId || ref.runId.length > 160 ||
+      (ref.inputDigest !== undefined && !/^[a-f0-9]{64}$/.test(ref.inputDigest)) ||
+      (ref.artifactDigest !== undefined && !/^[a-f0-9]{64}$/.test(ref.artifactDigest)) ||
+      (ref.at !== undefined && !Number.isFinite(Date.parse(ref.at))))
+      throw new Error('KNOWLEDGE_EVENT_REF_INVALID');
+    result.eventRef = { kind: ref.kind, runId: ref.runId,
+      ...(ref.inputDigest !== undefined ? { inputDigest: ref.inputDigest } : {}),
+      ...(ref.artifactDigest !== undefined ? { artifactDigest: ref.artifactDigest } : {}),
+      ...(ref.at !== undefined ? { at: ref.at } : {}) };
+  }
 }
 export function normalizeDraft(value: KnowledgeDraft): KnowledgeDraft {
   if (!value || typeof value !== 'object') throw new Error('KNOWLEDGE_DRAFT_INVALID');
@@ -105,6 +193,7 @@ export function normalizeDraft(value: KnowledgeDraft): KnowledgeDraft {
   const result: Record<string, unknown> = { knowledgeId: value.knowledgeId, scope: value.scope, kind: value.kind };
   if (value.pluginId !== undefined) result.pluginId = value.pluginId;
   if (value.projectId !== undefined) result.projectId = value.projectId;
+  tenantFields(value, result);
   for (const key of ['title', 'problemSignal', 'cause', 'method'] as const) {
     const text = value[key];
     if (typeof text !== 'string' || !text.trim() || text.length > 50000) throw new Error('KNOWLEDGE_TEXT_INVALID');

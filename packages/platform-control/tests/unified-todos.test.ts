@@ -72,6 +72,7 @@ const setup = async () => {
     { requireArtifacts: true },
   );
   service.registerApp(draft(), operator);
+  service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
   const work = service.createWork(
     { projectId: 'SYN-001', appId: 'listing', appVersion: '1.0.0', title: '统一待办工作' },
     operator,
@@ -128,7 +129,9 @@ test('the unified todo list aggregates three sources, each keeping its own kind 
     assert.match(receipt.resolveHint, /acknowledge/);
 
     // Each kind disappears exactly when its own resolution act happens — never another kind's.
-    service.recordReviewDecision(review.reviewId, 'APPROVED', '核对通过', review.revision, operator);
+    service.recordReviewDecision(
+      review.reviewId, 'APPROVED', '核对通过', review.revision, review.deliverable!.manifestDigest, operator,
+    );
     assert.equal(service.pendingTodos(operator).some((item) => item.kind === 'review'), false);
     service.acknowledgeDeliveryPackage(pkg.packageId, undefined, service.getDeliveryPackage(pkg.packageId, operator).revision, operator);
     assert.equal(service.pendingTodos(operator).some((item) => item.kind === 'delivery-receipt'), false);

@@ -44,7 +44,8 @@
 ## 4. 事件投影与验证回执
 
 - `captureFromProjection`：去重键 `(eventId, contributor, projectionVersion)`；重复投递返回原结局且不产生新修订；无证据时显式记录 `NO_REUSABLE_CONCLUSION` / `PENDING_ANALYSIS`；修订冲突记 `CONFLICT`，其余暂态失败记 `RETRY_REQUIRED`。投影失败不改写业务 Run 状态。
-- 控制面在 `run.failed` / `run.unknown` 终结时，把 `(runId, pluginId, projectId, inputDigest)` 投影为 `PENDING_ANALYSIS`，供插件智能体后续提出候选。
+- 控制面在 `run.failed` / `run.unknown` 终结时，把 `(runId, pluginId, projectId, inputDigest)` 投影为 `PENDING_ANALYSIS`，供插件智能体后续提出候选；复核决定以 `qc.completed` 投影（事件 ID `review:<reviewId>`）。
+- `platform_knowledge_projections`：按上下文插件只读列出投影台账（`outcome` 可选、`limit` 夹紧到 200），是智能体读取 `PENDING_ANALYSIS` 的入口；读取不产生候选，提出候选仍走 `capture` 与验证器。
 - `validateWithReceipt`：回执绑定请求/候选/套件摘要；重复回执幂等返回原结局；同一请求的第二份不同回执拒绝（`KNOWLEDGE_RECEIPT_ALREADY_APPLIED`）；无 claims、覆盖不足、过期修订、未批准执行器均不激活。
 
 ## 5. 发布覆盖门禁
@@ -64,6 +65,20 @@ node scripts/verify-knowledge-coverage.mjs --release --json --report coverage.js
 
 ## 6. 尚未完成（不得报告为已验证）
 
-- 真实 DSH 宿主双样本（A10–A12）、全插件领域黄金集与负例（A11、A13 的运行部分）。
-- 工作台「知识依据/治理区」界面（撤回、不可用、未绑定分开展示）。
+- 真实 DSH 宿主双样本（A10–A12）与全插件领域质量签收（A11、A13 的运行部分）；黄金集只证明检索能召回声明条目，不证明方法质量。
+- 工作台知识依据区的检索证据部分尚未展示：绑定快照与未绑定状态已可见，但 `evidence.excluded` 只在检索调用返回，需服务端把检索证据随运行保存后才能按撤回/降级分开展示。
 - 身份接线（可信 Principal → 范围声明）的部署配置、验证执行器独立部署与凭据、区域驻留/备份恢复演练（A14、A16）。
+
+已补齐（仅代码与检索层面）：7 个纳管插件均有 v2 定义；平台控制面/知识服务/工作台各自登记运行与故障处置种子，黄金集含负例与边界正例；控制面复核决定以 `qc.completed` 投影到知识服务（`eventId = review:<reviewId>`，同一决定只投一次）；工作台运行详情显示 Run 绑定的知识快照或"未绑定"。
+
+## 7. 学习平台数据面（2026-11-21 增补，ADR-0004）
+
+《DSH 企业智能体持续学习平台开发设计》L1/L2/L3 落地后，本合同扩展以下条目（持久化、授权与包边界变化见 [ADR-0004](adr/ADR-0004-KNOWLEDGE-LEARNING-DATA-PLANE.md)）：
+
+- **个人偏好（§5 preferences.\*）**：值只能来自封闭注册表（`src/preferences.ts`，enum/boolean/locale）；owner 一律从可信身份派生，API 无 owner 参数；版本比较更新（`PREFERENCE_REVISION_STALE` 拒绝最后写入覆盖）；暂停不注入、删除写墓碑（备份恢复不复活）；乙永远读不到甲的条目。
+- **私人方法草稿**：owner 隔离、不入检索面、不进快照，不当作事实或组织标准；删除幂等。
+- **学习个案与提案（§5 learning.proposeFromCase）**：个案幂等键 `(tenant, pluginId, eventId, hypothesisKey)`；提案去项目化**新建**候选（禁 projectId、禁 scope 升级、禁直接 ACTIVE）；eventRef 用个案来源事件的真实 runId（KA12）；幂等键同内容返回原回执、异内容冲突；`NO_REUSABLE` 与 `PENDING` 都是有效结局。
+- **发布清单（§5 release.\*）**：manifest 不可变内容寻址；当前指针 expectedVersion CAS；撤回走台账（新旧 Run 检索均排除 `WITHDRAWN`），回滚只切仍获准清单且不复活撤回条目；技术激活与业务放行分离。
+- **LearningBinding**：`RunRecord.knowledge` 可附加发布指针引用与本人 ACTIVE 偏好引用（只有键与修订，永不携带偏好正文）；快照由服务端按 runRef 解析（`platform_knowledge_search_run`），不信任客户端自带快照。
+- **持久投影（T04）**：控制面终端事实先入 `knowledge_capture_outbox`（幂等键 (kind,eventId)），泵投递 + 有限重试 + 死信 + 人工重放；知识投影失败不改业务 Run 状态。
+- **权威服务面（L1）**：`createKnowledgeServiceServer` 暴露认证 REST 面（偏好/草稿/个案/发布/快照解析）；主体、租户、区域来自验证过的连接（转发头），不来自请求体；越权与不存在对无权限方不可区分。

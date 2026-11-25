@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import {
   evidenceLabel,
   exclusionLines,
+  learningUsageLines,
+  preferenceLines,
+  releaseLine,
   returnedLines,
   snapshotLine,
   type KnowledgeEvidenceView,
@@ -57,4 +60,51 @@ test('exclusions are grouped by reason and never hidden', () => {
 
 test('returned refs are listed for citation reconciliation', () => {
   assert.deepEqual(returnedLines(evidence()), ['dm-listing.pk.common@1']);
+});
+
+test('WITHDRAWN is its own exclusion reason and never merges with revocation', () => {
+  const lines = exclusionLines(evidence({
+    status: 'DEGRADED',
+    excluded: [
+      { knowledgeId: 'k-1', revision: 1, reason: 'WITHDRAWN' },
+      { knowledgeId: 'k-2', revision: 2, reason: 'REVOKED' },
+    ],
+  }));
+  assert.deepEqual(lines, ['已撤回：k-2@2', '发布撤回：k-1@1']);
+});
+
+test('release line: absent binding stays honest, present binding shows version and digest', () => {
+  assert.equal(releaseLine(undefined), null);
+  assert.equal(releaseLine({ snapshotDigest: 'a'.repeat(64), total: 0, pluginId: 'p', boundAt: '' }), null);
+  const line = releaseLine({
+    snapshotDigest: 'a'.repeat(64), total: 1, pluginId: 'p', boundAt: '',
+    release: { releaseId: 'release-1234567890abcdef', version: 3, manifestDigest: 'c'.repeat(64) },
+  });
+  assert.match(line ?? '', /知识发布 v3/);
+  assert.match(line ?? '', /cccccccccccc/);
+});
+
+test('preference usage lines carry keys and revisions only — no private values exist to leak', () => {
+  assert.deepEqual(preferenceLines(undefined), []);
+  const lines = preferenceLines({
+    snapshotDigest: 'a'.repeat(64), total: 0, pluginId: 'p', boundAt: '',
+    preferences: [
+      { key: 'review.summaryOrder', pluginKey: '', revision: 4 },
+      { key: 'output.locale', pluginKey: 'dm-listing', revision: 2 },
+    ],
+  });
+  assert.deepEqual(lines, ['review.summaryOrder（全局） @ 修订 4', 'output.locale（dm-listing） @ 修订 2']);
+});
+
+test('learning usage lines: nothing bound says "未应用个人习惯" instead of pretending', () => {
+  const [fallback] = learningUsageLines(undefined);
+  assert.match(fallback, /未应用个人习惯/);
+  assert.match(fallback, /知识发布清单/);
+  const [release, preference] = learningUsageLines({
+    snapshotDigest: 'a'.repeat(64), total: 0, pluginId: 'p', boundAt: '',
+    release: { releaseId: 'r-1', version: 1, manifestDigest: 'c'.repeat(64) },
+    preferences: [{ key: 'output.locale', pluginKey: '', revision: 1 }],
+  });
+  assert.match(release ?? '', /知识发布 v1/);
+  assert.match(preference ?? '', /output.locale/);
 });

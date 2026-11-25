@@ -6,18 +6,14 @@
  *  the UI can be exercised without claiming a real business release or model call.
  */
 import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { PlatformControlService } from './service.js';
 import { LocalOperatorPolicy, type Principal } from './policy.js';
 import { startWorkbenchServer } from './http.js';
+import { runDoctor } from './doctor.js';
 import type { AppReleaseDraft } from './store.js';
 import { readDeployment } from './deployment.js';
-import { resolveStorePath } from './config.js';
-import { DshProfileExecutor } from './worker.js';
-import { RunScheduler } from './scheduler.js';
-
-const here = fileURLToPath(new URL('.', import.meta.url));
-const repoRoot = resolve(here, '../../..');
+import { defaultControlStorePath, resolveControlHome, resolveStorePath, type Config } from './config.js';
+import { configureControlService, startControlRuntime } from './bootstrap.js';
 
 const args = process.argv.slice(2);
 const arg = (name: string): string | undefined => {
@@ -35,11 +31,13 @@ if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
 // DSH plugin page is the product entry; `--app <dir>` remains an explicit, reversible rollback.
 const appArg = arg('app');
 const appDir = appArg ? resolve(appArg) : undefined;
-const home = process.env.DSH_HOME ?? resolve(repoRoot, '.runtime', 'dsh-home');
+const home = resolveControlHome();
 const deploymentPath = arg('deployment') ?? process.env.PLATFORM_WORKBENCH_DEPLOYMENT;
 const deployment = deploymentPath ? await readDeployment(resolve(deploymentPath)) : null;
 if (deployment && flag('seed')) throw new Error('真实执行配置不能与合成演示目录同时启用。');
-const storePath = resolve(arg('store') ?? (deployment ? resolveStorePath(deployment.config) : resolve(home, 'platform', 'workbench.sqlite')));
+// E0d: one canonical fallback store name. An old `workbench.sqlite` from before the unification
+// stays on disk untouched (no data migration) — it is simply no longer the default entry point.
+const storePath = resolve(arg('store') ?? (deployment ? resolveStorePath(deployment.config) : defaultControlStorePath(home)));
 const principal: Principal = {
   actorId: process.env.PLATFORM_DEV_PRINCIPAL ?? 'session:local-workbench',
   kind: 'operator',
@@ -105,21 +103,27 @@ const syntheticCatalog = {
   ],
 };
 
+const deploymentConfig: Config = deployment?.config ?? {};
 const service = new PlatformControlService(storePath, null, new LocalOperatorPolicy(), {
-  requireArtifacts: deployment?.config.requireArtifacts ?? true,
+  requireArtifacts: deploymentConfig.requireArtifacts ?? true,
+  requireReleaseApproval: deploymentConfig.requireReleaseApproval ?? false,
+  requireModelHealth: deploymentConfig.requireModelHealth ?? false,
+  requireModelApproval: deploymentConfig.requireModelApproval ?? false,
+  ...(deploymentConfig.quotas !== undefined ? { quotas: deploymentConfig.quotas } : {}),
+  ...(deploymentConfig.maxConcurrentRuns !== undefined
+    ? { maxConcurrentRuns: deploymentConfig.maxConcurrentRuns }
+    : {}),
 });
-let stopScheduler: (() => void) | undefined;
-if (deployment?.config.worker) {
+// WP4: shared assembly with the DSH bundle entry — executor registration, knowledge tenant scope
+// and the read-only Run knowledge snapshot source are wired identically for both entries.
+configureControlService(service, deploymentConfig);
+if (deployment) {
   for (const application of deployment.applications) service.registerApp(application, principal);
   service.registerModelCatalog(deployment.catalog, principal);
-  service.setExecutor(new DshProfileExecutor(deployment.config.worker, undefined, {
-    record: (launchId, proven) => service.recordExitEvidence(launchId, proven),
-    read: (launchId) => service.readExitEvidence(launchId),
-  }));
-  stopScheduler = new RunScheduler(service, deployment.config.scheduler?.intervalMs ?? 1000, {
-    actorId: 'service:workbench-scheduler', kind: 'service',
-  }).start();
 }
+// WP4: reconcile-before-schedule, identical to the bundle entry; scheduler-disabled or
+// worker-less configurations start zero dispatch loops.
+const runtime = startControlRuntime(service, deploymentConfig);
 if (flag('seed')) {
   try {
     service.registerApp(syntheticRelease, principal);
@@ -150,13 +154,17 @@ const running = await startWorkbenchServer({
       '模型凭据由执行环境提供，不需要员工在工作目标中填写密钥。',
     ],
   },
+  doctor: async () => runDoctor({
+    storePath,
+    ...(deployment?.config.worker ? { worker: deployment.config.worker } : {}),
+  }),
   port,
 });
 
 console.log(`Workbench ready: ${running.url} (store: ${storePath}, app: ${appDir ?? 'api-only'})`);
 
 const shutdown = async () => {
-  stopScheduler?.();
+  runtime.stop();
   try {
     await running.close();
   } finally {

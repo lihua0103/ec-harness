@@ -1,10 +1,27 @@
 import { randomUUID } from 'node:crypto';
 import { KnowledgeStore } from './store.js';
-import type { CitationRecord, ProjectionOutcome } from './store.js';
+import type { CitationRecord, ProjectionOutcome, ProjectionRecord } from './store.js';
 import { documentEntry } from './corpus.js';
-import { verifySnapshotDigest, type KnowledgeSnapshot } from './snapshot-readonly.js';
+import { readSnapshot, verifySnapshotDigest, type KnowledgeSnapshot } from './snapshot-readonly.js';
 import { KnowledgeAgentRegistry } from './manifest.js';
 import type { ExclusionReason, KnowledgeEvidence, KnowledgeRef } from './evidence.js';
+import {
+  preferenceSchema,
+  validatePreferenceValue,
+  type PersonalDraftRecord,
+  type PersonalSettingRecord,
+  type PreferenceRef,
+} from './preferences.js';
+import {
+  parseLearningCaseSourceEvent,
+  type KnowledgeReleaseEntry,
+  type KnowledgeReleasePointer,
+  type KnowledgeReleaseRecord,
+  type LearningCaseRecord,
+  type LearningCaseSourceEvent,
+  type LearningCaseStatus,
+} from './learning.js';
+import type { KnowledgePrincipal } from './identity-scope.js';
 import {
   bindRequestCandidate,
   caseSetDigest,
@@ -65,6 +82,10 @@ export class KnowledgeService {
   }
   close(): void {
     this.store.close();
+  }
+  /** 库文件路径（快照公式与只读绑定口共用；HTTP /snapshot/resolve 用它读库）。 */
+  get storePath(): string {
+    return this.store.path;
   }
   registerContribution(value: PluginContribution): () => void {
     identifier(value.pluginId);
@@ -267,6 +288,16 @@ export class KnowledgeService {
       return { projectionKey, outcome, duplicate: false, reason };
     }
   }
+  /** M2-02 智能体侧链路：按插件读取最近的投影台账，供智能体把 PENDING_ANALYSIS 事故
+   *  提炼为候选（候选仍走 capture/validate，不可由模型自报通过）。只读，按上下文插件过滤。 */
+  listProjections(
+    context: KnowledgeContext,
+    options: { outcome?: ProjectionOutcome; limit?: number } = {},
+  ): ProjectionRecord[] {
+    validateContext(context);
+    const limit = Math.min(Math.max(Math.trunc(options.limit ?? 50), 1), 200);
+    return this.store.projectionsFor(context.pluginId, limit, options.outcome);
+  }
   importSeeds(pluginId: string, packageVersion: string, records: KnowledgeDraft[]) {
     identifier(pluginId);
     identifier(packageVersion);
@@ -445,6 +476,12 @@ export class KnowledgeService {
         excluded.push({ ...ref, reason: latest.state });
         continue;
       }
+      // 发布撤回（T06）：台账中的 (id, rev) 对新旧 Run 都失效——撤回后不能重取失效正文。
+      const withdrawal = this.store.releaseWithdrawal(ref.knowledgeId, ref.revision);
+      if (withdrawal) {
+        excluded.push({ ...ref, reason: 'WITHDRAWN' });
+        continue;
+      }
       if (states && !states.includes(record.state)) continue;
       if (scenarios && record.scenarios.length && !record.scenarios.some((s) => scenarios.has(s))) continue;
       if (context.edc && record.edc.length && !record.edc.includes(context.edc)) continue;
@@ -480,6 +517,31 @@ export class KnowledgeService {
       searchMode: 'PINNED_SNAPSHOT' as const,
       evidence,
     };
+  }
+  /** 服务端按 runRef 解析快照的接缝（§5 run.bindLearning/knowledge.searchPinned：不信任客户端自带快照）。
+   *  由控制面装配注入（从自身 Run 存储还原绑定）；未注入或 Run 无绑定 → 调用失败，不回落到客户端快照。 */
+  private runBindingResolver?: (runId: string) => { snapshot: KnowledgeSnapshot; context: KnowledgeContext } | undefined;
+  setRunSnapshotResolver(
+    resolver: ((runId: string) => { snapshot: KnowledgeSnapshot; context: KnowledgeContext } | undefined) | undefined,
+  ): void {
+    this.runBindingResolver = resolver;
+  }
+  /** 在服务端还原的 Run 绑定快照内检索。调用方上下文只能收窄：插件/租户/项目必须与绑定一致，
+   *  scenario/edc/locale/query 自由收窄。越界显式失败（KNOWLEDGE_SNAPSHOT_CONTEXT_MISMATCH）。 */
+  searchPinnedForRun(context: KnowledgeContext, runId: string, options: SearchOptions & { topics?: string[] } = {}) {
+    validateContext(context);
+    identifier(runId);
+    const resolved = this.runBindingResolver?.(runId);
+    if (!resolved) throw new Error('KNOWLEDGE_RUN_BINDING_UNAVAILABLE');
+    const bound = resolved.context;
+    if (
+      bound.pluginId !== context.pluginId ||
+      (bound.orgId ?? undefined) !== (context.orgId ?? undefined) ||
+      (bound.region ?? undefined) !== (context.region ?? undefined) ||
+      (bound.projectId ?? undefined) !== (context.projectId ?? undefined)
+    )
+      throw new Error('KNOWLEDGE_SNAPSHOT_CONTEXT_MISMATCH');
+    return this.searchPinned(bound, resolved.snapshot, options);
   }
   /** M1-03：记录答案最终引用了哪些实际返回的修订。引用必须来自同一快照，未引用不冒称采纳。 */
   cite(
@@ -530,6 +592,429 @@ export class KnowledgeService {
     validateContext(context);
     identifier(runId);
     return this.store.citationsForRun(runId);
+  }
+  // ================= L2 个人记忆（§5 preferences.* 操作合同） =================
+  /** owner 永远从可信身份派生；租户来自身份断言（orgId/region），不从参数取。 */
+  private principalTenant(principal: KnowledgePrincipal): { orgId?: string; region?: string } {
+    identifier(principal.actorId);
+    if (principal.orgId !== undefined) identifier(principal.orgId);
+    if (principal.region !== undefined) identifier(principal.region);
+    return {
+      ...(principal.orgId !== undefined ? { orgId: principal.orgId } : {}),
+      ...(principal.region !== undefined ? { region: principal.region } : {}),
+    };
+  }
+  /** 本人偏好清单：乙永远查不到甲的条目——查询键里的 owner 来自身份，API 没有 owner 参数可传。 */
+  preferencesGetMine(principal: KnowledgePrincipal, options: { pluginId?: string } = {}): PersonalSettingRecord[] {
+    const items = this.store.personalSettingsForOwner(this.principalTenant(principal), principal.actorId);
+    if (!options.pluginId) return items;
+    identifier(options.pluginId);
+    return items.filter((item) => item.pluginKey === '' || item.pluginKey === options.pluginId);
+  }
+  /** 保存偏好：值按封闭注册表 schema 校验；版本比较更新（同键过期修订拒绝，不用最后写入覆盖）。
+   *  暂停中的键再次保存即恢复 ACTIVE（本人明确选择）。 */
+  preferencesSetMine(
+    principal: KnowledgePrincipal,
+    input: { key: string; value: unknown; pluginId?: string; expectedRevision: number },
+  ): PersonalSettingRecord {
+    const schema = preferenceSchema(input.key);
+    const value = validatePreferenceValue(schema, input.value);
+    let pluginKey = '';
+    if (input.pluginId !== undefined) {
+      identifier(input.pluginId);
+      if (!schema.pluginScopeAllowed) throw new Error('PREFERENCE_PLUGIN_SCOPE_INVALID');
+      pluginKey = input.pluginId;
+    }
+    if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
+      throw new Error('PREFERENCE_REVISION_INVALID');
+    const tenant = this.principalTenant(principal);
+    return this.store.personalSettingUpsert(
+      { ...tenant, owner: principal.actorId, pluginKey, key: schema.key, value },
+      input.expectedRevision,
+    );
+  }
+  preferencesPauseMine(principal: KnowledgePrincipal, key: string, pluginId?: string): PersonalSettingRecord {
+    return this.preferenceTransition(principal, key, pluginId, 'PAUSED');
+  }
+  /** 删除=墓碑（值清理、备份恢复先重放墓碑）；重复删除幂等返回原墓碑。 */
+  preferencesDeleteMine(principal: KnowledgePrincipal, key: string, pluginId?: string): PersonalSettingRecord {
+    return this.preferenceTransition(principal, key, pluginId, 'DELETED');
+  }
+  private preferenceTransition(
+    principal: KnowledgePrincipal,
+    key: string,
+    pluginId: string | undefined,
+    state: 'PAUSED' | 'DELETED',
+  ): PersonalSettingRecord {
+    const schema = preferenceSchema(key);
+    let pluginKey = '';
+    if (pluginId !== undefined) {
+      identifier(pluginId);
+      if (!schema.pluginScopeAllowed) throw new Error('PREFERENCE_PLUGIN_SCOPE_INVALID');
+      pluginKey = pluginId;
+    }
+    return this.store.personalSettingSetState(this.principalTenant(principal), principal.actorId, pluginKey, schema.key, state);
+  }
+  /** 注入 Run 的受限引用：只含 key/pluginKey/revision，永不携带值（LearningBinding §4）。
+   *  仅 ACTIVE 参与（PAUSED/DELETED 不注入）；全局键与插件覆盖都适用。 */
+  preferencesForRunBinding(principal: KnowledgePrincipal, pluginId: string): PreferenceRef[] {
+    identifier(pluginId);
+    return this.store
+      .personalSettingsForOwner(this.principalTenant(principal), principal.actorId)
+      .filter((item) => item.state === 'ACTIVE' && (item.pluginKey === '' || item.pluginKey === pluginId))
+      .map((item) => ({ key: item.key, pluginKey: item.pluginKey, revision: item.revision }));
+  }
+  // ================= L2 私人方法草稿：私有记录，不当作事实或组织标准 =================
+  personalDraftCreate(
+    principal: KnowledgePrincipal,
+    input: { pluginId?: string; title: string; body: string },
+  ): PersonalDraftRecord {
+    const tenant = this.principalTenant(principal);
+    if (typeof input.title !== 'string' || !input.title.trim() || input.title.length > 200)
+      throw new Error('PERSONAL_DRAFT_INVALID');
+    if (typeof input.body !== 'string' || !input.body.trim() || input.body.length > 50000)
+      throw new Error('PERSONAL_DRAFT_INVALID');
+    if (input.pluginId !== undefined) identifier(input.pluginId);
+    const body = {
+      title: input.title,
+      body: input.body,
+      ...(input.pluginId !== undefined ? { pluginId: input.pluginId } : {}),
+    };
+    return this.store.personalDraftInsert({
+      draftId: randomUUID(),
+      ...tenant,
+      owner: principal.actorId,
+      ...(input.pluginId !== undefined ? { pluginId: input.pluginId } : {}),
+      title: input.title,
+      body: input.body,
+      digest: digest(body),
+    });
+  }
+  personalDraftsListMine(principal: KnowledgePrincipal): PersonalDraftRecord[] {
+    return this.store.personalDraftsForOwner(this.principalTenant(principal), principal.actorId);
+  }
+  personalDraftUpdateMine(
+    principal: KnowledgePrincipal,
+    draftId: string,
+    expectedRevision: number,
+    patch: { title?: string; body?: string },
+  ): PersonalDraftRecord {
+    identifier(draftId);
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) throw new Error('PERSONAL_DRAFT_REVISION_INVALID');
+    const existing = this.store.personalDraftGet(draftId);
+    // 越权与不存在对无权限方不可区分（§5）：owner 不符一律 NOT_FOUND，不泄露存在性。
+    if (!existing || existing.owner !== principal.actorId || existing.state !== 'ACTIVE')
+      throw new Error('PERSONAL_DRAFT_NOT_FOUND');
+    const title = patch.title ?? existing.title;
+    const body = patch.body ?? existing.body;
+    if (typeof title !== 'string' || !title.trim() || title.length > 200) throw new Error('PERSONAL_DRAFT_INVALID');
+    if (typeof body !== 'string' || !body.trim() || body.length > 50000) throw new Error('PERSONAL_DRAFT_INVALID');
+    return this.store.personalDraftUpdate(draftId, principal.actorId, expectedRevision, {
+      title,
+      body,
+      digest: digest({
+        title,
+        body,
+        ...(existing.pluginId !== undefined ? { pluginId: existing.pluginId } : {}),
+      }),
+    });
+  }
+  personalDraftDeleteMine(principal: KnowledgePrincipal, draftId: string): PersonalDraftRecord {
+    identifier(draftId);
+    return this.store.personalDraftDelete(draftId, principal.actorId);
+  }
+  // ================= L3 学习个案与提案（§5 learning.proposeFromCase 行为合同） =================
+  /** 打开个案：幂等键 (tenant, pluginId, eventId, hypothesisKey)；重复打开返回原个案（duplicate=true）。 */
+  learningCaseOpen(
+    context: KnowledgeContext,
+    input: { sourceEvent: LearningCaseSourceEvent; hypothesisKey: string; category?: string },
+  ): { case: LearningCaseRecord; duplicate: boolean } {
+    validateContext(context);
+    const sourceEvent = parseLearningCaseSourceEvent(input.sourceEvent);
+    identifier(input.hypothesisKey);
+    if (
+      input.category !== undefined &&
+      (typeof input.category !== 'string' || !input.category.trim() || input.category.length > 160)
+    )
+      throw new Error('LEARNING_CASE_INVALID');
+    const existing = this.store.learningCaseByEventKey(context, context.pluginId, sourceEvent.eventId, input.hypothesisKey);
+    if (existing) return { case: existing, duplicate: true };
+    const now = new Date().toISOString();
+    const record: LearningCaseRecord = {
+      caseId: randomUUID(),
+      orgId: context.orgId ?? '',
+      region: context.region ?? '',
+      pluginId: context.pluginId,
+      ...(context.projectId !== undefined ? { projectId: context.projectId } : {}),
+      sourceEvent,
+      hypothesisKey: input.hypothesisKey,
+      ...(input.category !== undefined ? { category: input.category } : {}),
+      status: 'PENDING',
+      createdAt: now,
+      updatedAt: now,
+    };
+    try {
+      this.store.learningCaseInsert(record);
+    } catch (error) {
+      // 并发打开同键个案：唯一索引兜底，返回已存在的个案（与投影台账同样的幂等语义）。
+      const raced = this.store.learningCaseByEventKey(context, context.pluginId, sourceEvent.eventId, input.hypothesisKey);
+      if (raced) return { case: raced, duplicate: true };
+      throw error;
+    }
+    return { case: record, duplicate: false };
+  }
+  /** 个案清单：按上下文插件与租户过滤；PENDING/NO_REUSABLE 都是有效结局，不隐瞒。 */
+  learningCases(context: KnowledgeContext, options: { status?: LearningCaseStatus; limit?: number } = {}): LearningCaseRecord[] {
+    validateContext(context);
+    return this.store.learningCasesList(context, context.pluginId, options);
+  }
+  /** 个案处置：无需复用（NO_REUSABLE）与暂挂（PENDING）都是有效结局；已提案个案不可改判。 */
+  learningCaseDispose(
+    context: KnowledgeContext,
+    caseId: string,
+    disposition: 'NO_REUSABLE' | 'PENDING' | 'CONFLICT',
+    reason?: string,
+  ): LearningCaseRecord {
+    validateContext(context);
+    identifier(caseId);
+    const record = this.learningCaseVisible(context, caseId);
+    if (record.status === 'PROPOSED') throw new Error('LEARNING_CASE_ALREADY_PROPOSED');
+    if (!['NO_REUSABLE', 'PENDING', 'CONFLICT'].includes(disposition)) throw new Error('LEARNING_DISPOSITION_INVALID');
+    if (disposition === 'CONFLICT' && (typeof reason !== 'string' || !reason.trim()))
+      throw new Error('LEARNING_DISPOSITION_INVALID');
+    return this.store.learningCaseUpdateStatus(caseId, disposition, record.proposal);
+  }
+  private learningCaseVisible(context: KnowledgeContext, caseId: string): LearningCaseRecord {
+    const record = this.store.learningCaseGet(caseId);
+    if (
+      !record ||
+      record.orgId !== (context.orgId ?? '') ||
+      record.region !== (context.region ?? '') ||
+      record.pluginId !== context.pluginId
+    )
+      throw new Error('LEARNING_CASE_NOT_FOUND');
+    return record;
+  }
+  /** 从个案提出公共候选：去项目化**新建**记录，不原地改可见性；拒绝直接 ACTIVE、拒绝携带项目身份。
+   *  幂等：同幂等键同内容返回原 candidateRef；同键不同内容返回冲突（不用最后写入覆盖）。
+   *  eventRef 用个案来源事件的真实 runId 与摘要（KA12），候选仍是 CANDIDATE，激活仍走 claims/coverage。 */
+  proposeFromCase(
+    context: KnowledgeContext,
+    principal: KnowledgePrincipal,
+    input: {
+      caseId: string;
+      /** 私人贡献必须显式选择（§2 界面例子：先看到将提议的去项目化文本、范围和用途）。 */
+      contributionConfirmed: boolean;
+      idempotencyKey: string;
+      draft: Omit<KnowledgeDraft, 'eventRef' | 'scope' | 'pluginId' | 'projectId'> & { scope?: string; projectId?: string };
+    },
+  ): { knowledgeId: string; revision: number; contentDigest: string; duplicate: boolean; caseId: string } {
+    validateContext(context);
+    identifier(principal.actorId);
+    identifier(input.idempotencyKey);
+    if (input.contributionConfirmed !== true) throw new Error('LEARNING_CONTRIBUTION_NOT_CONFIRMED');
+    const source = this.learningCaseVisible(context, input.caseId);
+    const raw = input.draft as Record<string, unknown>;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('KNOWLEDGE_DRAFT_INVALID');
+    if (raw.state !== undefined) throw new Error('LEARNING_STATE_OVERRIDE_NOT_ALLOWED');
+    if (raw.projectId !== undefined) throw new Error('LEARNING_PROPOSAL_PROJECT_LEAK');
+    if (raw.scope !== undefined && raw.scope !== 'plugin') throw new Error('LEARNING_SCOPE_ESCALATION_NOT_ALLOWED');
+    const normalized = normalizeDraft({
+      ...(raw as unknown as Omit<KnowledgeDraft, 'eventRef' | 'scope' | 'pluginId' | 'projectId'>),
+      scope: 'plugin',
+      pluginId: context.pluginId,
+    });
+    const draftDigest = digest(normalized);
+    // 幂等台账先于个案状态门：同一人工纠错的重复投递（即使个案已转为 PROPOSED）返回原回执（§5），
+    // 相同键不同内容返回冲突——两种情况都不用最后写入覆盖。
+    const tenant = { orgId: context.orgId, region: context.region };
+    const existing = this.store.learningProposalGet(tenant, input.idempotencyKey);
+    if (existing) {
+      if (existing.draftDigest !== draftDigest) throw new Error('LEARNING_PROPOSAL_CONFLICT');
+      return {
+        knowledgeId: existing.knowledgeId,
+        revision: existing.revision,
+        contentDigest: existing.contentDigest,
+        duplicate: true,
+        caseId: existing.caseId,
+      };
+    }
+    // 仅 PENDING 个案可提案：PROPOSED 已绑定候选，NO_REUSABLE/CONFLICT 是显式处置结局
+    //（可先经 learningCaseDispose(…,'PENDING') 复位再提案，处置留台账）。
+    if (source.status !== 'PENDING') throw new Error(source.status === 'PROPOSED' ? 'LEARNING_CASE_ALREADY_PROPOSED' : 'LEARNING_CASE_NOT_OPEN');
+    const candidate = this.capture(context, {
+      ...normalized,
+      eventRef: {
+        kind: source.sourceEvent.kind,
+        runId: source.sourceEvent.runId,
+        ...(source.sourceEvent.inputDigest !== undefined ? { inputDigest: source.sourceEvent.inputDigest } : {}),
+        at: new Date().toISOString(),
+      },
+    });
+    this.store.learningProposalInsert({
+      orgId: context.orgId,
+      region: context.region,
+      idempotencyKey: input.idempotencyKey,
+      caseId: source.caseId,
+      knowledgeId: candidate.knowledgeId,
+      revision: candidate.revision,
+      contentDigest: candidate.contentDigest,
+      draftDigest,
+    });
+    this.store.learningCaseUpdateStatus(source.caseId, 'PROPOSED', {
+      knowledgeId: candidate.knowledgeId,
+      revision: candidate.revision,
+      proposedAt: new Date().toISOString(),
+      proposedBy: principal.actorId,
+    });
+    return {
+      knowledgeId: candidate.knowledgeId,
+      revision: candidate.revision,
+      contentDigest: candidate.contentDigest,
+      duplicate: false,
+      caseId: source.caseId,
+    };
+  }
+  // ================= L3 发布清单（§4 KnowledgeRelease / §5 release.* 行为合同） =================
+  /** 发布：entries 必须是本插件、本租户、当前 ACTIVE 的修订；清单不可变（内容寻址），
+   *  当前指针按 expectedVersion 原子切换。发布角色（授权在控制面）决定目标受众，不凭模型评分放行。 */
+  publishRelease(
+    principal: KnowledgePrincipal,
+    input: {
+      pluginId: string;
+      audience: string;
+      entries: Array<{ knowledgeId: string; revision: number }>;
+      evalReportRef?: string;
+      expectedVersion: number;
+    },
+  ): { release: KnowledgeReleaseRecord; pointer: KnowledgeReleasePointer } {
+    const tenant = this.principalTenant(principal);
+    identifier(input.pluginId);
+    if (typeof input.audience !== 'string' || !input.audience.trim() || input.audience.length > 160)
+      throw new Error('RELEASE_AUDIENCE_INVALID');
+    identifier(input.audience);
+    if (input.evalReportRef !== undefined && (typeof input.evalReportRef !== 'string' || !input.evalReportRef.trim() || input.evalReportRef.length > 512))
+      throw new Error('RELEASE_EVAL_REF_INVALID');
+    if (!Array.isArray(input.entries) || !input.entries.length || input.entries.length > 256)
+      throw new Error('RELEASE_ENTRIES_INVALID');
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 0)
+      throw new Error('RELEASE_VERSION_INVALID');
+    const entries: KnowledgeReleaseEntry[] = [];
+    const seen = new Set<string>();
+    for (const raw of input.entries) {
+      if (typeof raw?.knowledgeId !== 'string' || !Number.isSafeInteger(raw?.revision) || raw.revision < 1)
+        throw new Error('RELEASE_ENTRIES_INVALID');
+      if (seen.has(raw.knowledgeId)) throw new Error('RELEASE_ENTRY_DUPLICATE');
+      seen.add(raw.knowledgeId);
+      const record = this.store.get(raw.knowledgeId, raw.revision);
+      if (!record || record.state !== 'ACTIVE') throw new Error('RELEASE_ENTRY_NOT_ACTIVE');
+      if (record.scope !== 'plugin' || record.pluginId !== input.pluginId) throw new Error('RELEASE_ENTRY_PLUGIN_MISMATCH');
+      if ((record.orgId ?? '') !== (principal.orgId ?? '') || (record.region ?? '') !== (principal.region ?? ''))
+        throw new Error('RELEASE_ENTRY_TENANT_MISMATCH');
+      entries.push({ knowledgeId: record.knowledgeId, revision: record.revision, contentDigest: record.contentDigest });
+    }
+    const currentPointer = this.store.releasePointer(input.pluginId, tenant);
+    const prevReleaseId = currentPointer?.releaseId;
+    const manifestBody = {
+      schemaVersion: 1,
+      pluginId: input.pluginId,
+      orgId: principal.orgId ?? '',
+      region: principal.region ?? '',
+      audience: input.audience,
+      entries,
+      ...(prevReleaseId !== undefined ? { prevReleaseId } : {}),
+    };
+    const manifestDigest = digest(manifestBody);
+    const release: KnowledgeReleaseRecord = {
+      releaseId: randomUUID(),
+      pluginId: input.pluginId,
+      orgId: principal.orgId ?? '',
+      region: principal.region ?? '',
+      audience: input.audience,
+      entries,
+      manifestDigest,
+      ...(input.evalReportRef !== undefined ? { evalReportRef: input.evalReportRef } : {}),
+      approver: principal.actorId,
+      ...(prevReleaseId !== undefined ? { prevReleaseId } : {}),
+      state: 'CURRENT',
+      createdAt: new Date().toISOString(),
+    };
+    return this.store.transaction(() => {
+      this.store.releaseInsert(release);
+      const pointer = this.store.releasePointerSwitch(input.pluginId, tenant, release.releaseId, manifestDigest, input.expectedVersion);
+      return { release, pointer };
+    });
+  }
+  /** 撤回：先阻止新取用（台账逐条失效），返回影响范围供控制面列出待复核 Run；不改写历史事实。 */
+  withdrawRelease(principal: KnowledgePrincipal, releaseId: string, reason: string): {
+    releaseId: string;
+    entries: KnowledgeReleaseEntry[];
+    affectedReleases: string[];
+  } {
+    identifier(principal.actorId);
+    if (typeof reason !== 'string' || !reason.trim() || reason.length > 2000) throw new Error('RELEASE_REASON_INVALID');
+    const release = this.store.releaseGet(releaseId);
+    // 跨租户与不存在对无权限方不可区分。
+    if (!release || release.orgId !== (principal.orgId ?? '') || release.region !== (principal.region ?? ''))
+      throw new Error('RELEASE_NOT_FOUND');
+    if (release.state !== 'CURRENT') throw new Error('RELEASE_ALREADY_WITHDRAWN');
+    this.store.releaseWithdraw(releaseId, release.entries, reason);
+    const withdrawnKeys = new Set(release.entries.map((entry) => `${entry.knowledgeId}@${entry.revision}`));
+    const affectedReleases = this.store
+      .releasesList({ orgId: principal.orgId, region: principal.region }, release.pluginId, { state: 'CURRENT' })
+      .filter((other) => other.releaseId !== releaseId && other.entries.some((entry) => withdrawnKeys.has(`${entry.knowledgeId}@${entry.revision}`)))
+      .map((other) => other.releaseId);
+    return { releaseId, entries: release.entries, affectedReleases };
+  }
+  /** 回滚：只切换到仍获准（CURRENT）的清单；撤回条目不因回滚复活（台账继续生效）。 */
+  rollbackRelease(
+    principal: KnowledgePrincipal,
+    input: { pluginId: string; expectedVersion: number; toReleaseId?: string; reason: string },
+  ): { pointer: KnowledgeReleasePointer; release: KnowledgeReleaseRecord } {
+    this.principalTenant(principal);
+    identifier(input.pluginId);
+    if (typeof input.reason !== 'string' || !input.reason.trim()) throw new Error('RELEASE_REASON_INVALID');
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 0) throw new Error('RELEASE_VERSION_INVALID');
+    const tenant = { orgId: principal.orgId, region: principal.region };
+    const current = this.store.releasePointer(input.pluginId, tenant);
+    if (!current) throw new Error('RELEASE_POINTER_MISSING');
+    if (current.version !== input.expectedVersion) throw new Error('RELEASE_VERSION_STALE');
+    let target: KnowledgeReleaseRecord | undefined;
+    if (input.toReleaseId !== undefined) {
+      identifier(input.toReleaseId);
+      target = this.store.releaseGet(input.toReleaseId);
+      if (!target || target.pluginId !== input.pluginId || target.orgId !== (principal.orgId ?? '') || target.region !== (principal.region ?? ''))
+        throw new Error('RELEASE_NOT_FOUND');
+    } else {
+      const currentRelease = this.store.releaseGet(current.releaseId);
+      target = currentRelease?.prevReleaseId !== undefined ? this.store.releaseGet(currentRelease.prevReleaseId) : undefined;
+    }
+    if (!target) throw new Error('RELEASE_ROLLBACK_TARGET_MISSING');
+    if (target.state !== 'CURRENT') throw new Error('RELEASE_ROLLBACK_TARGET_WITHDRAWN');
+    const pointer = this.store.releasePointerSwitch(input.pluginId, tenant, target.releaseId, target.manifestDigest, input.expectedVersion);
+    return { pointer, release: target };
+  }
+  releasesList(
+    principal: KnowledgePrincipal,
+    input: { pluginId: string; state?: KnowledgeReleaseRecord['state']; limit?: number },
+  ): KnowledgeReleaseRecord[] {
+    identifier(input.pluginId);
+    if (input.state !== undefined && !['CURRENT', 'WITHDRAWN'].includes(input.state)) throw new Error('RELEASE_STATE_INVALID');
+    return this.store.releasesList({ orgId: principal.orgId, region: principal.region }, input.pluginId, {
+      ...(input.state !== undefined ? { state: input.state } : {}),
+      ...(input.limit !== undefined ? { limit: input.limit } : {}),
+    });
+  }
+  releasePointerInfo(principal: KnowledgePrincipal, pluginId: string): KnowledgeReleasePointer | undefined {
+    identifier(pluginId);
+    return this.store.releasePointer(pluginId, { orgId: principal.orgId, region: principal.region });
+  }
+  /** 读取单个发布（租户掩蔽：跨租户与不存在对无权限方不可区分）。 */
+  getRelease(principal: KnowledgePrincipal, releaseId: string): KnowledgeReleaseRecord | undefined {
+    identifier(principal.actorId);
+    const release = this.store.releaseGet(releaseId);
+    if (!release || release.orgId !== (principal.orgId ?? '') || release.region !== (principal.region ?? '')) return undefined;
+    return release;
   }
   /** Runs installed actual tests, binds their results to the exact candidate, and activates only when
    *  every claim the knowledge declares is covered by the installed suite. A suite without coverage is a
@@ -951,26 +1436,18 @@ export class KnowledgeService {
     };
   }
   private createSnapshot(context: KnowledgeContext, runId: string) {
-    const records = this.search(context, { limit: 100 });
-    // Never silently truncate the snapshot when there are more than 100 matching methods.
-    const refs = records.items.map((r) => ({
-      knowledgeId: r.knowledgeId,
-      revision: r.revision,
-      contentDigest: r.contentDigest,
-    }));
-    for (let offset = 100; offset < records.total; offset += 100)
-      refs.push(
-        ...this.search(context, { limit: 100, offset }).items.map((r) => ({
-          knowledgeId: r.knowledgeId,
-          revision: r.revision,
-          contentDigest: r.contentDigest,
-        })),
-      );
-    const cleanContext = Object.fromEntries(Object.entries(context).filter(([, v]) => v !== undefined));
-    const body = { context: cleanContext, records: refs },
-      snapshot = { ...body, snapshotDigest: digest(body) };
-    this.store.saveSnapshot(JSON.stringify([context.pluginId, context.projectId ?? null, runId]), snapshot);
+    // 与只读绑定口共用同一实现（snapshot-readonly.readSnapshot）：发布清单/撤回台账语义一处维护，
+    // tests/snapshot-readonly.test.mjs 保证两条入口逐字节一致。发布指针存在时快照取清单条目
+    // （剔除已撤回/非 ACTIVE/不可见条目）——新 Run 绑定新版，同一旧 Run 不漂移。
+    const resolved = readSnapshot(this.store.path, context);
+    if (!resolved) throw new Error('KNOWLEDGE_SNAPSHOT_UNAVAILABLE');
+    const snapshot = { context: resolved.context, records: resolved.records, snapshotDigest: resolved.snapshotDigest };
+    // 键包含租户（L1）：不同组织同 runId 的快照不得碰撞。
+    this.store.saveSnapshot(this.snapshotKey(context, runId), snapshot);
     return snapshot;
+  }
+  private snapshotKey(context: KnowledgeContext, runId: string): string {
+    return JSON.stringify([context.pluginId, context.projectId ?? null, context.orgId ?? '', context.region ?? '', runId]);
   }
   /** KA16：一致备份（由部署/运维调用；知识服务仍是唯一写者，备份只读源库）。 */
   backup(targetPath: string): void {
@@ -980,6 +1457,6 @@ export class KnowledgeService {
   readSnapshot(context: KnowledgeContext, runId: string): unknown {
     validateContext(context);
     identifier(runId);
-    return this.store.snapshot(JSON.stringify([context.pluginId, context.projectId ?? null, runId]));
+    return this.store.snapshot(this.snapshotKey(context, runId));
   }
 }

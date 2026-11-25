@@ -1,5 +1,5 @@
 /** Generalized correction methods from historical Manual deliveries. Not project-specific rules. */
-export const MANUAL_METHODS_VERSION = '2026.11.09.1';
+export const MANUAL_METHODS_VERSION = '2026.11.23.1';
 export const manualMethods = `# Manual spec 逐列解释与成功纠错方法
 
 这是按需参考的方法，不是强制工作流、固定业务模板或读取权限。当前spec、ALS、数据事实及用户明确裁定优先；历史项目特例不自动适用。
@@ -25,7 +25,7 @@ export const manualMethods = `# Manual spec 逐列解释与成功纠错方法
 2. 范围：访视与字段范围，各来源分别应用，ALL按当前定义处理。
 3. 行逻辑：筛选、去重、保留、标记分开；连接不是自动过滤。
 4. 列处理：每个最终列→源字段/ALS解码/跨表带出/聚合/计算/匹配/标记；保留中间依赖到计算结束，最后才select。
-5. 输出：listing名和顺序、文件/sheet/RDS对象、列序/label/class、缺失和显示、空表、排序及新旧比对。
+5. 输出：listing名和顺序、文件/sheet/RDS对象、列序/label/class、缺失和显示、空表、排序及新旧比对。Manual/Medical 批次交付的主 listing FLAG 列是占位形态（首版全 New）；真实 New/Modified/Old 标记与差异着色在 (vs旧批次) 比对着色件中，该比对件必须由主程序单文件自包含产出，缺比对件时先说明比对环节未执行，不能宣称已完成新旧比对。
 每一条可先自主试写并验证，不以理解矩阵完整作为写码前置门；未解决业务项不能伪报已确认。
 
 ## 三、成功纠错反例
@@ -41,10 +41,12 @@ export const manualMethods = `# Manual spec 逐列解释与成功纠错方法
 - **属性被转换丢失**：类型转换/连接/子集后核对class/label，落盘前按合同恢复属性；RDS可为命名listing列表，不能强制单data.frame或删除全部属性。
 - **输出只测Excel**：Excel显示和RDS对象/class/label是两套合同，分别读回检查；sheet数不等于完整需求覆盖，合并/删除/停用行按活动范围对账。
 - **照搬旧裁定**：实验室长表不拆、固定前导列、Manual_前缀、Content首页样式、审核列、计划外访视OID或主键归一规则，只有项目明确采用才使用，不属于所有Manual项目默认。
+- **占位 FLAG 当比对交付**：主 listing 的 FLAG(New/Modified/Old) 列全 New 可能是首版占位而非比对结果；真实标记与差异着色在 (vs旧批次) 比对件中。缺比对件时说明比对环节未执行，不能宣称已完成新旧比对。
+- **空表引用键列崩溃**：空表产出空序列并正常占位（如 CmpRowSeq integer(0)），不能在空表上引用缺失键列（object 'SUBJID' not found 类崩溃）；空表单是守卫点不是错误。
 - **为对齐golden改spec**：独立QC从当前需求重算，golden只在授权验证阶段使用，不能把预期业务答案供生成代码抄写。历史已验收交付仅可按用户指定作为同项目形态参考；与当前spec冲突需列证据，不一律让旧产物覆盖新需求。
 
 ## 四、服务器R交付核对
-单文件自包含、UTF-8无BOM、只依赖声明R包，无DSH/Node/Python/source本机脚本依赖。项目根/数据日/旧版日/输入/输出通过配置或参数，不硬编码本机路径。独立解压至另一目录从任意cwd实际复跑。失败有原始R诊断和非零退出，不能只看文件存在或“工具调用完成”。输入不误覆盖，临时/输出与源目录分开，已有正式结果默认新版本目录。
+单文件自包含、UTF-8无BOM、只依赖声明R包，无DSH/Node/Python/source本机脚本依赖。项目根/数据日/旧版日/输入/输出通过配置或参数，不硬编码本机路径。独立解压至另一目录从任意cwd实际复跑。失败有原始R诊断和非零退出，不能只看文件存在或“工具调用完成”。预演期间不要用Excel打开输出目录内的xlsx：文件被占用会使保存静默失败。输入不误覆盖，临时/输出与源目录分开，已有正式结果默认新版本目录。
 
 ## 来源
 提炼自旧ec-harness knowledge-v2/manual的requirement-intake、dvp-patterns、pitfalls与output-spec及三个场景交付方法；仅移植通用纠错机制，未复制业务项目常量、个体数据、旧安全拦截或固定样式。工程自动测试只证明知识接入与合成回归，不证明模型已在真实项目逐项理解正确。

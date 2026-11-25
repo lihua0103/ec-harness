@@ -1,7 +1,7 @@
 // 学习闭环：验证器固定用例复现活代码 → 种子 CANDIDATE → validate 激活 → 事件读取。全部纯函数级断言。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { KnowledgeService } from '../../../packages/platform-knowledge/src/service.js';
@@ -17,6 +17,22 @@ test('validator suite cases reproduce installed helpers: positive, negative, bou
   }
 });
 
+test('manifest seed declarations reconcile with seed source (single source of truth)', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../knowledge/manifest.json', import.meta.url), 'utf8')) as {
+    taxonomy: { topics: string[] };
+    seeds: Array<{ knowledgeId: string; topics: string[]; claims?: number }>;
+  };
+  const declared = manifest.seeds.map((seed) => seed.knowledgeId).sort();
+  assert.deepEqual(declared, dvpSeeds.map((seed) => seed.knowledgeId).sort());
+  const topics = new Set(manifest.taxonomy.topics);
+  for (const seed of dvpSeeds) {
+    const entry = manifest.seeds.find((declaredSeed) => declaredSeed.knowledgeId === seed.knowledgeId);
+    assert.ok(entry, `${seed.knowledgeId} 未登记进 manifest`);
+    assert.equal(entry.claims ?? 0, seed.claims?.length ?? 0, `${seed.knowledgeId} claims 计数失谐`);
+    for (const topic of seed.topics) assert.ok(topics.has(topic), `${seed.knowledgeId} 主题 ${topic} 未在 taxonomy 声明`);
+  }
+});
+
 test('contribution registration validates and unregisters', () => {
   const root = mkdtempSync(join(tmpdir(), 'dvp-km-contrib-'));
   const service = new KnowledgeService(join(root, 'knowledge.sqlite'));
@@ -28,7 +44,7 @@ test('contribution registration validates and unregisters', () => {
   } finally { service.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test('seeded DVP methods import as CANDIDATE; helper regression does not activate wide method text', async () => {
+test('seeded template method without claims stays CANDIDATE; narrow-claim seeds activate', async () => {
   const root = mkdtempSync(join(tmpdir(), 'dvp-km-seeds-'));
   const service = new KnowledgeService(join(root, 'knowledge.sqlite'));
   try {
@@ -39,18 +55,25 @@ test('seeded DVP methods import as CANDIDATE; helper regression does not activat
     assert.equal(dvpSeeds.length >= 5, true);
     for (const seed of dvpSeeds) assert.equal(service.get(ctx, seed.knowledgeId).state, 'CANDIDATE');
 
-    const record = service.get(ctx, 'dm-dvp.firewhen.dialect');
-    const receipt = await service.validate(ctx, 'dm-dvp.firewhen.dialect', record.revision, 'dm-dvp.methods-suite');
+    // 宽方法正文（template 四层结构）未声明窄声明：固定用例通过也不能激活。
+    const template = service.get(ctx, 'dm-dvp.template.discipline');
+    assert.equal((template.claims?.length ?? 0), 0);
+    const templateReceipt = await service.validate(ctx, 'dm-dvp.template.discipline', template.revision, 'dm-dvp.methods-suite');
+    assert.equal(templateReceipt.passed, true);
+    assert.equal(templateReceipt.validationScope, 'TOOL_REGRESSION_ONLY');
+    assert.equal(templateReceipt.state, 'CANDIDATE');
+    assert.equal(service.search(ctx, { topics: ['template'] }).total, 0, 'template 无 ACTIVE 方法');
+
+    // firewhen 窄声明全部被套件覆盖 → 激活并可检索
+    const firewhen = service.get(ctx, 'dm-dvp.firewhen.dialect');
+    assert.ok((firewhen.claims?.length ?? 0) >= 5);
+    const receipt = await service.validate(ctx, 'dm-dvp.firewhen.dialect', firewhen.revision, 'dm-dvp.methods-suite');
     assert.equal(receipt.passed, true);
-    assert.equal(receipt.validationScope, 'TOOL_REGRESSION_ONLY');
-    assert.equal(receipt.state, 'CANDIDATE');
-    assert.ok(receipt.results.length >= 3);
-    assert.ok(receipt.results.every((r) => r.passed));
-    // No declared claims: fixed helper tests are not proof that the method text is correct.
-    assert.equal(service.search(ctx, { topics: ['firewhen'] }).total, 0);
-    const events = service.events(ctx, 'dm-dvp.firewhen.dialect');
+    assert.equal(receipt.validationScope, 'CONTENT_CLAIMS');
+    assert.equal(receipt.state, 'ACTIVE');
+    assert.equal(service.search(ctx, { topics: ['firewhen'] }).total, 1);
+    const events = service.events(ctx, 'dm-dvp.template.discipline');
     assert.ok(events.items.some((e) => e.operation === 'VALIDATION_SCOPE_INSUFFICIENT'));
-    assert.equal(events.items.some((e) => e.operation === 'ACTIVE'), false);
   } finally { service.close(); rmSync(root, { recursive: true, force: true }); }
 });
 

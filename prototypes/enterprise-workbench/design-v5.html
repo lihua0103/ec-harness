@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Emerald Workbench · V5 concept</title>
+<link rel="stylesheet" href="design-v5.css" />
+</head>
+<body>
+<div class="app-shell">
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">✦</span><span>EMERALD</span><small>AI WORKSPACE</small></div>
+    <div class="top-context"><span class="context-dot"></span><span>Clinical Data Team</span><span class="slash">/</span><strong id="topView">Today</strong></div>
+    <div class="top-actions"><button class="quiet" id="commandBtn">⌘ K <span>Search or jump</span></button><button class="icon-button" aria-label="Notifications">◌</button><div class="avatar">JD</div></div>
+  </header>
+  <div class="body-grid">
+    <aside class="rail">
+      <button class="rail-home active" data-view="today" aria-label="Today">✦</button>
+      <div class="rail-rule"></div>
+      <button data-view="today" title="Today">⌂</button>
+      <button data-view="projects" title="Projects">▦</button>
+      <button data-view="apps" title="Apps">◇</button>
+      <button data-view="inbox" title="Needs you"><span class="rail-badge">2</span>◒</button>
+      <div class="rail-spacer"></div>
+      <button title="Settings">⚙</button>
+      <div class="presence" title="Connected"></div>
+    </aside>
+    <aside class="work-list">
+      <div class="list-head"><div><p class="eyebrow">WORKSPACE</p><h1>Today</h1></div><button class="new-work" id="newWork">＋ New work</button></div>
+      <div class="list-tabs"><button class="selected">Active <span>4</span></button><button>Recent</button></div>
+      <label class="search"><span>⌕</span><input id="historySearch" placeholder="Find work or ask…" /></label>
+      <section class="list-section"><div class="section-label">Needs your attention <span>2</span></div>
+        <button class="work-row selected" data-title="Archive reconciliation" data-project="EMPA-KIDNEY · Data review" data-state="Waiting for your decision"><span class="work-icon amber">A</span><span class="work-copy"><strong>Archive reconciliation</strong><small>3 items need a decision</small></span><span class="row-time">now</span></button>
+        <button class="work-row" data-title="Baseline QC review" data-project="DAPA-CKD · Quality checks" data-state="Ready to review"><span class="work-icon blue">Q</span><span class="work-copy"><strong>Baseline QC review</strong><small>Result package is ready</small></span><span class="row-time">12m</span></button>
+      </section>
+      <section class="list-section"><div class="section-label">In progress <span>2</span></div>
+        <button class="work-row" data-title="DVP source mapping" data-project="ATG-008 · Drafting" data-state="Working"><span class="work-icon green">D</span><span class="work-copy"><strong>DVP source mapping</strong><small>AI is comparing 68 rules</small></span><span class="row-time">31m</span></button>
+        <button class="work-row" data-title="Protocol change impact" data-project="FEISTY II · Impact scan" data-state="Working"><span class="work-icon purple">P</span><span class="work-copy"><strong>Protocol change impact</strong><small>Run 04 is processing</small></span><span class="row-time">1h</span></button>
+      </section>
+      <section class="list-section recent-list"><div class="section-label">History <button class="small-link">View all</button></div>
+        <button class="history-row" data-title="Listing derivation notes"><span>Listing derivation notes</span><small>Yesterday</small></button>
+        <button class="history-row" data-title="SAP endpoint check"><span>SAP endpoint check</span><small>Nov 20</small></button>
+      </section>
+      <footer class="list-footer"><div class="mini-avatar">JD</div><div><strong>Jinghua Ding</strong><small>Research data science</small></div><button>•••</button></footer>
+    </aside>
+    <main class="chat-surface">
+      <div class="chat-header"><div><div class="chat-kicker"><span class="live-dot"></span><span id="projectName">EMPA-KIDNEY · Data review</span></div><h2 id="chatTitle">Archive reconciliation</h2></div><div class="chat-head-actions"><button class="ghost">Share</button><button class="ghost">•••</button></div></div>
+      <div class="chat-tabs"><button class="active">Conversation</button><button>Activity <span>7</span></button><button>Files <span>3</span></button><button>Results</button><button class="more-tab">＋</button></div>
+      <div class="conversation" id="conversation">
+        <div class="date-line">Today · 09:42</div>
+        <div class="message user"><div class="message-avatar">JD</div><div><div class="message-meta">You <span>09:42</span></div><p>Reconcile the archive checklist against the protocol and SAP. Keep missing source dates visible; do not infer them.</p><div class="attachment"><span>▤</span><div><strong>archive-checklist.xlsx</strong><small>Input baseline · version 2</small></div><span class="file-state">linked</span></div></div></div>
+        <div class="message agent"><div class="agent-avatar">✦</div><div><div class="message-meta">Emerald agent <span>09:44 · streaming</span></div><p>I checked the protocol section 4 and SAP 2.1. The first two batches match. Three records in batch 3 have no consent date in the source.</p><div class="progress"><span class="progress-mark">✓</span><div><strong>Source cross-check complete</strong><small>214 items verified · 3 exceptions carried forward</small></div><button>View evidence</button></div></div></div>
+        <div class="decision"><div class="decision-label"><span class="decision-dot"></span>Decision needed</div><h3>How should missing consent dates be recorded?</h3><p>Emerald will continue after this choice. The original source value remains unchanged.</p><div class="decision-actions"><button>Keep as missing</button><button>Mark for follow-up</button><button class="outline">Ask me later</button></div></div>
+      </div>
+      <div class="composer-wrap"><div class="composer"><button class="composer-add">＋</button><textarea rows="1" placeholder="Message Emerald…"></textarea><div class="composer-bottom"><span>Emerald agent · V4.1 Flash <span class="saved">· Saved</span></span><div><button class="composer-tool">⌘ ↵</button><button class="send">↑</button></div></div></div><p class="composer-note">Emerald can make mistakes. Review important results before delivery.</p></div>
+    </main>
+    <aside class="context-panel"><div class="context-head"><div><p class="eyebrow">WORK CONTEXT</p><h3>Archive reconciliation</h3></div><button class="close-context">×</button></div><div class="context-state"><span class="state-dot amber-dot"></span><div><strong>Waiting for your decision</strong><small>Run 07 · Updated just now</small></div></div><section class="context-block"><div class="block-title">What Emerald is doing <span>⌄</span></div><div class="timeline"><div class="timeline-item done"><i>✓</i><div><strong>Inputs confirmed</strong><small>archive-checklist.xlsx · v2</small></div></div><div class="timeline-item done"><i>✓</i><div><strong>Source cross-check</strong><small>214 items verified</small></div></div><div class="timeline-item current"><i>!</i><div><strong>Waiting for your choice</strong><small>3 records held safely</small></div></div><div class="timeline-item"><i>4</i><div><strong>Package result</strong><small>Will resume after decision</small></div></div></div></section><section class="context-block"><div class="block-title">Current inputs <button class="small-link">Change</button></div><div class="context-file"><span class="file-icon">▤</span><div><strong>archive-checklist.xlsx</strong><small>Input baseline 2 · 24 KB</small></div></div><div class="context-file"><span class="file-icon doc">▤</span><div><strong>protocol-section-4.pdf</strong><small>Reference · 12 pages</small></div></div></section><section class="context-block"><div class="block-title">Delivery pointer</div><div class="pointers"><div><span>Editing</span><strong>Baseline 2</strong></div><div><span>Latest result</span><strong>Run 07</strong></div><div><span>Accepted</span><strong>None yet</strong></div></div></section><button class="expert-link">Open technical details <span>↗</span></button></aside>
+  </div>
+</div>
+<div class="command-palette" id="palette" hidden><div class="palette-backdrop"></div><div class="palette-box"><div class="palette-input">⌕ <input placeholder="Search work, project, app…" autofocus /></div><p>Jump to</p><button>Archive reconciliation <small>Active · EMPA-KIDNEY</small><kbd>↵</kbd></button><button>Baseline QC review <small>Ready to review · DAPA-CKD</small><kbd>↵</kbd></button><button>Applications <small>Browse approved capabilities</small><kbd>⌘ 2</kbd></button></div></div>
+<script src="/design-v5.js"></script>
+</body></html>

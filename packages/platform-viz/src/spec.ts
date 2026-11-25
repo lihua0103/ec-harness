@@ -178,6 +178,11 @@ export function columnOf(dataset: Dataset, key: string): DatasetColumn {
 
 const NUMERIC_AGGREGATES: Aggregate[] = ['SUM', 'AVG', 'MIN', 'MAX'];
 
+/** 聚合名大小写不敏感；未声明默认 SUM。 */
+export function normalizeAggregate(value: unknown): Aggregate {
+  return String(value ?? 'SUM').trim().toUpperCase() as Aggregate;
+}
+
 function checkSlotColumn(dataset: Dataset, key: string | undefined, field: string, numeric: boolean): void {
   if (!key) return;
   const column = columnOf(dataset, key);
@@ -227,7 +232,7 @@ export function validateSpec(spec: ChartSpec, datasets: Dataset[]): ChartSpec {
   checkSlotColumn(dataset, slots.target, 'target', false);
   for (const key of slots.detail ?? []) checkSlotColumn(dataset, key, 'detail', false);
   for (const value of values) {
-    const aggregate = value.aggregate ?? 'SUM';
+    const aggregate = normalizeAggregate(value.aggregate);
     if (!['SUM', 'AVG', 'COUNT', 'MIN', 'MAX'].includes(aggregate)) {
       fail('AGGREGATE_UNKNOWN', `${spec.id}/${value.column}/${aggregate}`);
     }

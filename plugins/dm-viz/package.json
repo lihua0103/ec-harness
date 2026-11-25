@@ -1,6 +1,6 @@
 {
   "name": "@ec-clinical/dsh-dm-viz",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "description": "临床图表设计与交付：设计稿→图表规格与布局→系统图表页→逐图验收证据。输出为配置候选，需业务验收。",
   "type": "module",
   "main": "./lib/index.js",

@@ -15,6 +15,7 @@ const setup = async () => {
   const root = await mkdtemp(join(tmpdir(), 'platform-work-inputs-'));
   const service = new PlatformControlService(join(root, 'control.sqlite'));
   service.registerApp(draft(), operator);
+  service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
   const api = await startWorkbenchServer({ service, authenticate: () => operator });
   const work = service.createWork(
     { projectId: 'SYN-001', appId: 'listing', appVersion: '1.0.0', title: '输入批次工作' },
@@ -98,6 +99,7 @@ test('a service principal cannot append input batches for an operator', async ()
   const service = new PlatformControlService(join(root, 'control.sqlite'));
   try {
     service.registerApp(draft(), operator);
+    service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
     const work = service.createWork(
       { projectId: 'SYN-001', appId: 'listing', appVersion: '1.0.0', title: '越权输入' },
       operator,

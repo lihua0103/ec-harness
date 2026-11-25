@@ -1,10 +1,12 @@
 name: verify
 
-# Guard lane runs on every push/PR and needs no dependency installation.
+# Guard lane runs on every push/PR on BOTH operating systems and needs no dependency
+# installation (WP5: Windows re-verifies the daily CLI workflow; Linux is the reference CI).
 # Full lane is manual (workflow_dispatch): it must fetch and build the pinned
-# upstream DSH checkout and provision R before package verification can run,
-# and has not yet been executed on a hosted runner — do not treat its
-# presence as evidence that the full pipeline is green.
+# upstream DSH checkout and provision R before package verification can run.
+# Neither full lane has been executed on a hosted runner yet — do not treat their
+# presence as evidence that the full pipeline is green; the merge gate requires a
+# recorded run report per the release contract.
 on:
   push:
     branches: [main]
@@ -16,8 +18,12 @@ env:
 
 jobs:
   guard:
-    name: development standard guard
-    runs-on: ubuntu-latest
+    name: development standard guard (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -29,7 +35,7 @@ jobs:
         run: node scripts/check-development-standard.mjs --self-test
 
   full:
-    name: full package verification (manual)
+    name: full package verification (manual, linux reference)
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -68,4 +74,55 @@ jobs:
           DSH_LISTING_R_EXECUTABLE: /usr/bin/Rscript
           DSH_LISTING_R_HOME: /usr/lib/R
           DSH_LISTING_R_KIND: Rscript
+        run: node scripts/verify-all.cjs
+
+  full-windows:
+    name: full package verification (manual, windows CLI workflow)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.9
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.28.5
+      - name: Fetch pinned upstream DSH checkout
+        shell: bash
+        run: |
+          mkdir -p upstream
+          git init upstream/deepseek-harness-git
+          git -C upstream/deepseek-harness-git remote add origin https://github.com/deepseek-ai/deepseek-harness.git
+          git -C upstream/deepseek-harness-git fetch --depth=1 origin "$UPSTREAM_COMMIT"
+          git -C upstream/deepseek-harness-git checkout FETCH_HEAD
+      - name: Install and build upstream DSH
+        working-directory: upstream/deepseek-harness-git
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+      - name: Install R for Listing synthetic execution tests
+        shell: pwsh
+        run: |
+          choco install r.project -y --no-progress
+          $rscript = Join-Path $env:ProgramFiles 'R\R-4.5.1\bin\Rscript.exe'
+          if (-not (Test-Path $rscript)) { $rscript = (Get-ChildItem (Join-Path $env:ProgramFiles 'R') -Filter Rscript.exe -Recurse | Select-Object -First 1).FullName }
+          "DSH_LISTING_R_EXECUTABLE=$rscript" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DSH_LISTING_R_HOME=$((Split-Path (Split-Path $rscript)))" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DSH_LISTING_R_KIND=Rscript" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & $rscript -e "install.packages(c('haven','jsonlite'), repos='https://cloud.r-project.org')"
+      - name: Install each package
+        shell: pwsh
+        run: |
+          Get-ChildItem packages, plugins -Directory | ForEach-Object {
+            if (Test-Path (Join-Path $_.FullName 'package.json')) {
+              Push-Location $_.FullName
+              try { pnpm install --frozen-lockfile } finally { Pop-Location }
+            }
+          }
+      - name: Verify all packages
+        # Windows npm child processes can fail to resolve Node from an inherited PATH; the
+        # runner's setup-node layout is known-good, but the failure mode is recorded here so a
+        # first failure keeps its evidence instead of being silently retried (WP0 note).
         run: node scripts/verify-all.cjs

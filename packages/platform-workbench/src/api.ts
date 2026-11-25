@@ -13,6 +13,8 @@ export interface WorkbenchItem {
   appId: string;
   appVersion: string;
   state: 'ACTIVE' | 'ARCHIVED';
+  /** The employee's recorded goal sentence (workbench bootstrap/list carry it verbatim). */
+  goal?: string;
   updatedAt?: string;
 }
 
@@ -73,7 +75,9 @@ export interface RunDetail {
   knowledge?: RunKnowledgeBinding;
 }
 
-/** The read-only knowledge snapshot a run was created with (never a live lookup). */
+/** The read-only knowledge snapshot a run was created with (never a live lookup).
+ *  LearningBinding（开发设计 §4）：release 为发布清单指针引用；preferences 为本人偏好的受限引用
+ *  （只有键与修订）——私有偏好值永不进入共享运行记录。 */
 export interface RunKnowledgeBinding {
   snapshotDigest: string;
   total: number;
@@ -81,6 +85,20 @@ export interface RunKnowledgeBinding {
   projectId?: string;
   boundAt: string;
   records?: Array<{ knowledgeId: string; revision: number; contentDigest: string }>;
+  release?: { releaseId: string; version: number; manifestDigest: string };
+  preferences?: Array<{ key: string; pluginKey: string; revision: number }>;
+}
+
+/** L2 个人记忆（我的习惯）：服务端按主体持久化的类型化偏好。值是封闭注册表的标量。 */
+export interface PersonalPreferenceItem {
+  orgId?: string;
+  region?: string;
+  pluginKey: string;
+  key: string;
+  revision: number;
+  value: string | boolean | null;
+  state: 'ACTIVE' | 'PAUSED';
+  updatedAt: string;
 }
 
 export interface InputCommitItem {
@@ -223,6 +241,16 @@ export interface ModelCatalog {
   runtimeBundleDigest: string;
   defaultSelectionId: string | null;
   entries: ModelEntry[];
+}
+
+/** 数据安全开关状态（GET/PUT /api/data-boundary）。dataSecurity=true：脱敏边界生效。 */
+export interface DataBoundaryState {
+  dataSecurity: boolean;
+  file: string;
+  /** 开关文件是否存在；不存在时按开启处理。 */
+  exists: boolean;
+  /** 改后需重启 WebUI，插件工具的说明才完全随开关更新。 */
+  restartRequired: boolean;
 }
 
 /** Saved default model preference of the authenticated employee. */
@@ -466,6 +494,14 @@ export class PlatformApiError extends Error {
     super(detail ? `${code}: ${detail}` : code);
     this.name = 'PlatformApiError';
   }
+}
+
+/** One human message for any failure a shell surface reports: a control-plane error carries its
+ *  own code, anything else is a generic unavailable — never a fabricated success. Shared by the
+ *  page shell and the work-index hook so both name failures the same way. */
+export function errorText(reason: unknown): string {
+  if (reason instanceof PlatformApiError) return reason.message;
+  return reason instanceof Error ? reason.message : 'WORKBENCH_UNAVAILABLE';
 }
 
 export interface FetchLike {
@@ -857,6 +893,16 @@ export class WorkbenchApi {
     return this.call('GET', `/api/works/${encodeURIComponent(workId)}/submissions`, undefined, signal) as Promise<{ items: SubmissionItem[] }>;
   }
 
+  /** 数据安全开关（与模型无关，由用户自己决定开/关）。restartRequired：插件工具的说明在插件加载时选定，
+   *  改后需重启 WebUI 才完全生效。文件 `.runtime/data-boundary.json` 与 dm-dvp 插件、命令行脚本共用。 */
+  dataBoundary(signal?: AbortSignal): Promise<DataBoundaryState> {
+    return this.call('GET', '/api/data-boundary', undefined, signal) as Promise<DataBoundaryState>;
+  }
+
+  setDataBoundary(dataSecurity: boolean, signal?: AbortSignal): Promise<DataBoundaryState> {
+    return this.call('PUT', '/api/data-boundary', { dataSecurity }, signal) as Promise<DataBoundaryState>;
+  }
+
   /** Model catalog and the signed-in employee's saved default preference. */
   models(signal?: AbortSignal): Promise<{ catalog: ModelCatalog | null; preference: ModelPreference }> {
     return this.call('GET', '/api/models', undefined, signal) as Promise<{ catalog: ModelCatalog | null; preference: ModelPreference }>;
@@ -865,6 +911,34 @@ export class WorkbenchApi {
   /** Persist the caller's own default model; it never changes another employee's default. */
   setModelPreference(selectionId: string, signal?: AbortSignal): Promise<ModelPreference> {
     return this.call('PUT', '/api/models/preference', { selectionId }, signal) as Promise<ModelPreference>;
+  }
+
+  // ── L2 个人记忆（我的习惯）：owner 由服务端从登录身份派生，API 没有 owner 参数 ──
+  preferences(signal?: AbortSignal): Promise<{ items: PersonalPreferenceItem[] }> {
+    return this.call('GET', '/api/preferences', undefined, signal) as Promise<{ items: PersonalPreferenceItem[] }>;
+  }
+
+  /** 保存偏好（版本比较更新）：expectedRevision 过期时服务端返回 409 PREFERENCE_REVISION_STALE。 */
+  setPreference(
+    key: string,
+    value: unknown,
+    options: { pluginId?: string; expectedRevision?: number } = {},
+    signal?: AbortSignal,
+  ): Promise<PersonalPreferenceItem> {
+    return this.call('PUT', `/api/preferences/${encodeURIComponent(key)}`, {
+      value,
+      ...(options.pluginId !== undefined ? { pluginId: options.pluginId } : {}),
+      expectedRevision: options.expectedRevision ?? 0,
+    }, signal) as Promise<PersonalPreferenceItem>;
+  }
+
+  pausePreference(key: string, pluginId?: string, signal?: AbortSignal): Promise<PersonalPreferenceItem> {
+    return this.call('POST', `/api/preferences/${encodeURIComponent(key)}/pause`, pluginId ? { pluginId } : {}, signal) as Promise<PersonalPreferenceItem>;
+  }
+
+  deletePreference(key: string, pluginId?: string, signal?: AbortSignal): Promise<PersonalPreferenceItem> {
+    const query = pluginId ? `?pluginId=${encodeURIComponent(pluginId)}` : '';
+    return this.call('DELETE', `/api/preferences/${encodeURIComponent(key)}${query}`, undefined, signal) as Promise<PersonalPreferenceItem>;
   }
 
   projectWorkspaces(projectId: string, signal?: AbortSignal): Promise<{ items: WorkspaceItem[] }> {

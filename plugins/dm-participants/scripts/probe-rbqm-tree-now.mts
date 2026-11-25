@@ -1,0 +1,10 @@
+import { readFile } from 'node:fs/promises';
+import { RbqmClient } from '../../../packages/platform-viz/src/index.js';
+type Json = Record<string, unknown>;
+const parse = (t: string) => Object.fromEntries(t.split(/\r?\n/).map((l) => /^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(l.trim())).filter(Boolean).map((m) => [m![1]!, m![2]!.trim().replace(/^['"]|['"]$/g, '')]));
+const envs = parse(await readFile('D:/project/company/RBQM/.env.rbqm-envs', 'utf8'));
+const c = new RbqmClient({ apiBase: 'http://localhost:3333/api/v1', uploadBase: 'http://10.111.6.155:2222', userName: envs['RBQM_INTRANET_USER'] ?? '', password: envs['RBQM_INTRANET_PASSWORD'] ?? '' });
+await c.login();
+await c.enterEnvironment('215');
+const names = await c.listDatasetNames();
+console.log('tables(', names.length, '):', names.filter((n) => /PT_|WIDE/.test(n)).join(' | ') || '(none PT_)');

@@ -3,6 +3,7 @@
  * 渲染壳是验收面：打开即按配置渲染，不依赖后端接口。
  */
 import { buildOption } from './option.js';
+import { VizError } from './errors.js';
 import {
   columnOf,
   datasetOf,
@@ -42,7 +43,7 @@ export interface RenderModel {
 
 function specOf(bundle: Bundle, specId: string): ChartSpec {
   const spec = bundle.specs.find((item) => item.id === specId);
-  if (!spec) throw new Error(`SPEC_NOT_FOUND ${specId}`);
+  if (!spec) throw new VizError('SPEC_NOT_FOUND', specId);
   return spec;
 }
 

@@ -8,6 +8,7 @@
  *  A missing translation returns the zh-CN text, never a key or an empty string, so a partially
  *  translated shell stays usable.
  */
+import { useSyncExternalStore } from 'react';
 
 export type Locale = 'zh-CN' | 'en-US';
 
@@ -73,6 +74,7 @@ export function setPreferences(patch: Partial<Preferences>): Preferences {
 
 type CopyKey =
   | 'nav.works' | 'nav.sessions' | 'nav.projects' | 'nav.apps' | 'nav.pending' | 'nav.settings'
+  | 'side.expand' | 'side.collapse' | 'side.drawerLabel' | 'side.pendingBadge' | 'home.connDown'
   | 'action.refresh' | 'action.back' | 'action.open' | 'action.create' | 'action.next' | 'action.previous' | 'action.cancel'
   | 'action.openSession' | 'action.viewDetail' | 'action.stop' | 'action.enterChat' | 'action.archive'
   | 'review.title' | 'review.request' | 'review.approve' | 'review.reject'
@@ -128,6 +130,61 @@ type CopyKey =
   | 'home.loaded'
   | 'hint.creatingConversation'
   | 'session.viewTabs'
+  | 'desk.index'
+  | 'desk.filters'
+  | 'desk.rowLabel'
+  | 'desk.current'
+  | 'desk.backToIndex'
+  | 'desk.emptyTitle'
+  | 'brief.project'
+  | 'brief.application'
+  | 'brief.enter'
+  | 'brief.viewRuns'
+  | 'brief.needsReview'
+  | 'brief.recentRun'
+  | 'brief.noRuns'
+  | 'brief.noRunsHint'
+  | 'brief.runsError'
+  | 'brief.artifacts'
+  | 'brief.artifactCount'
+  | 'brief.noArtifacts'
+  | 'brief.noRunArtifacts'
+  | 'brief.artifactsError'
+  | 'brief.download'
+  | 'brief.downloadFailed'
+  | 'brief.sealed'
+  | 'brief.unsealed'
+  | 'brief.genericFile'
+  | 'brief.latestActivity'
+  | 'brief.noEvents'
+  | 'brief.noActivity'
+  | 'brief.eventsError'
+  | 'brief.pending'
+  | 'brief.archived'
+  | 'brief.showAll'
+  | 'brief.collapse'
+  | 'brief.generated'
+  | 'brief.format.workbook'
+  | 'brief.format.table'
+  | 'brief.format.document'
+  | 'brief.format.script'
+  | 'brief.format.file'
+  | 'action.retry'
+  | 'desk.crumbDetail'
+  | 'desk.crumbSession'
+  | 'desk.searchGlobal'
+  | 'desk.tools'
+  | 'desk.menuRefresh'
+  | 'desk.menuCompact'
+  | 'desk.menuExpert'
+  | 'desk.connected'
+  | 'desk.brandSuffix'
+  | 'rail.currentRun'
+  | 'rail.pending'
+  | 'rail.files'
+  | 'rail.runs'
+  | 'rail.launch'
+  | 'rail.materials'
   | 'status.QUEUED' | 'status.STARTING' | 'status.RUNNING' | 'status.WAITING_FOR_USER'
   | 'status.FINALIZING' | 'status.CANCELLING' | 'status.SUCCEEDED' | 'status.FAILED'
   | 'status.CANCELLED' | 'status.UNKNOWN';
@@ -202,6 +259,11 @@ const COPY: Record<Locale, Partial<Record<CopyKey, string>>> = {
     'nav.apps': '应用中心',
     'nav.pending': '待我处理',
     'nav.settings': '平台设置',
+    'side.expand': '展开导航',
+    'side.collapse': '收起导航',
+    'side.drawerLabel': '企业导航',
+    'side.pendingBadge': '待我处理 {count} 项',
+    'home.connDown': '平台未连接',
     'action.refresh': '刷新',
     'action.back': '返回',
     'action.open': '打开',
@@ -215,6 +277,22 @@ const COPY: Record<Locale, Partial<Record<CopyKey, string>>> = {
     'action.stop': '请求停止',
     'action.enterChat': '进入对话',
     'action.archive': '归档工作',
+    'action.retry': '重试',
+    'brief.generated': '{time} 生成',
+    'brief.format.workbook': '工作簿',
+    'brief.format.table': '表格',
+    'brief.format.document': '文档',
+    'brief.format.script': '脚本',
+    'brief.format.file': '文件',
+    'desk.crumbDetail': '工作详情',
+    'desk.crumbSession': '工作会话',
+    'desk.searchGlobal': '全局搜索',
+    'desk.tools': '工具菜单',
+    'desk.menuRefresh': '刷新平台数据',
+    'desk.menuCompact': '紧凑布局',
+    'desk.menuExpert': '专家诊断',
+    'desk.connected': '平台已连接',
+    'desk.brandSuffix': '工作台',
     'review.title': '业务复核',
     'review.request': '发起复核',
     'review.approve': '复核通过',
@@ -233,6 +311,45 @@ const COPY: Record<Locale, Partial<Record<CopyKey, string>>> = {
     'label.language': '界面语言',
     'label.timeZone': '时区',
     'hint.creatingConversation': '正在为本工作创建专属对话…',
+    'desk.index': '工作索引',
+    'desk.filters': '筛选',
+    'desk.rowLabel': '查看「{title}」的工作摘要',
+    'desk.current': '当前对话',
+    'desk.backToIndex': '返回工作索引',
+    'desk.emptyTitle': '还没有选择工作',
+    'brief.project': '项目',
+    'brief.application': '专业应用',
+    'brief.enter': '进入工作会话',
+    'brief.viewRuns': '查看运行记录',
+    'brief.needsReview': '待复核',
+    'brief.recentRun': '最近一次运行',
+    'brief.noRuns': '这项工作还没有运行记录。',
+    'brief.noRunsHint': '普通对话没有登记文件是正常情况。',
+    'brief.runsError': '无法定位运行记录',
+    'brief.artifacts': '工作底稿',
+    'brief.artifactCount': '{count} 个文件',
+    'brief.noArtifacts': '本次运行未登记文件。',
+    'brief.noRunArtifacts': '还没有可定位的运行；普通对话没有登记文件是正常情况。',
+    'brief.artifactsError': '无法读取成果',
+    'brief.download': '下载文件',
+    'brief.downloadFailed': '下载失败',
+    'brief.sealed': '已封存',
+    'brief.unsealed': '待封存',
+    'brief.genericFile': '文件',
+    'brief.latestActivity': '最新活动',
+    'brief.noEvents': '该运行还没有记录事件。',
+    'brief.noActivity': '有运行记录后，这里会显示最新活动。',
+    'brief.eventsError': '无法读取活动',
+    'brief.pending': '待你处理',
+    'brief.archived': '这项工作已归档；记录与成果仍可查看。',
+    'brief.showAll': '查看全部 {count} 项',
+    'brief.collapse': '收起',
+    'rail.currentRun': '当前运行',
+    'rail.pending': '待处理',
+    'rail.files': '文件成果',
+    'rail.runs': '运行记录',
+    'rail.launch': '发起执行',
+    'rail.materials': '工作资料',
   },
   'en-US': {
     'home.recent': "Recent work",
@@ -290,6 +407,11 @@ const COPY: Record<Locale, Partial<Record<CopyKey, string>>> = {
     'nav.apps': 'Applications',
     'nav.pending': 'Needs me',
     'nav.settings': 'Settings',
+    'side.expand': 'Expand navigation',
+    'side.collapse': 'Collapse navigation',
+    'side.drawerLabel': 'Enterprise navigation',
+    'side.pendingBadge': 'Needs you: {count}',
+    'home.connDown': 'Platform offline',
     'action.refresh': 'Refresh',
     'action.back': 'Back',
     'action.open': 'Open',
@@ -303,6 +425,22 @@ const COPY: Record<Locale, Partial<Record<CopyKey, string>>> = {
     'action.stop': 'Request stop',
     'action.enterChat': 'Open conversation',
     'action.archive': 'Archive work',
+    'action.retry': 'Retry',
+    'brief.generated': 'Generated {time}',
+    'brief.format.workbook': 'Workbook',
+    'brief.format.table': 'Table',
+    'brief.format.document': 'Document',
+    'brief.format.script': 'Script',
+    'brief.format.file': 'File',
+    'desk.crumbDetail': 'Work details',
+    'desk.crumbSession': 'Work conversation',
+    'desk.searchGlobal': 'Global search',
+    'desk.tools': 'Tools menu',
+    'desk.menuRefresh': 'Refresh platform data',
+    'desk.menuCompact': 'Compact layout',
+    'desk.menuExpert': 'Expert diagnostics',
+    'desk.connected': 'Platform connected',
+    'desk.brandSuffix': 'Workspace',
     'review.title': 'Business review',
     'review.request': 'Request review',
     'review.approve': 'Approve',
@@ -321,6 +459,45 @@ const COPY: Record<Locale, Partial<Record<CopyKey, string>>> = {
     'label.language': 'Language',
     'label.timeZone': 'Time zone',
     'hint.creatingConversation': 'Creating a dedicated conversation for this work…',
+    'desk.index': 'Work index',
+    'desk.filters': 'Filters',
+    'desk.rowLabel': 'View the summary of "{title}"',
+    'desk.current': 'Current conversation',
+    'desk.backToIndex': 'Back to the work index',
+    'desk.emptyTitle': 'No work selected',
+    'brief.project': 'Project',
+    'brief.application': 'Application',
+    'brief.enter': 'Enter the work conversation',
+    'brief.viewRuns': 'View run records',
+    'brief.needsReview': 'Review pending',
+    'brief.recentRun': 'Most recent run',
+    'brief.noRuns': 'This work has no run record yet.',
+    'brief.noRunsHint': 'A plain conversation registers no files.',
+    'brief.runsError': 'Could not locate a run record',
+    'brief.artifacts': 'Work files',
+    'brief.artifactCount': '{count} files',
+    'brief.noArtifacts': 'This run registered no files.',
+    'brief.noRunArtifacts': 'No run to locate yet; a plain conversation registers no files.',
+    'brief.artifactsError': 'Could not read the files',
+    'brief.download': 'Download file',
+    'brief.downloadFailed': 'Download failed',
+    'brief.sealed': 'Sealed',
+    'brief.unsealed': 'Not sealed',
+    'brief.genericFile': 'File',
+    'brief.latestActivity': 'Latest activity',
+    'brief.noEvents': 'This run has no recorded events.',
+    'brief.noActivity': 'Activity will appear here once this work has a run.',
+    'brief.eventsError': 'Could not read the activity',
+    'brief.pending': 'Needs your attention',
+    'brief.archived': 'This work is archived; its records and files stay viewable.',
+    'brief.showAll': 'Show all {count}',
+    'brief.collapse': 'Collapse',
+    'rail.currentRun': 'Current run',
+    'rail.pending': 'Needs attention',
+    'rail.files': 'Files',
+    'rail.runs': 'Run records',
+    'rail.launch': 'Start a run',
+    'rail.materials': 'Work materials',
   },
 };
 
@@ -372,4 +549,10 @@ export function formatDate(value: number, preferences: Preferences = current): s
   } catch {
     return new Date(value).toDateString();
   }
+}
+
+/** React binding for the preference store: every `sidebar`/`main` slot occupant renders the
+ *  same locale source, so a language switch re-renders both slots together. */
+export function usePreferences(): Preferences {
+  return useSyncExternalStore(subscribePreferences, getPreferences);
 }
