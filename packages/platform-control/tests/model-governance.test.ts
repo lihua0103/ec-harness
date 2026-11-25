@@ -10,6 +10,7 @@ import type { Principal } from '../src/policy.js';
 import { draft } from './helpers.js';
 
 const operator: Principal = { actorId: 'session:model-gov', kind: 'operator' };
+const approver: Principal = { actorId: 'user:ops-lead', kind: 'operator' };
 const isPlatformError = (code: string) => (error: unknown) =>
   error instanceof PlatformError && error.code === code;
 
@@ -76,20 +77,14 @@ test('an active approval gates the resolved selection, whichever way it was pick
 
     // A selection that is not in the registered catalog cannot be approved.
     assert.throws(
-      () => service.approveModel({ selectionId: 'model.ghost', approvedBy: 'ops' }, operator),
+      () => service.approveModel({ selectionId: 'model.ghost' }, approver),
       isPlatformError('MODEL_APPROVAL_SELECTION_UNKNOWN'),
-    );
-    // Refusals keep the input honest.
-    assert.throws(
-      () => service.approveModel({ selectionId: 'model.flash', approvedBy: '  ' }, operator),
-      isPlatformError('MODEL_APPROVAL_INVALID'),
     );
 
     const approval = service.approveModel({
       selectionId: 'model.flash',
-      approvedBy: 'ops-lead',
       evidence: '评审记录 #12',
-    }, operator);
+    }, approver);
     assert.equal(approval.state, 'ACTIVE');
     assert.equal(approval.revision, 1);
 
@@ -104,7 +99,7 @@ test('an active approval gates the resolved selection, whichever way it was pick
       () => service.createWorkRun(work.workId, { goal: '撤回后' }, operator),
       isPlatformError('MODEL_APPROVAL_REQUIRED'),
     );
-    const regranted = service.approveModel({ selectionId: 'model.flash', approvedBy: 'ops-lead' }, operator);
+    const regranted = service.approveModel({ selectionId: 'model.flash' }, approver);
     assert.equal(regranted.revision, 3);
   } finally {
     service.close();
@@ -125,9 +120,8 @@ test('an expired approval blocks new runs and the record survives a restart', as
     service.registerModelCatalog(catalogDraft(), operator);
     service.approveModel({
       selectionId: 'model.flash',
-      approvedBy: 'ops-lead',
       expiresAt: new Date(Date.now() - 1000).toISOString(),
-    }, operator);
+    }, approver);
     const work = service.createWork(
       { projectId: 'SYN-001', appId: 'listing', appVersion: '1.0.0', title: '过期审批' },
       operator,
@@ -143,7 +137,7 @@ test('an expired approval blocks new runs and the record survives a restart', as
   try {
     const record = reopened.modelApproval('model.flash', operator);
     assert.equal(record?.state, 'ACTIVE');
-    assert.equal(record?.approvedBy, 'ops-lead');
+    assert.equal(record?.approvedBy, 'user:ops-lead');
   } finally {
     reopened.close();
     await rm(root, { recursive: true, force: true });
@@ -157,7 +151,7 @@ test('the model-approval HTTP surface grants, reads, revokes and lists', async (
     const grant = await fetch(`${api.url}/api/models/model.flash/approval`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ approvedBy: 'ops-lead' }),
+      body: JSON.stringify({}),
     });
     assert.equal(grant.status, 201);
     const granted = await grant.json() as { approvalId: string; state: string };
@@ -185,7 +179,7 @@ test('the model-approval HTTP surface grants, reads, revokes and lists', async (
     const unknown = await fetch(`${api.url}/api/models/model.ghost/approval`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ approvedBy: 'ops-lead' }),
+      body: JSON.stringify({}),
     });
     assert.equal(unknown.status, 400);
   } finally {
@@ -203,7 +197,7 @@ test('pendingTodos surfaces an unapproved model only when the deployment gates o
     assert.equal(before[0].id, 'model.flash');
     assert.match(before[0].summary, /MODEL_APPROVAL_REQUIRED/);
     assert.match(before[0].resolveHint, /approval/);
-    gated.service.approveModel({ selectionId: 'model.flash', approvedBy: 'qa' }, operator);
+    gated.service.approveModel({ selectionId: 'model.flash' }, approver);
     assert.equal(
       gated.service.pendingTodos(operator).filter((todo) => todo.kind === 'model-approval').length,
       0,

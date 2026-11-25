@@ -359,7 +359,6 @@ export function createWorkbenchServer(options: WorkbenchApiOptions): Server {
           const body = objectBody(await readBody(req));
           json(res, 201, service.approveModel({
             selectionId: segments[2],
-            approvedBy: body.approvedBy as string,
             ...(body.evidence !== undefined ? { evidence: body.evidence as string } : {}),
             ...(body.expiresAt !== undefined ? { expiresAt: body.expiresAt as string } : {}),
           }, principal));
@@ -592,7 +591,6 @@ export function createWorkbenchServer(options: WorkbenchApiOptions): Server {
             appId: segments[2],
             appVersion: segments[3],
             releaseDigest: body.releaseDigest as string,
-            approvedBy: body.approvedBy as string,
             ...(body.evidence !== undefined ? { evidence: body.evidence as string } : {}),
             ...(body.rollbackTarget !== undefined ? { rollbackTarget: body.rollbackTarget as string } : {}),
             ...(body.expiresAt !== undefined ? { expiresAt: body.expiresAt as string } : {}),

@@ -22,6 +22,7 @@ import { startWorkbenchServer, type RunningWorkbenchApi } from '../src/http.js';
 import { draft } from './helpers.js';
 
 const operator: Principal = { actorId: 'session:w2-root', kind: 'operator' };
+const approver: Principal = { actorId: 'user:qa-lead', kind: 'operator' };
 const alice: Principal = { actorId: 'session:w2-alice', kind: 'operator' };
 const bob: Principal = { actorId: 'session:w2-bob', kind: 'operator' };
 const code = (expected: string) => (error: unknown) =>
@@ -137,8 +138,7 @@ test('R2: per-project catalog paginates only creatable releases and ships bounde
         appId: record.appId,
         appVersion: record.appVersion,
         releaseDigest: record.releaseDigest,
-        approvedBy: 'qa-lead',
-      }, operator);
+      }, approver);
       // Mixed eligibility: app-001 never gets a pointer (not creatable — the detail endpoint
       // must refuse honestly); app-002 gets one and is then security-revoked (a pointer at a
       // revoked release is honestly omitted); app-005 stays pointered but is denied by policy.
@@ -218,8 +218,7 @@ test('R6: a revoked version can never become default; revocation, default switch
         appId: record.appId,
         appVersion: record.appVersion,
         releaseDigest: record.releaseDigest,
-        approvedBy: 'qa-lead',
-      }, operator);
+      }, approver);
     }
     service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
 

@@ -23,3 +23,5 @@ export * from './knowledge-seeds.js';
 export * from './access.js';
 export { createKnowledgeServiceServer, headerIdentityAuthenticator, knowledgeErrorStatus } from './http.js';
 export type { KnowledgeAuthenticator, KnowledgeServiceServerOptions } from './http.js';
+export { ACCEPTANCE_OPS, AcceptanceError, buildAcceptanceSuite, evaluateAcceptance, jsonPointer, loadAcceptanceEvidence } from './acceptance.js';
+export type { AcceptanceCheck, AcceptanceEvidence, AcceptanceGuard, AcceptanceOp, AcceptanceSpec } from './acceptance.js';

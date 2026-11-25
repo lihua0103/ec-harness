@@ -831,8 +831,10 @@ function CommandPalette({ api, open, onClose, onOpenWork, onOpenRun, onNavigate 
     else if (hit.kind === 'app') onNavigate('apps')
   }
   return (
-    <div className="ec-wb-palette-backdrop" onClick={onClose}>
-      <div className="ec-wb-palette" role="dialog" aria-modal="true" aria-label="全局搜索" onClick={(event) => event.stopPropagation()}>
+    // DSH 0.2.2-rc.2 起 macOS Desktop 只在 data-window-drag 行内自动排除控件；本浮层覆盖整个窗口，
+    // 背板与面板自行声明拖拽排除，否则面板落在标题栏拖拽行上时会被拖动窗口（Web 与 Windows 不受影响）。
+    <div className="ec-wb-palette-backdrop" data-window-drag-exclude onClick={onClose}>
+      <div className="ec-wb-palette" role="dialog" aria-modal="true" aria-label="全局搜索" data-window-drag-exclude onClick={(event) => event.stopPropagation()}>
         <input
           ref={inputRef}
           className="ec-wb-input ec-wb-palette-input"

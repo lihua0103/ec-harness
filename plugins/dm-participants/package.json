@@ -1,6 +1,6 @@
 {
   "name": "@ec-clinical/dsh-dm-participants",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "RBQM 参与者档案图表设计与交付：参与者档案设计稿→图表配置与布局→系统图表页→逐图验收证据。数据通道：各家 EDC rawdata→统一清洗→Excel→数据集→builder 渲染。输出为配置候选，需业务验收。",
   "type": "module",
   "main": "./lib/index.js",
@@ -18,7 +18,7 @@
   ],
   "engines": {
     "node": ">=24.9.0",
-    "dsh": "0.2.2-rc.1"
+    "dsh": "0.2.2-rc.5"
   },
   "dsh": {
     "bundle": {
@@ -33,8 +33,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.1.0",
-    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-skill": "0.2.2-rc.1"
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-skill": "0.2.2-rc.5"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "link:../../upstream/deepseek-harness-git/vendor/cordis",

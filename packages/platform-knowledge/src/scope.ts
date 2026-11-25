@@ -138,6 +138,10 @@ export class KnowledgeScopeBoundary {
     return this.service.events(this.context(request), knowledgeId, offset, limit);
   }
   capture(request: ScopeRequest, draft: KnowledgeDraft, expectedRevision = 0) {
+    // `shared` is visible to every plugin, so it is never a tool/model-facing write target: one plugin's
+    // run must not be able to publish to all of them. Shared records only come from trusted platform code
+    // calling the service directly; through this boundary the draft's own scope field cannot escalate.
+    if (draft && draft.scope === 'shared') deny('KNOWLEDGE_SCOPE_ESCALATION');
     return this.service.capture(this.context(request), draft, expectedRevision);
   }
   validate(request: ScopeRequest, knowledgeId: string, revision: number, validatorId: string) {

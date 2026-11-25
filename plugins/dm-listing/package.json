@@ -1,6 +1,6 @@
 {
   "name": "@ec-clinical/dsh-dm-listing",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "临床 Listing：Medical / Manual / Report / PK；真实项目只读工作流、合成执行验证与候选交付，生成物需业务审核。",
   "type": "module",
   "main": "./lib/index.js",
@@ -20,7 +20,7 @@
   ],
   "engines": {
     "node": ">=24.9.0",
-    "dsh": "0.2.2-rc.1"
+    "dsh": "0.2.2-rc.5"
   },
   "dsh": {
     "bundle": {
@@ -45,9 +45,9 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.1.0",
-    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-skill": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-user-questions": "0.2.2-rc.1"
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-skill": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-user-questions": "0.2.2-rc.5"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-client-ui-renderer": "link:../../upstream/deepseek-harness-git/packages/client/ui-renderer",

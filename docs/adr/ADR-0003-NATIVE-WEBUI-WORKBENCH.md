@@ -1,6 +1,7 @@
 # ADR-0003：原生 WebUI 作为企业工作台交互底座（替代"原生界面仅专家辅助入口"）
 
 日期：2026-11-12。状态：**已决策（T01）**；实施状态 T00 完成、T01–T11 未全部完成，见 `docs/native-workbench/STATUS.md`。
+修订：2026-11-25（R3 / P0-5 员工 Web 治理基线）。
 决策人：平台开发。依据：[原生 WebUI 与企业工作台实施任务书](../NATIVE-WEBUI-ENTERPRISE-WORKBENCH-IMPLEMENTATION.md)、[上游能力矩阵](../native-workbench/CONTRACT-MATRIX.md)。
 
 ## 背景
@@ -51,3 +52,15 @@
 - 公开 slot 能否完整截获原生提交并关联企业执行记录（T02 最小实验）。
 - 非 owner 问答/审批参与接缝（当前 BLOCKED 风险）。
 - 跨部署原生连接路由、真实公司认证协议。
+
+## 修订 2026-11-25（R3 / P0-5 员工 Web 治理基线）
+
+**背景**：`employee-web.patch.yml` 仅禁 `ui-sidebar`；web 宿主 agent 仍可用 `tool-plugin-manager`/`tool-schedule`/`command-goal`/`tool-goal`（来自 `preset-standard` 的 preset 行），HMR 未关——员工可在中央原生会话装卸插件/定时任务/目标，变更落在共享 web profile，下次启动或 HMR 生效，所有员工与运维界面一起变，且不在 Run 治理内。
+
+**决策**：
+1. 员工 Web profile 与运维 Web profile 分离命名（`employee`/`ops`），不共用出厂 `web` profile 代表两个环境。
+2. 员工 Web 叠加层在 `ui-sidebar` 之外，追加禁用 `tool-plugin-manager`/`schedule`/`tool-schedule`/`goal`/`command-goal`/`tool-goal`/`hmr` 七行（agent 侧基线），`apply-employee-web-profile.cjs` 同步幂等合并/回滚。
+3. **UI 隐藏不充当服务端授权**：禁用行只降低默认可达面，服务端授权仍由控制面 policy 与 Run 治理承担；本 ADR 不声称员工 Web 已是安全边界。
+4. 保留中央原生 Chat、授权普通操作与问答体验；窄屏/设置入口由企业导航承载（后续 R3 浏览器实测 WEB-03 补证）。
+
+**后果**：员工 Web 默认不再能装卸插件/设定时任务/续跑 goal；运维 profile 不受影响。回退以移除叠加层行为单位（`--rollback`）。

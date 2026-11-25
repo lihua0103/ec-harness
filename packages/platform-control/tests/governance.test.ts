@@ -10,6 +10,8 @@ import type { Principal } from '../src/policy.js';
 import { draft } from './helpers.js';
 
 const operator: Principal = { actorId: 'session:governance', kind: 'operator' };
+// P0-1 职责分离：审批人必须是与登记人不同的已验证主体。
+const approver: Principal = { actorId: 'user:qa-lead', kind: 'operator' };
 
 class NoopExecutor implements RunExecutor {
   readonly kind = 'noop';
@@ -58,8 +60,7 @@ test('an active approval bound to the exact release digest gates run creation', 
         appId: 'listing',
         appVersion: '1.0.0',
         releaseDigest: 'f'.repeat(64),
-        approvedBy: 'qa-lead',
-      }, operator),
+      }, approver),
       isPlatformError('APP_APPROVAL_DIGEST_MISMATCH'),
     );
 
@@ -67,12 +68,12 @@ test('an active approval bound to the exact release digest gates run creation', 
       appId: 'listing',
       appVersion: '1.0.0',
       releaseDigest: release.releaseDigest,
-      approvedBy: 'qa-lead',
       evidence: 'test-run:42',
       rollbackTarget: '0.9.0',
-    }, operator);
+    }, approver);
     assert.equal(approval.state, 'ACTIVE');
     assert.equal(approval.evidence, 'test-run:42');
+    assert.equal(approval.approvedBy, 'user:qa-lead');
     assert.equal(service.releaseApproval('listing', '1.0.0', operator)?.revision, 1);
 
     const run = service.createRun('listing', '1.0.0', {}, operator);
@@ -98,9 +99,8 @@ test('an expired approval blocks new runs and survives restart', async () => {
       appId: 'listing',
       appVersion: '1.0.0',
       releaseDigest: release.releaseDigest,
-      approvedBy: 'qa-lead',
       expiresAt: new Date(Date.now() - 1000).toISOString(),
-    }, operator);
+    }, approver);
     assert.throws(
       () => service.createRun('listing', '1.0.0', {}, operator),
       isPlatformError('APP_RELEASE_APPROVAL_EXPIRED'),
@@ -110,7 +110,7 @@ test('an expired approval blocks new runs and survives restart', async () => {
   }
   const reopened = new PlatformControlService(path, new NoopExecutor(), undefined, { requireReleaseApproval: true });
   try {
-    assert.equal(reopened.releaseApproval('listing', '1.0.0', operator)?.approvedBy, 'qa-lead');
+    assert.equal(reopened.releaseApproval('listing', '1.0.0', operator)?.approvedBy, 'user:qa-lead');
   } finally {
     reopened.close();
     await rm(root, { recursive: true, force: true });
@@ -125,21 +125,20 @@ test('approval and model-health facts are exposed over the same-origin API', asy
     service.registerApp(draft(), operator);
     service.registerModelCatalog(catalogDraft(), operator);
     const release = service.getApp('listing', '1.0.0', operator);
-    api = await startWorkbenchServer({ service, authenticate: () => operator });
+    api = await startWorkbenchServer({ service, authenticate: () => approver });
 
     const approve = await fetch(`${api.url}/api/apps/listing/1.0.0/approval`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         releaseDigest: release.releaseDigest,
-        approvedBy: 'qa-lead',
         evidence: 'uat-run-7',
       }),
     });
     assert.equal(approve.status, 201);
     const approval = await approve.json() as { state: string; approvedBy: string };
     assert.equal(approval.state, 'ACTIVE');
-    assert.equal(approval.approvedBy, 'qa-lead');
+    assert.equal(approval.approvedBy, 'user:qa-lead');
 
     const read = await fetch(`${api.url}/api/apps/listing/1.0.0/approval`).then((res) => res.json()) as { approval: { evidence: string } };
     assert.equal(read.approval.evidence, 'uat-run-7');

@@ -262,12 +262,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     defineTool({
       name: 'platform_app_approve',
       description:
-        '为已登记发布的精确 releaseDigest 记录部署审批（审批人、证据引用、可选回滚目标与到期时间）。摘要不一致即拒绝：审批的是字节，不是版本名。',
+        '为已登记发布的精确 releaseDigest 记录部署审批（审批人取自已验证主体，证据引用、可选回滚目标与到期时间）。摘要不一致即拒绝；审批人与登记人相同即拒绝（职责分离）。',
       parameters: {
         appId: { ...string, required: true },
         appVersion: { ...string, required: true },
         releaseDigest: { ...string, required: true },
-        approvedBy: { ...string, required: true },
         evidence: string,
         rollbackTarget: string,
         expiresAt: string,
@@ -280,7 +279,6 @@ export function apply(ctx: Context, config: Config = {}): void {
               appId: args.appId,
               appVersion: args.appVersion,
               releaseDigest: args.releaseDigest,
-              approvedBy: args.approvedBy,
               ...(args.evidence !== undefined ? { evidence: args.evidence } : {}),
               ...(args.rollbackTarget !== undefined ? { rollbackTarget: args.rollbackTarget } : {}),
               ...(args.expiresAt !== undefined ? { expiresAt: args.expiresAt } : {}),

@@ -239,7 +239,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     defineTool({
       name: 'platform_knowledge_capture',
       description:
-        '保存项目纠错或通用方法候选，不接受testPassed或直接ACTIVE。draftJson可含claims（可由已安装验证器复现的具体断言）；没有claims的候选不会被激活。业务裁定使用project scope。',
+        '保存项目纠错或通用方法候选，不接受testPassed或直接ACTIVE。draftJson.scope 只能是 plugin 或 project：shared 对所有插件可见，保留给平台可信代码直接写入，经本工具写入一律拒绝（KNOWLEDGE_SCOPE_ESCALATION）；project scope 须与 projectId 参数一致。draftJson可含claims（可由已安装验证器复现的具体断言）；没有claims的候选不会被激活。业务裁定使用project scope。',
       parameters: { ...scope, draftJson: { ...string, required: true }, expectedRevision: { type: 'number' } },
       output,
       execute: async (args) =>

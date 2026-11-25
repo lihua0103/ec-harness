@@ -298,6 +298,22 @@ export class KnowledgeService {
     const limit = Math.min(Math.max(Math.trunc(options.limit ?? 50), 1), 200);
     return this.store.projectionsFor(context.pluginId, limit, options.outcome);
   }
+  /** R5：分析主体认领一条待分析投影（经认证的 principal 派生 claimant，不接受请求体自报）。
+   *  认领后仍需产出候选或显式 NO_REUSABLE_CONCLUSION；outbox delivered 不等于学习完成。 */
+  claimProjection(context: KnowledgeContext, projectionKey: string, principal: KnowledgePrincipal): ProjectionRecord | undefined {
+    validateContext(context);
+    identifier(projectionKey);
+    identifier(principal.actorId);
+    const existing = this.store.projection(projectionKey);
+    if (!existing || existing.pluginId !== context.pluginId) return undefined;
+    this.store.claimProjection(projectionKey, principal.actorId, new Date().toISOString());
+    return this.store.projection(projectionKey);
+  }
+  /** R5 指标：投递数、待分析（未认领）、已认领、候选产出、明确不产出。不把 delivered 当完成。 */
+  projectionMetrics(context: KnowledgeContext): { delivered: number; pendingAnalysis: number; claimed: number; candidate: number; noReusable: number } {
+    validateContext(context);
+    return this.store.projectionMetrics(context.pluginId);
+  }
   importSeeds(pluginId: string, packageVersion: string, records: KnowledgeDraft[]) {
     identifier(pluginId);
     identifier(packageVersion);

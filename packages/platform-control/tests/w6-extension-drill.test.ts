@@ -18,6 +18,7 @@ import type { InputCommit, RunRecord } from '../src/store.js';
 import { draft } from './helpers.js';
 
 const operator: Principal = { actorId: 'session:w6-root', kind: 'operator' };
+const approver: Principal = { actorId: 'user:qa-lead', kind: 'operator' };
 const supervisor: Principal = { actorId: 'service:w6', kind: 'service' };
 const code = (expected: string) => (error: unknown) =>
   error instanceof PlatformError && error.code === expected;
@@ -76,7 +77,7 @@ test('W6/R1+R3: a third synthetic app onboards purely by declaration — catalog
     assert.ok(record.plan.input && /^[a-f0-9]{64}$/.test(record.plan.input.digest), '声明的输入合同进入计划身份');
     assert.deepEqual(record.draft.descriptor.resultViews, application.resultViews);
 
-    service.approveRelease({ appId: record.appId, appVersion: record.appVersion, releaseDigest: record.releaseDigest, approvedBy: 'qa-lead' }, operator);
+    service.approveRelease({ appId: record.appId, appVersion: record.appVersion, releaseDigest: record.releaseDigest }, approver);
     service.setDefaultRelease('ec.synthetic', '0.1.0', { expectedRevision: null }, operator);
 
     const project = service.createProject({ name: '扩展演练项目' }, operator);
@@ -123,7 +124,7 @@ test('W6/R6: default switch then rollback with in-flight runs — only new Work 
     const v2 = { ...draft('listing', '2.0.0'), runtimeBundleDigest: bundleB };
     for (const release of [v1, v2]) {
       const record = service.registerApp(release, operator);
-      service.approveRelease({ appId: record.appId, appVersion: record.appVersion, releaseDigest: record.releaseDigest, approvedBy: 'qa-lead' }, operator);
+      service.approveRelease({ appId: record.appId, appVersion: record.appVersion, releaseDigest: record.releaseDigest }, approver);
     }
     const first = service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
     const project = service.createProject({ name: '回退演练项目' }, operator);

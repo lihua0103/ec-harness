@@ -47,6 +47,7 @@
 - 控制面在 `run.failed` / `run.unknown` 终结时，把 `(runId, pluginId, projectId, inputDigest)` 投影为 `PENDING_ANALYSIS`，供插件智能体后续提出候选；复核决定以 `qc.completed` 投影（事件 ID `review:<reviewId>`）。
 - `platform_knowledge_projections`：按上下文插件只读列出投影台账（`outcome` 可选、`limit` 夹紧到 200），是智能体读取 `PENDING_ANALYSIS` 的入口；读取不产生候选，提出候选仍走 `capture` 与验证器。
 - `validateWithReceipt`：回执绑定请求/候选/套件摘要；重复回执幂等返回原结局；同一请求的第二份不同回执拒绝（`KNOWLEDGE_RECEIPT_ALREADY_APPLIED`）；无 claims、覆盖不足、过期修订、未批准执行器均不激活。
+- **证据验收（2026-11-25 增补）**：运行期 capture 的候选无法被随包套件激活——coverage 绑定的候选摘要只有在写入之后才存在。`node scripts/knowledge-accept.mjs --store <库> --plugin <id> --knowledge <id> --spec <验收说明>` 由可信的操作者侧执行：从库内候选项派生覆盖绑定，并要求声明的每条 claim 恰有一项证据检查（证据文件内的 JSON 指针 + 比较；证据文件 sha256 随用例摘要写入回执），另须有负例与边界守护检查各至少一项；全部通过才经 `validate()` 标准事务转 ACTIVE（`validationScope=CONTENT_CLAIMS`），否则保持 CANDIDATE 并记 `VALIDATION_FAILED`。套件只验收构建时锁定的候选修订；模型侧工具不暴露该入口，仍不能自批。
 
 ## 5. 发布覆盖门禁
 

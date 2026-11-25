@@ -17,7 +17,7 @@ const APPLICATION_ID = 1162038091;
  *  v5: 事件投影去重（M2-02）、一次性验证回执（M2-03）与引用对账（M1-03）。
  *  v6: 学习平台数据面（L2/L3）：个人偏好、私人草稿、学习个案、提案幂等台账、
  *      不可变发布清单 + 当前指针 + 撤回台账（ADR-0004）。 */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 /** FTS 正文：覆盖 canonical 记录的全部字段值（不含 JSON 键名）；与查询侧同样做 NFKC + 小写折叠。 */
 export function searchText(record: KnowledgeRecord | KnowledgeDraft): string {
   const parts = [
@@ -75,6 +75,9 @@ export interface ProjectionRecord {
   knowledgeId?: string;
   detail: unknown;
   createdAt: string;
+  /** R5：认领时间/主体；NULL = 待认领。老化与产出率按 created_at 计算。 */
+  claimedAt?: string;
+  claimant?: string;
 }
 export interface ReceiptRecord {
   receiptDigest: string;
@@ -108,6 +111,8 @@ function decodeProjection(row: Record<string, unknown>): ProjectionRecord {
     ...(row.knowledge_id === null ? {} : { knowledgeId: String(row.knowledge_id) }),
     detail: JSON.parse(String(row.detail)),
     createdAt: String(row.created_at),
+    ...(row.claimed_at !== null && row.claimed_at !== undefined ? { claimedAt: String(row.claimed_at) } : {}),
+    ...(row.claimant !== null && row.claimant !== undefined ? { claimant: String(row.claimant) } : {}),
   };
 }
 function decodeReceipt(row: Record<string, unknown>): ReceiptRecord {
@@ -301,6 +306,13 @@ export class KnowledgeStore {
       if (!revisionColumns.has('org_id')) this.db.exec('ALTER TABLE knowledge_revisions ADD COLUMN org_id TEXT');
       if (!revisionColumns.has('region')) this.db.exec('ALTER TABLE knowledge_revisions ADD COLUMN region TEXT');
       this.db.exec('CREATE INDEX IF NOT EXISTS kr_tenant ON knowledge_revisions(org_id,region,plugin_id,scope);');
+      // v7（R5 学习台账）：投影台账增加认领/老化字段。旧行 claimed_at/claimant 为 NULL = 待认领；
+      // 老化与候选产出率按 created_at 计算，不把 outbox delivered 当学习完成。
+      const projectionColumns = new Set(
+        (this.db.prepare('PRAGMA table_info(knowledge_projections)').all() as Array<{ name: string }>).map((row) => row.name),
+      );
+      if (!projectionColumns.has('claimed_at')) this.db.exec('ALTER TABLE knowledge_projections ADD COLUMN claimed_at TEXT');
+      if (!projectionColumns.has('claimant')) this.db.exec('ALTER TABLE knowledge_projections ADD COLUMN claimant TEXT');
       // v6（学习平台数据面）：租户列统一 NOT NULL DEFAULT ''（''=未声明，避免 NULL 主键歧义）。
       // 个人偏好：唯一 (tenant, owner, plugin-or-global, key)；删除=墓碑（state DELETED 且值清空），
       // 备份恢复不复活（T03）。值 schema 由 preferences.ts 封闭注册表校验，库里只存已通过校验的标量。
@@ -811,7 +823,7 @@ export class KnowledgeStore {
   recordProjection(value: ProjectionRecord): void {
     this.db
       .prepare(
-        'INSERT INTO knowledge_projections(projection_key,plugin_id,event_id,contributor,projection_version,outcome,knowledge_id,detail,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+        'INSERT INTO knowledge_projections(projection_key,plugin_id,event_id,contributor,projection_version,outcome,knowledge_id,detail,created_at,claimed_at,claimant) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
       )
       .run(
         value.projectionKey,
@@ -823,7 +835,37 @@ export class KnowledgeStore {
         value.knowledgeId ?? null,
         canonical(value.detail),
         value.createdAt,
+        value.claimedAt ?? null,
+        value.claimant ?? null,
       );
+  }
+  /** R5：认领一条待分析投影（幂等：已认领返回原认领，不覆盖）。 */
+  claimProjection(projectionKey: string, claimant: string, claimedAt: string): boolean {
+    const row = this.db.prepare('SELECT claimant FROM knowledge_projections WHERE projection_key=?').get(projectionKey);
+    if (!row) return false;
+    if (row.claimant !== null && row.claimant !== undefined) return true;
+    this.db.prepare('UPDATE knowledge_projections SET claimant=?, claimed_at=? WHERE projection_key=? AND claimant IS NULL')
+      .run(claimant, claimedAt, projectionKey);
+    return true;
+  }
+  /** R5 指标：按插件聚合投影台账的投递/待分析/已认领/候选产出/明确不产出计数。 */
+  projectionMetrics(pluginId: string): { delivered: number; pendingAnalysis: number; claimed: number; candidate: number; noReusable: number } {
+    const row = this.db.prepare(
+      `SELECT
+         COUNT(*) AS delivered,
+         SUM(CASE WHEN outcome='PENDING_ANALYSIS' AND claimant IS NULL THEN 1 ELSE 0 END) AS pending_analysis,
+         SUM(CASE WHEN claimant IS NOT NULL THEN 1 ELSE 0 END) AS claimed,
+         SUM(CASE WHEN outcome='CANDIDATE' THEN 1 ELSE 0 END) AS candidate,
+         SUM(CASE WHEN outcome='NO_REUSABLE_CONCLUSION' THEN 1 ELSE 0 END) AS no_reusable
+       FROM knowledge_projections WHERE plugin_id=?`,
+    ).get(pluginId) as Record<string, number>;
+    return {
+      delivered: Number(row.delivered ?? 0),
+      pendingAnalysis: Number(row.pending_analysis ?? 0),
+      claimed: Number(row.claimed ?? 0),
+      candidate: Number(row.candidate ?? 0),
+      noReusable: Number(row.no_reusable ?? 0),
+    };
   }
   receiptByDigest(receipt: string): ReceiptRecord | undefined {
     const row = this.db.prepare('SELECT * FROM knowledge_receipts WHERE receipt_digest=?').get(receipt);

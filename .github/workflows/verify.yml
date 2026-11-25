@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
 
 env:
-  UPSTREAM_COMMIT: fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159
+  UPSTREAM_COMMIT: 9c2670d3bce5275e0d1610272958121af87787bb
 
 jobs:
   guard:

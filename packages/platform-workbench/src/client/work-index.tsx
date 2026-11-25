@@ -119,7 +119,7 @@ export function WorkIndex({ index, filters, onFiltersChange, selectedId, session
         </div>
         {filtersOpen
           ? (
-            <div className="ec-wb-desk-filter-panel">
+            <div className="ec-wb-desk-filter-panel" data-window-drag-exclude>
               <label className="ec-wb-desk-filter-field">
                 {t('home.filter', locale)}
                 <select

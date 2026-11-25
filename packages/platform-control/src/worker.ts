@@ -41,6 +41,11 @@ export interface WorkerConfig {
   /** WP1: pluginId → installed artifact directory (absolute). Declared by the deployment; when
    *  present, dispatch re-verifies the installed bytes against the plan's approved digests. */
   pluginArtifactPaths?: Record<string, string>;
+  /** P0-3：子进程环境白名单。只透传运行必需的变量（经批准的模型路由/凭据 + 运行所需），
+   *  绝不展开控制面 process.env。未声明时回退 { ...process.env, DSH_HOME }（仅兼容旧部署）。 */
+  envAllowlist?: string[];
+  /** P0-4：为 true 时每个 Run 使用独立 dshHome（run-home/<runId>），作业/会话/凭据按 Run 隔离。 */
+  isolateRunHome?: boolean;
 }
 export interface WorkerNotification {
   method: string;

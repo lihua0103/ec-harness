@@ -176,6 +176,8 @@ export function SidebarNav({ collapsed, drawer, toggleSidebar, route }: SidebarN
       aria-modal={dialogOpen || undefined}
       aria-label={dialogOpen ? t('side.drawerLabel', locale) : undefined}
       data-shortcut-modal={drawer ? 'sidebar' : undefined}
+      // 抽屉打开时是覆盖内容区的自定义浮层：自行声明窗口拖拽排除（DSH 0.2.2-rc.2 起 macOS Desktop）。
+      data-window-drag-exclude={dialogOpen || undefined}
       tabIndex={dialogOpen ? -1 : undefined}
       onFocusCapture={(event) => { focusOwner.current = event.target }}
     >

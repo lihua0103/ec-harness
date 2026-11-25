@@ -161,6 +161,12 @@ export class ChildProcessWorkerExecutor implements RunExecutor {
     const resolvedLaunchId = launchId ?? `worker-${run.runId}-${randomUUID()}`;
     const resolvedFencing = fencingToken ?? run.snapshot.fencingToken + 1;
 
+    // P0-4：每个 Run 独立 home，作业/会话/凭据按 Run 隔离。
+    const runHome = this.config.isolateRunHome
+      ? join(this.config.dshHome, 'run-home', run.runId)
+      : this.config.dshHome;
+    if (this.config.isolateRunHome) await mkdir(runHome, { recursive: true });
+
     let cwd = resolve(this.config.workspace, run.runId);
     if (!inside(this.config.workspace, cwd)) throw new PlatformError('WORKER_WORKSPACE_INVALID');
     if (run.workspace) {
@@ -178,7 +184,7 @@ export class ChildProcessWorkerExecutor implements RunExecutor {
       throw new PlatformError('WORKSPACE_NOT_WRITABLE', '工作空间目录不可写；请为该项目的执行身份提供可写目录。');
     });
 
-    const jobDir = join(this.config.dshHome, 'platform-jobs', resolvedLaunchId);
+    const jobDir = join(runHome, 'platform-jobs', resolvedLaunchId);
     await mkdir(jobDir, { recursive: true });
     const jobPath = join(jobDir, 'job.json');
     const prompt = workerPrompt(run, plan, workspace, inputs);
@@ -189,7 +195,7 @@ export class ChildProcessWorkerExecutor implements RunExecutor {
       workspace,
       harness: {
         profile: this.config.profile,
-        dshHome: this.config.dshHome,
+        dshHome: runHome,
         ...(this.config.patches?.length ? { patches: this.config.patches } : {}),
         ...(model?.provider ?? this.config.provider ? { provider: model?.provider ?? this.config.provider } : {}),
         ...(model?.model ?? this.config.model ? { model: model?.model ?? this.config.model } : {}),
@@ -204,9 +210,20 @@ export class ChildProcessWorkerExecutor implements RunExecutor {
     const runner = this.runnerPath();
     const runnerFile = await stat(runner).then((info) => info.isFile()).catch(() => false);
     if (!runnerFile) throw new PlatformError('WORKER_RUNNER_MISSING', runner);
+    // P0-3：子进程环境白名单——只透传运行必需的变量，绝不展开控制面 process.env。
+    const env: NodeJS.ProcessEnv =
+      this.config.envAllowlist !== undefined
+        ? { DSH_HOME: runHome }
+        : { ...process.env, DSH_HOME: runHome };
+    if (this.config.envAllowlist) {
+      for (const name of this.config.envAllowlist) {
+        const value = process.env[name];
+        if (value !== undefined) env[name] = value;
+      }
+    }
     const child = spawn(process.execPath, [runner, jobPath], {
       cwd,
-      env: { ...process.env, DSH_HOME: this.config.dshHome },
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       detached: process.platform !== 'win32',

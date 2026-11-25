@@ -23,6 +23,7 @@ import {
   resolveMethodTopic,
 } from './knowledge-seeds.js';
 import { dvpMethodSuite } from './knowledge-validators.js';
+import { captureHygiene, resolveCaptureScope, summarizeKnowledgeItems } from './knowledge-hygiene.js';
 import type { KnowledgeDraft } from '../../../packages/platform-knowledge/src/schema.js';
 import type {} from '../../../packages/platform-knowledge/src/cordis.js';
 
@@ -99,6 +100,7 @@ Dynamic Field | Dynamic Search list | Dynamic Page | Derivation | Dynamic Visit 
 dm_dvp_methods 检索 DVP 方法种子（template/firewhen/protocol/uat/cases）；历史种子为 CANDIDATE，未复现验证不称 ACTIVE。
 已核实的纠错方法经 dm_dvp_knowledge_capture 沉淀（前提/反例/来源必填，claims 只写可复现断言），dm_dvp_knowledge_validate 跑已安装验证器；
 只有全部 claims 被套件覆盖且通过才 ACTIVE，工具回归通过不等于方法正文已验证。dm_dvp_knowledge_events 读学习/验证事件。知识是方法参考，不是授权，也不替代当前项目文档。
+沉淀范围纪律：项目专属的观察/裁定带 projectId 走 project scope（仅该项目可见）；跨项目通用的方法才省略 projectId（plugin scope），正文必须去项目化——不写本机路径、联系方式、证件号、项目代号。新沉淀的候选不会当场激活：随包验证器只绑定了种子条目。
 
 ## 行内变更控制
 Add/Delete/Update 列形如 Add/V2.0 = 动作/版本。逐版本追溯差异属后续版本（KnowledgeService 生命周期）。
@@ -206,21 +208,27 @@ export function apply(ctx: Context): void {
           };
           if (args.snapshotJson) {
             if (args.snapshotJson.length > 2_000_000) throw new DvpError('KNOWLEDGE_SNAPSHOT_INVALID', 'snapshot JSON 过大');
+            const found = knowledge.searchPinned(context, JSON.parse(args.snapshotJson), options);
             return {
               source: 'platform-knowledge',
               retrieval: 'PINNED_SNAPSHOT',
+              // 快照 JSON 由调用方回传：固定集合的出处是调用方自述，平台只校验摘要、范围与逐条可见性。
+              snapshotSource: 'caller_supplied',
               seedVersion: DVP_SEED_VERSION,
               ...topicInfo,
-              ...knowledge.searchPinned(context, JSON.parse(args.snapshotJson), options),
+              ...found,
+              ...summarizeKnowledgeItems(found.items, found.total),
               notice: '快照内固定修订；撤回/撤权条目在 evidence.excluded 中显式列出。',
             };
           }
+          const found = knowledge.search(context, options);
           return {
             source: 'platform-knowledge',
             retrieval: 'LIVE_UNBOUND',
             seedVersion: DVP_SEED_VERSION,
             ...topicInfo,
-            ...knowledge.search(context, options),
+            ...found,
+            ...summarizeKnowledgeItems(found.items, found.total),
             notice: '历史种子当前为候选；未绑定 Run 快照，结果为活库检索（不冒充固定集合）。',
           };
         });
@@ -231,7 +239,7 @@ export function apply(ctx: Context): void {
     defineTool({
       name: 'dm_dvp_knowledge_capture',
       description:
-        '把当前任务中已核实的 DVP 纠错方法沉淀为 CANDIDATE 知识；未复现验证不会激活也不进入默认检索。前提/反例/来源必填（激活的必要证据），不接受自报通过。claimsCsv 只写可由已安装验证器复现的具体断言；没有 claims 的方法永远保持 CANDIDATE。',
+        '把当前任务中已核实的 DVP 纠错方法沉淀为知识，始终先落 CANDIDATE：未通过已安装验证器不会 ACTIVE，也不进入 Run 的知识快照；dm_dvp_methods 检索会把候选与 ACTIVE 一并返回并逐条标注 state——候选不是已验证方法。范围纪律：项目专属的观察/裁定带 projectId（project scope，仅该项目可见）；省略 projectId 即 plugin scope（跨项目可见），正文必须去项目化。前提/反例/来源必填，不接受自报通过。claimsCsv 只写可由已安装验证器复现的具体断言；没有 claims 的方法永远保持 CANDIDATE。',
       parameters: {
         knowledgeId: { ...string_type, required: true, description: '新知识 ID；同 ID 重复 capture 会版本冲突。' },
         title: { ...string_type, required: true },
@@ -241,6 +249,11 @@ export function apply(ctx: Context): void {
         preconditionsCsv: { ...string_type, required: true, description: '适用前提，逗号分隔。' },
         counterexamplesCsv: { ...string_type, required: true, description: '不适用情形/反例，逗号分隔。' },
         sourcesCsv: { ...string_type, required: true, description: '证据来源，逗号分隔。' },
+        projectId: {
+          ...string_type,
+          description:
+            '可选。给出时按 project scope 沉淀（仅该项目可见）——项目专属的观察、裁定、带项目代号的来源应走这里；省略时按 plugin scope 沉淀为跨项目通用方法。',
+        },
         topicsCsv: { type: 'string' },
         notApplicableCsv: { type: 'string' },
         claimsCsv: {
@@ -257,10 +270,24 @@ export function apply(ctx: Context): void {
               .map((s) => s.trim())
               .filter(Boolean);
           if (args.method.length > 20000) throw new DvpError('KNOWLEDGE_TEXT_INVALID', 'method exceeds 20000 chars');
+          // 命名空间、范围与卫生体检由代码裁决，不取决于模型选了什么 ID / scope 用词。
+          if (!args.knowledgeId.startsWith(`${DVP_PLUGIN_ID}.`) || args.knowledgeId.length <= DVP_PLUGIN_ID.length + 1)
+            throw new DvpError('KNOWLEDGE_ID_NAMESPACE', `knowledgeId 必须以 ${DVP_PLUGIN_ID}. 开头并带条目名`);
+          const target = resolveCaptureScope(args.projectId);
+          const hygiene = captureHygiene({
+            knowledgeId: args.knowledgeId,
+            scope: target.scope,
+            text: [
+              args.title, args.problemSignal, args.cause, args.method, args.preconditionsCsv,
+              args.counterexamplesCsv, args.sourcesCsv, args.topicsCsv, args.notApplicableCsv, args.claimsCsv,
+            ].join('\n'),
+          });
+          if (hygiene.rejected) throw new DvpError('KNOWLEDGE_SENSITIVE_CONTENT', hygiene.reason ?? '候选含不该进入知识库的内容');
           const draft: KnowledgeDraft = {
             knowledgeId: args.knowledgeId,
-            scope: 'plugin',
+            scope: target.scope,
             pluginId: DVP_PLUGIN_ID,
+            ...(target.scope === 'project' ? { projectId: target.projectId } : {}),
             kind: 'scenario_method',
             title: args.title,
             problemSignal: args.problemSignal,
@@ -275,7 +302,12 @@ export function apply(ctx: Context): void {
             sources: csv(args.sourcesCsv),
             ...(csv(args.claimsCsv).length ? { claims: csv(args.claimsCsv) } : {}),
           };
-          return knowledge.capture({ pluginId: DVP_PLUGIN_ID }, draft);
+          const record = knowledge.capture(
+            { pluginId: DVP_PLUGIN_ID, ...(target.scope === 'project' ? { projectId: target.projectId } : {}) },
+            draft,
+          );
+          // 卫生体检结果随回执返回（开关关闭时命中不拦截，但如实计数）。
+          return { ...record, hygiene: { mode: hygiene.mode, hits: hygiene.hits } };
         });
       },
     }),
@@ -284,7 +316,7 @@ export function apply(ctx: Context): void {
     defineTool({
       name: 'dm_dvp_knowledge_validate',
       description:
-        '对 CANDIDATE 方法运行已安装业务验证器（固定正/反/边界用例）；只有候选声明的全部 claims 都被该套件覆盖且测试通过，才转 ACTIVE 并写回执。无 claims、部分覆盖或测试失败均保持 CANDIDATE 并记事件；不接受模型自报。',
+        '对 CANDIDATE 方法运行已安装业务验证器（固定正/反/边界用例）。转 ACTIVE 须同时满足：候选内容摘要与套件预先安装的覆盖绑定逐字一致、声明的全部 claims 被覆盖、测试全部通过。随包套件只绑定了种子条目，所以新沉淀的候选会得到 VALIDATION_SCOPE_INSUFFICIENT（reason=CONTENT_BINDING_MISMATCH）并保持 CANDIDATE——这是预期结果，不必重试；激活需要随插件发布安装新的覆盖绑定。无 claims、部分覆盖或测试失败同样保持 CANDIDATE 并记事件；不接受模型自报。',
       parameters: {
         knowledgeId: { ...string_type, required: true },
         revision: { type: 'number', required: true },
@@ -571,7 +603,7 @@ export function apply(ctx: Context): void {
           description: [
             '工作簿内容 JSON，区键：{project?, template?, crossField?, fieldLevel?, manualReview?, manualReviewProgramming?, dynamic?, versionHistory?, subjectStatus?, matrix?}。',
             '区值两类写法：① 内联数组；② 文件引用字符串（相对 directory 的 NDJSON——每行一个 JSON 对象、空行跳过——或 JSON 数组文件，≤8MB，必须落在 directory 内，越界/缺文件/坏行按 BULK_REF_OUTSIDE_DIRECTORY/BULK_FILE_NOT_FOUND/BULK_FILE_BAD_LINE:<行号> 拒绝；成功后在结果 notices 回报 BULK_SOURCE:<区>=<相对路径>(<n> rows)）。千级规则一律走 ②。',
-            'template（可选，模板差量配置）：{governanceOrder?: "cover-first"|"approval-first"（默认 cover-first；实物 V6.0 为 approval-first）, editChecksQueryType?: boolean（默认 true；V6.0 实物无 Query Type 列设 false）, fieldLevelSheetName?: string（默认 "Edit Checks(Field Level)"；V6.0 实物为 "Edit Checks Rave"，≤31 字符且不含 []:*?/\\）, includeProgramming?: boolean（默认 true；V6.0 无 Programming 页设 false）, includeSubjectStatus?: boolean, includeMatrix?: boolean（默认 false；对应区有行时自动生成该页）}。旋钮中性只约束工具不替调用方判断：调用方（模型）须在汇报中逐项说明六个旋钮最终取值与依据（识别到的实物形态，或「未识别，用默认」），不得静默套默认。',
+            'template（可选，模板差量配置）：{governanceOrder?: "cover-first"|"approval-first"（默认 cover-first；实物 V6.0 为 approval-first）, editChecksQueryType?: boolean（默认 true；V6.0 实物无 Query Type 列设 false）, fieldLevelSheetName?: string（默认 "Edit Checks(Field Level)"；V6.0 实物为 "Edit Checks Rave"，≤31 字符且不含 []:*?/\\）, dynamicSheetName?: string（默认 "Dynamic"；个别实物为 "Dynamics"，限制同上）, includeProgramming?: boolean（默认 true；V6.0 无 Programming 页设 false）, includeSubjectStatus?: boolean, includeMatrix?: boolean（默认 false；对应区有行时自动生成该页）}。旋钮中性只约束工具不替调用方判断：调用方（模型）须在汇报中逐项说明各旋钮最终取值与依据（识别到的实物形态，或「未识别，用默认」），不得静默套默认。',
             'crossField 行：{id, formName, targetField, relatedFields?, queryType, discrepancyText, logic, visits?, changeMark?}；',
             'fieldLevel 行：{formOid, formName, fieldOid, preText?, controlType?, dataFormat?, isLog, isRequired, queryFutureDate, queryNonConformance, changeMark?}（布尔接受 true/false）；',
             'manualReview / manualReviewProgramming 行：{id, formName, reportDescription, discrepancyText?, logic?, visits?, relatedFields?, programming?:{assign?, columnHeading?}}（TEST CASE/DM/DBD 三列恒空）；',

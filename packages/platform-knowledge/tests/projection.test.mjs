@@ -70,3 +70,34 @@ test('events without reusable evidence record an explicit outcome, and conflicts
     rmSync(root, { recursive: true, force: true });
   }
 });
+test('R5 认领与指标：outbox 投递不等于学习完成，认领/产出如实统计', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pk-projection-r5-'));
+  const service = new KnowledgeService(join(root, 'knowledge.sqlite'));
+  try {
+    // 三条投影：一条待分析、一条明确不产出、一条产出候选
+    const p1 = service.captureFromProjection(ctx, { event: event({ eventId: 'run-a' }), disposition: 'PENDING_ANALYSIS' });
+    service.captureFromProjection(ctx, { event: event({ eventId: 'run-b' }) }); // NO_REUSABLE
+    service.captureFromProjection(ctx, { event: event({ eventId: 'run-c' }), draft: draft('m-c') }); // CANDIDATE
+
+    const before = service.projectionMetrics(ctx);
+    assert.equal(before.delivered, 3);
+    assert.equal(before.pendingAnalysis, 1, '一条待分析');
+    assert.equal(before.claimed, 0);
+    assert.equal(before.candidate, 1);
+    assert.equal(before.noReusable, 1);
+
+    // 分析主体认领待分析条目；claimant 取自已认证 principal，不接受请求体
+    const analyst = { actorId: 'user:analyst', orgId: 'acme', region: 'eu' };
+    const claimed = service.claimProjection(ctx, p1.projectionKey, analyst);
+    assert.equal(claimed?.claimant, 'user:analyst');
+    assert.ok(claimed?.claimedAt);
+
+    const after = service.projectionMetrics(ctx);
+    assert.equal(after.pendingAnalysis, 0, '认领后不再待分析');
+    assert.equal(after.claimed, 1);
+    assert.equal(after.delivered, 3, '投递数不变——delivered 不等于完成');
+  } finally {
+    service.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

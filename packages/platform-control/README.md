@@ -95,7 +95,7 @@
       "model": "deepseek-flash",
       "displayName": "DeepSeek-V4.1-Flash",
       "adapter": "dsh-llm-deepseek",
-      "adapterVersion": "0.2.2-rc.1",
+      "adapterVersion": "0.2.2-rc.5",
       "enabled": true,
       "verification": "provider-declared",
       "capabilities": { "contextWindow": 1048576, "modalities": ["text", "image"] },

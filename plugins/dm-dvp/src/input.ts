@@ -54,6 +54,8 @@ export interface TemplateOptions {
   editChecksQueryType?: boolean;
   /** 字段级 sheet 名：默认 'Edit Checks(Field Level)'；V6.0 实物为 'Edit Checks Rave'。 */
   fieldLevelSheetName?: string;
+  /** Dynamic sheet 名：默认 'Dynamic'；个别实物为 'Dynamics'。 */
+  dynamicSheetName?: string;
   /** 是否生成 Manual Review for Programming 页（V6.0 实物无此页）。默认 true。 */
   includeProgramming?: boolean;
   /** 是否生成 Subject Status 页。默认 false（rows>0 时也自动生成）。 */
@@ -327,7 +329,7 @@ function readBulkItems(directory: string, ref: string, cap: number, key: Section
   return { items, notice: `BULK_SOURCE:${key}=${rel}(${items.length} rows)` };
 }
 
-const KNOWN_TEMPLATE_KEYS = new Set(['governanceOrder', 'editChecksQueryType', 'fieldLevelSheetName', 'includeProgramming', 'includeSubjectStatus', 'includeMatrix', 'editChecksTestcaseColumns', 'fieldLevelLayout', 'discrepancyTail', 'manualReviewNote', 'sheetHeaders', 'changeMarkStyle', 'sheetOrder']);
+const KNOWN_TEMPLATE_KEYS = new Set(['governanceOrder', 'editChecksQueryType', 'fieldLevelSheetName', 'dynamicSheetName', 'includeProgramming', 'includeSubjectStatus', 'includeMatrix', 'editChecksTestcaseColumns', 'fieldLevelLayout', 'discrepancyTail', 'manualReviewNote', 'sheetHeaders', 'changeMarkStyle', 'sheetOrder']);
 
 /** template 配置宽容归一：未知键上报（记 `template.键`）；非法治理顺序/表名硬拒。 */
 function coerceTemplateOptions(raw: unknown, unknownOut: string[]): TemplateOptions {
@@ -338,6 +340,8 @@ function coerceTemplateOptions(raw: unknown, unknownOut: string[]): TemplateOpti
   if (governanceOrder && governanceOrder !== 'cover-first' && governanceOrder !== 'approval-first') throw new InputError('TEMPLATE_BAD_GOVERNANCE_ORDER');
   const fieldLevelSheetName = asString(rec.fieldLevelSheetName) || undefined;
   if (fieldLevelSheetName && (fieldLevelSheetName.length > 31 || /[\[\]:*?\\/]/.test(fieldLevelSheetName))) throw new InputError('INVALID_SHEET_NAME');
+  const dynamicSheetName = asString(rec.dynamicSheetName) || undefined;
+  if (dynamicSheetName && (dynamicSheetName.length > 31 || /[\[\]:*?\\/]/.test(dynamicSheetName))) throw new InputError('INVALID_SHEET_NAME');
   const manualReviewNoteRaw = rec.manualReviewNote;
   if (manualReviewNoteRaw !== undefined && manualReviewNoteRaw !== null) {
     if (!Array.isArray(manualReviewNoteRaw) || manualReviewNoteRaw.length > 20 || manualReviewNoteRaw.some((l) => typeof l !== 'string' || l.length > 500)) {
@@ -371,6 +375,7 @@ function coerceTemplateOptions(raw: unknown, unknownOut: string[]): TemplateOpti
     governanceOrder,
     editChecksQueryType: asBool(rec.editChecksQueryType) ?? undefined,
     fieldLevelSheetName,
+    dynamicSheetName,
     includeProgramming: asBool(rec.includeProgramming) ?? undefined,
     includeSubjectStatus: asBool(rec.includeSubjectStatus) ?? undefined,
     includeMatrix: asBool(rec.includeMatrix) ?? undefined,

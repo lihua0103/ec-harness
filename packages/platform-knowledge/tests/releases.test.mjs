@@ -239,3 +239,33 @@ test('发布条目校验：插件不符、租户不符、重复条目拒绝；�
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('P0-10 发布指针不吞没 project 域：快照 = 清单 ∪ 当前项目 ACTIVE 条目', async () => {
+  const { root, service } = makeService();
+  try {
+    // 一条 plugin 方法发布进清单
+    const pluginReceipt = await activate(service, 'demo.plugin');
+    // 一条 project 专属方法（仅 P-1 可见），不进入清单
+    const projectReceipt = await activate(service, 'demo.proj', {
+      draft: { scope: 'project', projectId: 'P-1' },
+      context: { projectId: 'P-1' },
+    });
+    assert.equal(projectReceipt.state, 'ACTIVE');
+
+    service.publishRelease(manager(), {
+      pluginId: 'demo', audience: 'org:acme',
+      entries: [{ knowledgeId: 'demo.plugin', revision: pluginReceipt.revision }],
+      expectedVersion: 0,
+    });
+
+    // 发布后绑定：清单条目 + project 条目都在，project 方法不丢失
+    const bound = service.snapshot(context(), 'run-union');
+    const ids = bound.records.map((r) => r.knowledgeId).sort();
+    assert.ok(ids.includes('demo.plugin'), '清单方法在绑定内');
+    assert.ok(ids.includes('demo.proj'), 'P0-10：project 方法不随发布消失');
+    assert.equal(bound.records.length, 2);
+  } finally {
+    service.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

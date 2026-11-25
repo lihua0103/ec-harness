@@ -1,6 +1,6 @@
 # 企业级 DSH 插件开发规范
 
-版本：1.0 · 定稿日期：2026-11-11 · 文档类型：开发与发布参考规范。
+版本：1.1 · 定稿日期：2026-11-11 · 基线更新：2026-11-25 · 文档类型：开发与发布参考规范。
 
 适用范围：本项目 `plugins/` 下的业务插件、`packages/` 下的公共能力及其发布集成。本规范作为开发、审查和发布依据；其发布不代表现有代码已符合，也不构成临床验收或企业部署安全验收。
 
@@ -50,7 +50,19 @@
 
 ## 2. 上游依据与兼容基线
 
-本版核对基线为 DeepSeek Harness `0.2.2-rc.1`，源码 commit `fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159`。DSH 明确处于 Developer Preview，可能发生破坏兼容的变化；该基线不是对未来 DSH 版本的兼容承诺。
+本版核对基线为 DeepSeek Harness `0.2.2-rc.5`（tag `dsh-v0.2.2-rc.5`），源码 commit `9c2670d3bce5275e0d1610272958121af87787bb`；上一版基线为 `0.2.2-rc.1`（`fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159`）。DSH 明确处于 Developer Preview，可能发生破坏兼容的变化；该基线不是对未来 DSH 版本的兼容承诺。
+
+2026-11-25 重基线（rc.1 → rc.5）的核对记录，范围即本节末句要求的五类合同：
+
+| 合同 | 核对结论 |
+|---|---|
+| 工具 | `defineTool`、`ToolExecution` 形状未变。新增结构化错误身份：`ToolContextUnavailableError`、审批拒绝的 `ApprovalError` 与 `APPROVAL_REJECTED/CANCELLED/UNAVAILABLE`；取消后抛出的 `AbortError` 归一为 `AbortError`/`ABORTED`。本项目工具不受影响。 |
+| 配置 | `cordis` 源码无差异；`dsh.client`（`platform`/`inject`）与 `dsh.bundle.*` 的读取方无差异，新增仅 `dsh.bundle.platforms` 可写 `wsl`。 |
+| 会话 | `SessionSnapshot` 新增必填字段 `historyWasPartial`、`historyLoadStatus`，`loadOlder` 增加 `options` 并新增 `consumeOlder`；本项目不调用，未使用手写快照字面量。 |
+| Client | 本项目占用的 slot（`main`、`sidebar`、`shell.leading`、`conversation.view`、`conversation.input.right`、`conversation.input.activity`、`plugins.bundle.config`）名称与 kind 未变；`ui-primitives` 的 `Button`/`Modal`/`useModalLayer` 等源文件无差异。变化：hoc slot 增加按键分发且崩溃不再让位；侧栏 DOM 重排；macOS Desktop 取消了自定义浮层的自动窗口拖拽排除，须在浮层可见属主上声明 `data-window-drag-exclude`（上游指南 `docs/upgrade-guide/v0.2.2-rc.1/window-drag-regions`）。 |
+| 安装 | `engines.dsh` 与 DSH peer 的门禁规则未变（声明了 `engines.dsh` 只看它；不满足则拒绝安装并跳过激活）；`dsh plugin add <tgz>` 路径不变。变化：安装后多一道 `expected` 校验（`unexpected-package`），`BundleInfo.updatable` 改为 `update`。 |
+
+随基线更新的本项目改动：7 个 bundle 的 DSH 版本声明统一为 `0.2.2-rc.5`（`@deepseek-ai/cordis` 保持 `4.1.0`）；工作台 5 个自定义浮层声明拖拽排除，由 `packages/platform-workbench/tests/window-regions.test.ts` 固定；CI 的 `UPSTREAM_COMMIT` 同步。上游开发指引 `cordis-plugin-development` 已并入 `dsh-doc`，下表链接按官方映射更新。
 
 | 主题 | 锁定源码中的直接依据 |
 |---|---|
@@ -58,7 +70,7 @@
 | Bundle/Profile、版本与 peer 依赖 | [打包与安装](../upstream/deepseek-harness-git/docs/user/develop/basic/publish.md)、[Plugin Manager](../upstream/deepseek-harness-git/packages/boot/plugin-manager/README.md) |
 | 工具结果、错误、取消与并发 | [工具作者参考](../upstream/deepseek-harness-git/docs/cookbook/adding-a-tool.md)、[Tools 合同](../upstream/deepseek-harness-git/packages/core/tools/README.md)、[执行类型](../upstream/deepseek-harness-git/packages/core/tools/src/contracts.ts) |
 | Skill 发现与注册 | [Skill 合同](../upstream/deepseek-harness-git/packages/skill/skill/README.md)、[注册实现](../upstream/deepseek-harness-git/packages/skill/skill/src/index.ts) |
-| Host、Client、配置与显示实践 | [插件开发指引](../upstream/deepseek-harness-git/packages/preset/agent-preset/skills/cordis-plugin-development/SKILL.md)、[Host](../upstream/deepseek-harness-git/packages/preset/agent-preset/skills/cordis-plugin-development/references/host-plugin.md)、[扩展实践](../upstream/deepseek-harness-git/packages/preset/agent-preset/skills/cordis-plugin-development/references/practices.md)、[用户动作](../upstream/deepseek-harness-git/packages/preset/agent-preset/skills/cordis-plugin-development/references/user-actions.md) |
+| Host、Client、配置与显示实践 | [插件开发指引](../upstream/deepseek-harness-git/packages/preset/agent-preset/skills/dsh-doc/references/plugin-development.md)、[Host](../upstream/deepseek-harness-git/packages/preset/agent-preset/skills/dsh-doc/references/host-plugin.md)、[扩展实践](../upstream/deepseek-harness-git/packages/preset/agent-preset/skills/dsh-doc/references/practices.md)、[用户动作](../upstream/deepseek-harness-git/packages/preset/agent-preset/skills/dsh-doc/references/user-actions.md) |
 | 可替换公共能力与 SDK | [定义/提供者/消费者](../upstream/deepseek-harness-git/docs/user/develop/practice/index.md)、[SDK client](../upstream/deepseek-harness-git/packages/sdk/client/README.md) |
 
 这些资料具有不同性质：公共运行契约决定接口语义；上游开发指引提供推荐实践；上游内部仓库的编译布局、四导出和文档发布规则，不自动成为第三方插件的最低运行要求。例如无配置插件可省略 `Config`，纯库不是可启用的 Bundle。企业新增要求以本文为准，不能伪称上游原生 API。

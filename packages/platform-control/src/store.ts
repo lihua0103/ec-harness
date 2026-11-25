@@ -142,6 +142,8 @@ export interface AppRecord extends StoredAppBody {
   appVersion: string;
   state: AppState;
   createdAt: string;
+  /** 登记该发布的已验证主体（P0-1 职责分离）：审批人不得与它相同。旧记录缺省，不猜测。 */
+  registeredBy?: string;
   revokedAt?: string;
   revokeReason?: string;
 }

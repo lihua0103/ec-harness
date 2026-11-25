@@ -623,7 +623,6 @@ export class PlatformControlService {
       appId: string;
       appVersion: string;
       releaseDigest: string;
-      approvedBy: string;
       evidence?: string;
       rollbackTarget?: string;
       expiresAt?: string;
@@ -636,8 +635,13 @@ export class PlatformControlService {
     if (typeof draft.releaseDigest !== 'string' || draft.releaseDigest !== app.releaseDigest) {
       throw new PlatformError('APP_APPROVAL_DIGEST_MISMATCH', `${draft.releaseDigest} != ${app.releaseDigest}`);
     }
-    const approvedBy = typeof draft.approvedBy === 'string' ? draft.approvedBy.trim() : '';
+    // P0-1：审批人强制取自已验证 Principal，请求体/模型参数不能覆盖；审批记录可追溯到真实主体。
+    const approvedBy = principal.actorId;
     if (!approvedBy || approvedBy.length > 200) throw new PlatformError('APP_APPROVAL_INVALID', 'approvedBy');
+    // 职责分离（SEC-01）：同一主体不得自己批准自己登记的发布——register→approve 一条龙被拒。
+    if (app.registeredBy !== undefined && app.registeredBy === principal.actorId) {
+      throw new PlatformError('APP_APPROVAL_SEPARATION_OF_DUTIES', '审批人与登记人不得为同一主体');
+    }
     for (const key of ['evidence', 'rollbackTarget'] as const) {
       const value = draft[key];
       if (value !== undefined && (typeof value !== 'string' || !value.trim() || value.length > 2000)) {
@@ -725,13 +729,14 @@ export class PlatformControlService {
    *  registered catalog cannot be approved: approving "whatever resolves later" would silently
    *  approve a route nobody registered. Lifecycle mirrors release approvals. */
   approveModel(
-    draft: { selectionId: string; approvedBy: string; evidence?: string; expiresAt?: string },
+    draft: { selectionId: string; evidence?: string; expiresAt?: string },
     principal: Principal,
   ): ModelApprovalRecord {
     this.policy.authorize(principal, 'model.approve', { modelSelectionId: draft?.selectionId });
     const selectionId = typeof draft?.selectionId === 'string' ? draft.selectionId.trim() : '';
     if (!selectionId || selectionId.length > 128) throw new PlatformError('MODEL_APPROVAL_INVALID', 'selectionId');
-    const approvedBy = typeof draft?.approvedBy === 'string' ? draft.approvedBy.trim() : '';
+    // P0-1：模型审批人同样取自已验证 Principal，不接受请求体 approvedBy。
+    const approvedBy = principal.actorId;
     if (!approvedBy || approvedBy.length > 200) throw new PlatformError('MODEL_APPROVAL_INVALID', 'approvedBy');
     for (const key of ['evidence'] as const) {
       const value = draft[key];

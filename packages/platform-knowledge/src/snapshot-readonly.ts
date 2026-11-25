@@ -49,7 +49,9 @@ function visibleRow(row: Pick<RevisionRow, 'scope' | 'plugin_id' | 'project_id' 
   );
 }
 
-/** 发布感知路径：指针存在时快照 = 清单条目（剔除已撤回/非 ACTIVE/不可见/篡改条目）。 */
+/** 发布感知路径：指针存在时快照 = 清单条目 ∪ 当前 project 域 ACTIVE 条目（剔除已撤回/非 ACTIVE/
+ *  不可见/篡改/重复条目）。P0-10：发布指针不再吞没 project 域——清单只覆盖 plugin/shared 方法，
+ *  project 专属条目始终随项目上下文注入，避免"发一条试点清单其余知识对全员消失"。 */
 function snapshotFromRelease(
   db: DatabaseSync,
   context: KnowledgeContext,
@@ -77,14 +79,40 @@ function snapshotFromRelease(
     'SELECT id,revision,digest,state,scope,plugin_id,project_id,org_id,region FROM knowledge_revisions WHERE id=? AND revision=?',
   );
   const refs: KnowledgeRef[] = [];
+  const seen = new Set<string>();
   for (const entry of entries) {
     if (typeof entry?.knowledgeId !== 'string' || !Number.isSafeInteger(entry?.revision)) continue;
+    if (seen.has(entry.knowledgeId)) continue;
     if (withdrawnTable && withdrawn.get(entry.knowledgeId, entry.revision)) continue;
     const row = byRevision.get(entry.knowledgeId, entry.revision) as RevisionRow | undefined;
     if (!row) continue;
     if (row.state !== 'ACTIVE' || row.digest !== entry.contentDigest) continue;
     if (!visibleRow(row, context)) continue;
+    seen.add(entry.knowledgeId);
     refs.push({ knowledgeId: row.id, revision: row.revision, contentDigest: row.digest });
+  }
+  // P0-10：并入当前 project 域 ACTIVE 条目（清单未覆盖的 project 专属方法不丢失）。
+  if (context.projectId !== undefined && tableExists(db, 'knowledge_revisions')) {
+    const projectRows = db
+      .prepare(
+        `SELECT id, revision, digest FROM knowledge_revisions r WHERE r.state='ACTIVE'
+           AND r.scope='project' AND r.plugin_id=? AND r.project_id=?
+           AND (r.org_id IS NULL OR r.org_id=?) AND (r.region IS NULL OR r.region=?)
+           AND NOT EXISTS (
+             SELECT 1 FROM knowledge_revisions newer WHERE newer.id=r.id AND newer.revision>r.revision
+               AND newer.state='ACTIVE' AND newer.scope='project' AND newer.plugin_id=r.plugin_id
+               AND newer.project_id=r.project_id AND (newer.org_id IS NULL OR newer.org_id=?)
+               AND (newer.region IS NULL OR newer.region=?))
+           ORDER BY r.id`,
+      )
+      .all(
+        context.pluginId, context.projectId, tenantKey.orgId, tenantKey.region, tenantKey.orgId, tenantKey.region,
+      ) as Array<{ id: string; revision: number; digest: string }>;
+    for (const row of projectRows) {
+      if (seen.has(String(row.id))) continue;
+      seen.add(String(row.id));
+      refs.push({ knowledgeId: String(row.id), revision: Number(row.revision), contentDigest: String(row.digest) });
+    }
   }
   return refs;
 }

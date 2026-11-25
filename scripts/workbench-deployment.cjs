@@ -10,6 +10,16 @@ const { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } = requ
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
+/** 引擎 commit：锁定上游 DSH 的 git 提交，纳入 runtimeBundleDigest（P0-2）。 */
+function upstreamEngineCommit() {
+  try {
+    const { execFileSync } = require('node:child_process');
+    return execFileSync('git', ['-C', path.join(root, 'upstream'), 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  } catch {
+    return 'unknown';
+  }
+}
+
 const root = path.resolve(__dirname, '..');
 const args = process.argv.slice(2);
 const option = (name, fallback) => {
@@ -59,13 +69,22 @@ async function main() {
       pluginId: pluginIdFrom(pkg, existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : undefined),
     };
   });
+  const engineCommit = upstreamEngineCommit();
   const runtimeBundleDigest = createHash('sha256')
     .update(
       JSON.stringify({
-        base: '0.2.2-rc.1',
+        base: '0.2.2-rc.5',
+        // P0-2：纳入引擎 commit、worker profile 实际补丁字节、业务包安装字节与 lock。
+        engine: engineCommit,
         profile: profileManifest.name,
         bundles: profileManifest.dsh.profile.bundles,
-        plugins: pluginData.map(({ pkg }) => `${pkg.name}@${pkg.version}`),
+        profilePatch: existsSync(path.join(workerHome, 'profiles', 'worker', 'cordis.patch.yml'))
+          ? readFileSync(path.join(workerHome, 'profiles', 'worker', 'cordis.patch.yml'), 'utf8')
+          : '',
+        plugins: pluginData.map(({ pkg, dir }) => ({
+          id: `${pkg.name}@${pkg.version}`,
+          lib: directoryDigest(path.join(dir, 'lib')),
+        })),
       }),
     )
     .digest('hex');
@@ -193,7 +212,7 @@ async function main() {
         displayName: modelName,
         description: '部署配置的模型路由；可用性以实际运行结果为准。',
         adapter,
-        adapterVersion: '0.2.2-rc.1',
+        adapterVersion: '0.2.2-rc.5',
         enabled: true,
         verification: 'provider-declared',
         capabilities: { contextWindow: 1000000, modalities: ['text'] },
@@ -206,7 +225,7 @@ async function main() {
         displayName: extraModelName,
         description: '本机桥接路由（anthropic-messages）；可用性以实际运行结果为准。',
         adapter,
-        adapterVersion: '0.2.2-rc.1',
+        adapterVersion: '0.2.2-rc.5',
         enabled: true,
         verification: 'provider-declared',
         capabilities: { contextWindow: 200000, modalities: ['text'], toolUse: 'unknown', reasoning: 'yes' },

@@ -71,6 +71,7 @@ export function DeskPanel({ open, onClose, label, children }: DeskPanelProps) {
         aria-modal="true"
         aria-label={label}
         tabIndex={-1}
+        data-window-drag-exclude
       >
         {children}
       </div>
@@ -124,7 +125,7 @@ export function DeskToolsMenu({ open, onOpenChange, actions }: DeskToolsMenuProp
       </button>
       {open
         ? (
-          <div ref={menuRef} className="ec-wb-desk-tools-menu" role="menu" aria-label="更多工具" tabIndex={-1}>
+          <div ref={menuRef} className="ec-wb-desk-tools-menu" role="menu" aria-label="更多工具" tabIndex={-1} data-window-drag-exclude>
             {actions.map((action) => (
               <button
                 key={action.id}

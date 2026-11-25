@@ -165,6 +165,7 @@ function buildSheets(input: WorkbookInput): XlsxSheet[] {
       : [...base, applyTail(r.discrepancyText, t.discrepancyTail), r.logic];
     return withTestcase ? [...body, r.testcaseFired ?? '', r.testcaseNotFired ?? ''] : body;
   };
+  const dynamicName = t.dynamicSheetName ?? 'Dynamic';
   const sheets: XlsxSheet[] = [
     { name: 'Cover', rows: coverRows(input.project) },
     { name: 'DVP Approval Form', rows: approvalRows() },
@@ -229,8 +230,8 @@ function buildSheets(input: WorkbookInput): XlsxSheet[] {
       ])],
     },
     {
-      name: 'Dynamic',
-      rows: [headerFor(t, 'Dynamic', DYNAMIC_HEADERS), ...input.dynamic.map((s) => s.sourceCells ? sourceCellRow(headerFor(t, 'Dynamic', DYNAMIC_HEADERS), s.sourceCells) : [
+      name: dynamicName,
+      rows: [headerFor(t, dynamicName, DYNAMIC_HEADERS), ...input.dynamic.map((s) => s.sourceCells ? sourceCellRow(headerFor(t, dynamicName, DYNAMIC_HEADERS), s.sourceCells) : [
         s.id, changeMarkCell(t, s), s.formName, s.fieldName, s.type,
         s.visits ?? '', s.discrepancyText ?? '', s.condition ?? '', ...(s.extra ?? []),
       ])],

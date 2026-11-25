@@ -16,6 +16,7 @@ import type { Principal } from '../src/policy.js';
 import { draft } from './helpers.js';
 
 const operator: Principal = { actorId: 'session:review', kind: 'operator' };
+const approver: Principal = { actorId: 'user:qa-lead', kind: 'operator' };
 const supervisor: Principal = { actorId: 'service:review', kind: 'service' };
 const isPlatformError = (code: string) => (error: unknown) =>
   error instanceof PlatformError && error.code === code;
@@ -142,8 +143,7 @@ test('rollback switches the default route and never revokes the source version (
         appId: app.appId,
         appVersion: app.appVersion,
         releaseDigest: app.releaseDigest,
-        approvedBy: 'qa-lead',
-      }, operator);
+      }, approver);
     }
     service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
 

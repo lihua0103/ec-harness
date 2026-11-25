@@ -258,6 +258,7 @@ export class ApplicationRegistry {
         appVersion,
         state: 'ACTIVE',
         createdAt: new Date().toISOString(),
+        registeredBy: actor,
       };
       this.store.appInsert(record);
       this.store.audit(actor, 'APP_RELEASE_REGISTERED', `${appId}@${appVersion}`, {
