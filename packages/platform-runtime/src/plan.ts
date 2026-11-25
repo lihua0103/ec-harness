@@ -1,5 +1,15 @@
 /** Deterministic application execution plans: capability requirement -> exact provider.
- *  No implicit "latest", no install-order resolution, no runtime fallback. */
+ *  No implicit "latest", no install-order resolution, no runtime fallback.
+ *
+ *  Plan digest contract (R1):
+ *  - v1 (no marker field): body = { appId, appVersion, runtimeBundleDigest, requirements,
+ *    capabilities }. Kept byte-identical so releases registered before contract v2 re-verify in
+ *    their original format; they are never backfilled or rewritten into v2.
+ *  - v2 (planContractVersion '2'): the body additionally fixes descriptorDigest plus the
+ *    input-schema / material-role / declarative-view contract references (absent declared as
+ *    explicit null), so changing any controlled declaration moves planDigest and therefore
+ *    releaseDigest, voiding the old approval. The hashed body never contains planDigest itself
+ *    or the releaseDigest-bearing full appReleaseId. */
 import { createHash } from 'node:crypto';
 
 export interface CapabilityRequirement { capabilityId: string; version: string; }
@@ -9,8 +19,18 @@ export interface CapabilityProvider {
   protocolVersion: string; inputSchemaVersion: string; outputSchemaVersion: string;
   dependencies: readonly CapabilityRequirement[];
 }
+/** A named contract fact (schema/role/view) fixed by version and content digest. */
+export interface PlanContractRef { version: string; digest: string; }
+export interface ReleaseIdentity {
+  descriptorDigest: string;
+  input?: PlanContractRef;
+  roles?: PlanContractRef;
+  view?: PlanContractRef;
+}
 export interface ApplicationRelease {
   appId: string; version: string;
+  /** Release identity facts (R1). Present ⇒ plan contract v2; absent ⇒ the legacy v1 formula. */
+  identity?: ReleaseIdentity;
   requiredCapabilities: readonly CapabilityRequirement[];
   providers: readonly CapabilityProvider[];
   runtimeBundleDigest: string;
@@ -23,6 +43,11 @@ export interface ExecutionPlan {
   requirements: CapabilityRequirement[];
   capabilities: PlannedCapability[];
   planDigest: string;
+  planContractVersion?: '2';
+  descriptorDigest?: string;
+  input?: PlanContractRef | null;
+  roles?: PlanContractRef | null;
+  view?: PlanContractRef | null;
 }
 export class PlanError extends Error {
   constructor(readonly code: string, message?: string) { super(message ?? code); }
@@ -57,11 +82,26 @@ function validateProvider(provider: CapabilityProvider): void {
   }
 }
 
+const validateIdentity = (identity: ReleaseIdentity): void => {
+  if (!/^[a-f0-9]{64}$/.test(identity.descriptorDigest)) {
+    throw new PlanError('PLAN_IDENTITY_INVALID', 'descriptorDigest');
+  }
+  for (const ref of [identity.input, identity.roles, identity.view]) {
+    if (ref === undefined) continue;
+    identifier(ref.version);
+    if (!/^[a-f0-9]{64}$/.test(ref.digest)) {
+      throw new PlanError('PLAN_IDENTITY_INVALID', `contract ${ref.version}`);
+    }
+  }
+};
+
 /** Resolve every requirement and each provider's transitive dependencies to exactly one provider. */
 export function resolveExecutionPlan(release: ApplicationRelease): ExecutionPlan {
   identifier(release.appId);
   identifier(release.version);
   if (!/^[a-f0-9]{64}$/.test(release.runtimeBundleDigest)) throw new PlanError('PLAN_RUNTIME_DIGEST_INVALID');
+  const identity = release.identity;
+  if (identity !== undefined) validateIdentity(identity);
   const providers = new Map<string, CapabilityProvider>();
   for (const provider of release.providers) {
     validateProvider(provider);
@@ -109,9 +149,26 @@ export function resolveExecutionPlan(release: ApplicationRelease): ExecutionPlan
   const requirements = release.requiredCapabilities
     .map((requirement) => ({ ...requirement }))
     .sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+  if (identity === undefined) {
+    // v1 body: byte-identical to the pre-v2 formula so historical records re-verify unchanged.
+    const body = {
+      appId: release.appId, appVersion: release.version,
+      runtimeBundleDigest: release.runtimeBundleDigest, requirements, capabilities,
+    };
+    return { ...body, requirements: requirements.map((requirement) => ({ ...requirement })),
+      capabilities: capabilities.map(cloneCapability), planDigest: digestOf(body) };
+  }
+  // v2 body: fixes descriptor and contract facts; absent contracts are recorded as explicit
+  // nulls (a missing view is "none", not undefined). Contains neither planDigest itself nor the
+  // releaseDigest-bearing full appReleaseId.
   const body = {
+    planContractVersion: '2' as const,
     appId: release.appId, appVersion: release.version,
+    descriptorDigest: identity.descriptorDigest,
     runtimeBundleDigest: release.runtimeBundleDigest, requirements, capabilities,
+    input: identity.input ?? null,
+    roles: identity.roles ?? null,
+    view: identity.view ?? null,
   };
   return { ...body, requirements: requirements.map((requirement) => ({ ...requirement })),
     capabilities: capabilities.map(cloneCapability), planDigest: digestOf(body) };
@@ -125,8 +182,16 @@ function cloneCapability(capability: PlannedCapability): PlannedCapability {
 }
 
 /** Startup check: the plan in hand must be exactly the one this release resolves to, not merely carry
- *  the same digest field. A tampered capability list or dependency set is rejected. */
+ *  the same digest field. A tampered capability list or dependency set is rejected. The plan
+ *  contract format is detected on both sides: a release with identity facts must verify against a
+ *  v2 plan, a legacy release against a v1 plan; mixing formats is a digest mismatch. */
 export function assertPlanMatchesRelease(release: ApplicationRelease, plan: ExecutionPlan): void {
+  const expectedV2 = release.identity !== undefined;
+  const storedV2 = plan.planContractVersion === '2';
+  if (expectedV2 !== storedV2) {
+    throw new PlanError('PLAN_DIGEST_MISMATCH',
+      `plan contract ${storedV2 ? 'v2' : 'v1'} does not match release identity ${expectedV2 ? 'v2' : 'v1'}`);
+  }
   const expected = resolveExecutionPlan(release);
   if (expected.planDigest !== plan.planDigest) {
     throw new PlanError('PLAN_DIGEST_MISMATCH', `${expected.planDigest} != ${plan.planDigest}`);

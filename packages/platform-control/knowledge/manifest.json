@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 2,
+  "pluginId": "ec-platform-control",
+  "owner": "平台控制面负责人",
+  "source": "src/knowledge-seeds.ts",
+  "taxonomy": {
+    "topics": ["publish", "dispatch", "recover", "identity", "knowledge"]
+  },
+  "seeds": [
+    { "knowledgeId": "platform-control.run.lifecycle", "topics": ["dispatch", "recover"] },
+    { "knowledgeId": "platform-control.model.governance", "topics": ["identity", "publish"] },
+    { "knowledgeId": "platform-control.quota.boundaries", "topics": ["dispatch", "publish"] },
+    { "knowledgeId": "platform-control.storage.recovery", "topics": ["recover"] },
+    { "knowledgeId": "platform-control.delivery.package", "topics": ["publish", "recover"] },
+    { "knowledgeId": "platform-control.upgrade.migration", "topics": ["recover", "knowledge"] }
+  ],
+  "validators": [],
+  "capabilities": [
+    { "tool": "platform_control_status", "topics": ["publish", "dispatch"] },
+    { "tool": "platform_workbench_snapshot", "topics": ["publish"] },
+    { "tool": "platform_control_create_work", "topics": ["publish"] },
+    { "tool": "platform_control_create_work_run", "topics": ["dispatch"] },
+    { "tool": "platform_control_recover_interrupted", "topics": ["recover"] },
+    { "tool": "platform_control_cancel_run", "topics": ["dispatch", "recover"] },
+    { "tool": "platform_control_list_runs", "topics": ["dispatch", "recover"] }
+  ],
+  "noMethodKnowledge": [
+    { "tool": "platform_control_status", "reason": "控制面状态与审计计数，属于运行事实读取；技术方法知识在 docs 语料中按文档前缀检索" }
+  ],
+  "agent": {
+    "id": "ec-platform-control.agent",
+    "version": "1.0.0",
+    "owner": "平台控制面负责人",
+    "topics": ["publish", "dispatch", "recover", "identity", "knowledge"],
+    "tools": [
+      { "tool": "platform_control_status", "topics": ["publish", "dispatch"] },
+      { "tool": "platform_control_create_work", "topics": ["publish"] },
+      { "tool": "platform_control_create_work_run", "topics": ["dispatch"] },
+      { "tool": "platform_control_recover_interrupted", "topics": ["recover"] },
+      { "tool": "platform_control_cancel_run", "topics": ["dispatch", "recover"] },
+      { "tool": "platform_control_list_runs", "topics": ["dispatch", "recover"] }
+    ],
+    "noMethodTools": [
+      { "tool": "platform_control_status", "reason": "状态读取；操作指引由 docs 语料提供，不产出结构化知识候选" }
+    ]
+  },
+  "feedback": {
+    "events": ["run.failed", "run.succeeded", "business.clarified"],
+    "projectionVersion": "1"
+  },
+  "goldenSet": {
+    "id": "ec-platform-control.golden",
+    "version": "1",
+    "cases": [
+      { "query": "运行停在 QUEUED", "expect": ["platform-control.run.lifecycle"] },
+      { "query": "RUN_QUOTA_DAILY_EXCEEDED", "expect": ["platform-control.quota.boundaries"] },
+      { "query": "quick_check 报错", "expect": ["platform-control.storage.recovery"] },
+      { "query": "完全不存在的黄金集探针词", "expect": [], "expectEmpty": true }
+    ]
+  },
+  "corpus": {
+    "source": "docs/",
+    "docPrefixes": ["docs/PLATFORM-CONTROL-IMPLEMENTATION.md", "docs/PLATFORM-OPERATIONS-RUNBOOK.md", "docs/PLATFORM-FAULT-RUNBOOK.md", "docs/PLATFORM-RUN-LIFECYCLE-CONTRACT.md"]
+  },
+  "scope": { "projects": "all" }
+}

@@ -1,10 +1,10 @@
 /** 公司 DVP 工作簿解析：先分类 sheet 角色，再按列语义关键词映射生成规则 IR。
  *  结构适配不作为读取门槛（用户既定原则）：列名按关键词映射，缺失列记诊断不硬拒。
- *  数据边界（docs/DVP-TEMPLATE-SCHEMA.md §8，用户既定，不可协商）：
- *  - Cover 内容永不读取；
- *  - Approval 签署内容不读取；
- *  - Manual Review for Programming 的 TEST CASE 受试者号与 DM/DBD 评审意见只计数，不回传；
- *  - 未识别 sheet 只记录存在，不读取内容。 */
+ *  数据边界随部署模式（data-boundary.ts）：
+ *  - redacted（默认 / 混有外部模型的部署；docs/DVP-TEMPLATE-SCHEMA.md §8）：
+ *      Cover 内容不读取；Approval 签署内容不读取；TEST CASE 受试者号与 DM/DBD 评审意见只计数，不回传；
+ *  - full（模型目录全部为公司内部模型；2026-11-24 用户定调）：以上内容原值返回。
+ *  - 未识别 sheet 在本工具里只记录存在（没有规则 IR 语义）；全量模式可经 dm_dvp_read_workbook 读取。 */
 import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
@@ -14,11 +14,13 @@ import {
   type CrossFieldRule, type DvpDocument, type DynamicSpec,
   type FieldLevelSpec, type ManualReviewProgramming, type ManualReviewRule, type VersionRow,
 } from './rules.js';
+import { DATA_BOUNDARY_FULL_NOTICE, fullAccess } from './data-boundary.js';
 
 export class DvpError extends Error {
   constructor(readonly code: string, message?: string) { super(message ?? code); }
 }
 
+/** 脱敏模式的边界声明。 */
 export const BOUNDARY_NOTICES = [
   'COVER_CONTENT_NEVER_READ：Cover sheet 内容永不读取。',
   'APPROVAL_SIGNATURES_NOT_READ：签署/审批 sheet 内容不读取。',
@@ -26,14 +28,24 @@ export const BOUNDARY_NOTICES = [
   'UNRECOGNIZED_SHEETS_PRESENCE_ONLY：未识别 sheet 仅记录存在，不读取。',
 ];
 
+/** 当前部署模式的边界声明：调用时判定（env 覆盖即时生效）。 */
+export function boundaryNotices(): string[] {
+  return fullAccess() ? [DATA_BOUNDARY_FULL_NOTICE, 'UNRECOGNIZED_SHEETS_PRESENCE_ONLY：未识别 sheet 在本工具仅记录存在（可经 dm_dvp_read_workbook 读取）。'] : BOUNDARY_NOTICES;
+}
+
 export type SheetRole =
   | 'cover' | 'approval' | 'versionHistory' | 'crossField' | 'fieldLevel'
   | 'manualReview' | 'manualReviewProgramming' | 'dynamic' | 'unknown';
 
 export function classifySheet(name: string): { role: SheetRole; readable: boolean; note?: string } {
   const text = name.trim();
-  if (/^cover$/i.test(text)) return { role: 'cover', readable: false, note: 'CONTENT_NEVER_READ（既定边界）' };
-  if (/approval/i.test(text)) return { role: 'approval', readable: false, note: 'SIGNATURE_CONTENT_NOT_READ（签署内容不读取）' };
+  const full = fullAccess();
+  if (/^cover$/i.test(text)) {
+    return full ? { role: 'cover', readable: true } : { role: 'cover', readable: false, note: 'CONTENT_NEVER_READ（既定边界）' };
+  }
+  if (/approval/i.test(text)) {
+    return full ? { role: 'approval', readable: true } : { role: 'approval', readable: false, note: 'SIGNATURE_CONTENT_NOT_READ（签署内容不读取）' };
+  }
   if (/version|revision|history/i.test(text)) return { role: 'versionHistory', readable: true };
   if (/edit\s*checks?/i.test(text)) {
     return /field\s*level/i.test(text) ? { role: 'fieldLevel', readable: true } : { role: 'crossField', readable: true };
@@ -45,7 +57,9 @@ export function classifySheet(name: string): { role: SheetRole; readable: boolea
   return { role: 'unknown', readable: false, note: 'UNRECOGNIZED_SHEET_PRESENCE_ONLY（仅记录存在）' };
 }
 
-function locateInsideDirectory(directory: string, workbookPath: string): string {
+/** 把调用方给的工作簿路径限定在操作者提供的目录内（真实路径比较，拒绝越界与非 .xlsx/.xlsm）。
+ *  overview / parse 与通用读取（inputs.ts）共用同一条规则，不各写一份。 */
+export function locateInsideDirectory(directory: string, workbookPath: string): string {
   let base: string;
   try { base = realpathSync(resolve(directory)); } catch { throw new DvpError('DIRECTORY_NOT_FOUND'); }
   const candidate = resolve(base, workbookPath);
@@ -55,7 +69,11 @@ function locateInsideDirectory(directory: string, workbookPath: string): string 
   if (real !== base && !real.startsWith(prefix)) throw new DvpError('WORKBOOK_OUTSIDE_DIRECTORY');
   const stat = statSync(real);
   if (!stat.isFile()) throw new DvpError('WORKBOOK_NOT_FILE');
-  if (!/\.(xlsx|xlsm)$/i.test(real)) throw new DvpError('WORKBOOK_NOT_XLSX');
+  if (!/\.(xlsx|xlsm)$/i.test(real)) {
+    throw new DvpError('WORKBOOK_NOT_XLSX', /\.xls$/i.test(real)
+      ? '旧版 .xls（二进制 BIFF）不能直接读取；请在 Excel 中另存为 .xlsx 后重试'
+      : '仅支持 .xlsx / .xlsm（OOXML）工作簿');
+  }
   return real;
 }
 
@@ -77,6 +95,31 @@ function gridOf(content: AlsSheetContent): Map<number, Map<number, string>> {
     if (!rowMap.has(position.col)) rowMap.set(position.col, cell.formula ? '' : cell.value);
   }
   return grid;
+}
+
+/** 全量模式下治理页（Cover / Approval）的原值行列：行号升序、列为该页最大列索引、空单元格为 ''；上限 maxRows 行。 */
+function rowsOf(content: AlsSheetContent, maxRows = 500): string[][] {
+  const grid = gridOf(content);
+  const rows = [...grid.keys()].sort((a, b) => a - b);
+  const width = Math.max(0, ...[...grid.values()].flatMap((row) => [...row.keys()]));
+  return rows.slice(0, maxRows).map((rowIndex) => {
+    const rowMap = grid.get(rowIndex) ?? new Map<number, string>();
+    return Array.from({ length: width }, (_, c) => rowMap.get(c + 1) ?? '');
+  });
+}
+
+/** 按表头修正按 sheet 名字判出的角色（结构适配不作为读取门槛）。
+ *  实物（2020 版 V1.0，529 行）：Rave 的字段级规格放在名为 "Edit Checks Rave" 的 sheet 里，名字命中
+ *  "Edit Checks" 关键词被判成跨字段规则 → 目标字段/查询类型/逻辑等 5 列找不到，整页规则全空，且排在第一页。
+ *  规则：对 crossField / fieldLevel 候选，比较表头与两套列规格各自的命中数，命中明显更多（≥4 且多于对方）
+ *  的那套胜出；平手或都认不出表头时保留按名字的结果。 */
+function roleByHeaders(grid: Map<number, Map<number, string>>, role: SheetRole): SheetRole {
+  if (role !== 'crossField' && role !== 'fieldLevel') return role;
+  const crossHits = extractTable(grid, CROSS_SPECS)?.columns.size ?? 0;
+  const fieldHits = extractTable(grid, FIELD_LEVEL_SPECS)?.columns.size ?? 0;
+  if (fieldHits >= 4 && fieldHits > crossHits) return 'fieldLevel';
+  if (crossHits >= 4 && crossHits > fieldHits) return 'crossField';
+  return role;
 }
 
 interface ColumnSpec { key: string; pattern: RegExp; }
@@ -161,7 +204,7 @@ const MANUAL_REVIEW_SPECS: ColumnSpec[] = [
   { key: 'logic', pattern: /\blogic\b/i },
   { key: 'assign', pattern: /assign/i },
   { key: 'columnHeading', pattern: /column\s*heading/i },
-  // 计数专用：内容永不进入返回值。
+  // 脱敏模式只计数（内容不进入返回值）；全量模式随 programming.testCase/dmComment/dbdComment 原值返回。
   { key: 'testCase', pattern: /test\s*case/i },
   { key: 'dmComment', pattern: /\bdm\s*comment/i },
   { key: 'dbdComment', pattern: /\bdbd\s*comment/i },
@@ -239,6 +282,8 @@ function buildManualReview(recs: RowRecord[], sheetName: string, isProgramming: 
         testCaseSubjectCount: countEntries(rec.get('testCase')),
         dmCommentCount: countEntries(rec.get('dmComment')),
         dbdCommentCount: countEntries(rec.get('dbdComment')),
+        // 全量模式（公司内部模型部署）：原值一并返回；脱敏模式到此为止，字符串内容不进入返回对象。
+        ...(fullAccess() ? { testCase: rec.get('testCase'), dmComment: rec.get('dmComment'), dbdComment: rec.get('dbdComment') } : {}),
       };
     }
     const rule: ManualReviewRule = {
@@ -290,6 +335,8 @@ function buildVersionHistory(recs: RowRecord[]): VersionRow[] {
 export interface SheetReport {
   name: string; sheetId: string; visibility: string; role: string;
   note?: string; warnings?: string[]; formulaCells?: number; records?: number;
+  /** 仅全量模式的 Cover / Approval：该页原值行列（上限 500 行）。 */
+  content?: string[][];
 }
 export interface SectionStats { total: number; returned: number; offset: number; nextOffset: number | null; }
 export type DvpSection = 'crossField' | 'fieldLevel' | 'manualReview' | 'dynamic' | 'versionHistory';
@@ -323,7 +370,7 @@ export async function overviewDvpWorkbook(directory: string, workbookPath: strin
           role: classified.role, readable: classified.readable, ...(classified.note ? { note: classified.note } : {}),
         };
       }),
-      boundaryNotice: BOUNDARY_NOTICES,
+      boundaryNotice: boundaryNotices(),
     };
   } finally { workbook.close(); }
 }
@@ -381,7 +428,7 @@ export async function parseDvpWorkbook(directory: string, workbookPath: string, 
         dynamic: { total: 0, offset: 0, returned: 0, nextOffset: null },
         versionHistory: { total: 0, offset: 0, returned: 0, nextOffset: null },
       },
-      sheets: [], boundaryNotice: BOUNDARY_NOTICES,
+      sheets: [], boundaryNotice: boundaryNotices(),
     };
     const bump = (section: string, total: number): void => {
       const current = stats.sections[section] ?? { total: 0, returned: 0, offset: 0, nextOffset: null };
@@ -403,17 +450,33 @@ export async function parseDvpWorkbook(directory: string, workbookPath: string, 
       });
       if (!classified.readable) { stats.sheets.push(report); continue; }
       const content = await workbook.readWorksheet(sheet.id);
-      switch (classified.role) {
+      if (classified.role === 'cover' || classified.role === 'approval') {
+        // 全量模式下的治理页：没有规则 IR 语义，原值行列直接附在 sheet 报告里（上限 500 行）
+        report.content = rowsOf(content);
+        stats.sheets.push(report);
+        continue;
+      }
+      // 按表头修正按名字判出的角色（见 roleByHeaders）：旧版模板的 "Edit Checks Rave" 名字像跨字段规则，
+      // 表头却是字段级规格；不改的话 5 列找不到、整页规则全空。
+      const role = roleByHeaders(gridOf(content), classified.role);
+      let roleNote: string | undefined;
+      if (role !== classified.role) {
+        report.role = role;
+        roleNote = `ROLE_BY_HEADER：sheet 名像 ${classified.role}，按表头识别为 ${role}`;
+        const entry = document.sheets[document.sheets.length - 1];
+        if (entry && entry.sheetId === sheet.id) entry.role = role;
+      }
+      switch (role) {
         case 'crossField': {
           const { report: sectionReport, items } = parseSection(content, CROSS_SPECS, ['id', 'formName', 'targetField', 'queryType', 'discrepancy', 'logic'], buildCrossField);
           Object.assign(report, sectionReport);
-          collect('crossField', classified.role, items);
+          collect('crossField', role, items);
           break;
         }
         case 'fieldLevel': {
           const { report: sectionReport, items } = parseSection(content, FIELD_LEVEL_SPECS, ['formOid', 'fieldOid', 'formName'], buildFieldLevel);
           Object.assign(report, sectionReport);
-          collect('fieldLevel', classified.role, items);
+          collect('fieldLevel', role, items);
           break;
         }
         case 'manualReview':
@@ -440,6 +503,8 @@ export async function parseDvpWorkbook(directory: string, workbookPath: string, 
         default:
           break;
       }
+      // 列解析的 note 会覆盖 report.note：角色修正的说明放在最前面保留下来
+      if (roleNote) report.note = roleNote + (report.note ? `；${report.note}` : '');
       stats.sheets.push(report);
     }
     const sections: DvpSection[] = ['crossField', 'fieldLevel', 'manualReview', 'dynamic', 'versionHistory'];

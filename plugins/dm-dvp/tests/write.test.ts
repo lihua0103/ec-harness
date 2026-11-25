@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { writeDvpWorkbook, readWrittenWorkbook } from '../src/write.js';
+import { unzipSync, strFromU8 } from 'fflate';
+import { writeDvpWorkbook, readWrittenWorkbook, composeEditChecksHeaders, composeFieldLevelHeaders, changeMarkText } from '../src/write.js';
 import { parseDvpWorkbook, overviewDvpWorkbook, DvpError } from '../src/parse.js';
+import { InputError } from '../src/input.js';
 
 const DOCUMENT = JSON.stringify({
   project: { studyCode: 'SYN-001', dvpVersion: 'V2.0' },
@@ -183,5 +185,278 @@ test('Dynamic Type 枚举：越枚举计入 issues.dynamic 不静默，合法枚
     const result = writeDvpWorkbook(dir, 'bad.xlsx', bad);
     assert.equal(result.issues.dynamic, 2, '两条越枚举应计入 issues.dynamic');
     assert.equal(result.sheets.find((s) => s.name === 'Dynamic')?.rows, 3, '越枚举不硬拒，仍写出供核对');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('bulk 写入：NDJSON/JSON 数组文件引用展开，BULK_SOURCE 回报，越界/坏行/缺文件拒绝', () => {
+  const dir = withTempDir();
+  try {
+    const ndjson = [
+      { id: 'EC-B01', formName: 'AE', targetField: 'AEEND', relatedFields: ['AESTDT'], queryType: 'Missing', discrepancyText: 'AEEND 已提供，但 AESTDT 未提供。请核实。', logic: 'AEEND <> Null AND AESTDT = Null', visits: 'ALL' },
+      { id: 'EC-B02', formName: 'LB', targetField: 'LBRES', queryType: 'Range', discrepancyText: 'LBRES 超出允许范围。请核实。', logic: 'LBRES > 10' },
+      '',
+      { id: 'EC-B03', formName: 'VS', targetField: 'VSRES', queryType: 'Custom', discrepancyText: 'VSRES 不等于 VSPOS，请核实。', logic: 'VSRES <> VSPOS' },
+    ].map((r) => (r === '' ? '' : JSON.stringify(r))).join('\n');
+    writeFileSync(join(dir, 'cross.ndjson'), ndjson, 'utf8');
+    writeFileSync(join(dir, 'fields.json'), JSON.stringify([
+      { formOid: 'AE', formName: 'AE', fieldOid: 'AEEND', isLog: false, isRequired: true, queryFutureDate: false, queryNonConformance: true },
+    ]), 'utf8');
+    const result = writeDvpWorkbook(dir, 'bulk.xlsx', JSON.stringify({ crossField: 'cross.ndjson', fieldLevel: 'fields.json' }));
+    assert.equal(result.sheets.find((s) => s.name === 'Edit Checks')?.rows, 3, 'NDJSON 空行跳过后 3 条');
+    assert.equal(result.sheets.find((s) => s.name === 'Edit Checks(Field Level)')?.rows, 1);
+    assert.ok(result.notices.includes('BULK_SOURCE:crossField=cross.ndjson(3 rows)'), result.notices.join(' | '));
+    assert.ok(result.notices.includes('BULK_SOURCE:fieldLevel=fields.json(1 rows)'));
+    assert.throws(
+      () => writeDvpWorkbook(dir, 'esc.xlsx', JSON.stringify({ crossField: '../outside.ndjson' })),
+      (e: unknown) => e instanceof InputError && e.code === 'BULK_REF_OUTSIDE_DIRECTORY',
+    );
+    writeFileSync(join(dir, 'bad.ndjson'), '{"id":\n', 'utf8');
+    assert.throws(
+      () => writeDvpWorkbook(dir, 'bad.xlsx', JSON.stringify({ crossField: 'bad.ndjson' })),
+      (e: unknown) => e instanceof InputError && e.code === 'BULK_FILE_BAD_LINE:1',
+    );
+    assert.throws(
+      () => writeDvpWorkbook(dir, 'nf.xlsx', JSON.stringify({ crossField: 'missing.ndjson' })),
+      (e: unknown) => e instanceof InputError && e.code === 'BULK_FILE_NOT_FOUND',
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('模板差量配置（V6.0 形态）：approval-first、无 Query Type、Rave 页名、无 Programming 页、Subject Status/Matrix 页', () => {
+  const dir = withTempDir();
+  try {
+    const payload = JSON.stringify({
+      template: {
+        governanceOrder: 'approval-first', editChecksQueryType: false,
+        fieldLevelSheetName: 'Edit Checks Rave', includeProgramming: false,
+        includeSubjectStatus: true, includeMatrix: true,
+      },
+      crossField: [{ id: 'SV_01', visits: '筛选期', formName: '知情同意书', targetField: '签署日期', discrepancyText: '访视日期早于知情同意书签署日期。请核实。', logic: '访视日期 < 【知情同意书.签署日期】' }],
+      subjectStatus: [
+        { status: 'Screening', condition: '【受试者信息.受试者筛选号】<> Null' },
+        { status: 'Enrolled', condition: '【筛选/入组确认.计划入组】= 是' },
+      ],
+      matrix: [
+        { id: 'DYN_VISIT_02', folder: '筛选期', oid: 'SCR', forms: ['实验室检查', 'KPS评分'] },
+        { id: 'DYN_VISIT_C2D1', folder: '第2周期（Day1）', oid: 'C2D1', forms: ['甲状腺功能'] },
+      ],
+    });
+    const result = writeDvpWorkbook(dir, 'v6-form.xlsx', payload);
+    assert.deepEqual(result.sheets.map((s) => s.name), [
+      'DVP Approval Form', 'Cover', 'Version History', 'Edit Checks', 'Edit Checks Rave',
+      'Manual Review', 'Dynamic', 'Subject Status', 'Matrix',
+    ]);
+    assert.equal(result.sheets.find((s) => s.name === 'Subject Status')?.rows, 2);
+    assert.equal(result.sheets.find((s) => s.name === 'Matrix')?.rows, 2, 'Matrix 行数不含表头');
+    // 非法 sheet 名 / 非法治理顺序硬拒；未知 template 键上报
+    assert.throws(
+      () => writeDvpWorkbook(dir, 'bad-name.xlsx', JSON.stringify({ template: { fieldLevelSheetName: 'a/b' } })),
+      (e: unknown) => e instanceof InputError && e.code === 'INVALID_SHEET_NAME',
+    );
+    assert.throws(
+      () => writeDvpWorkbook(dir, 'bad-order.xlsx', JSON.stringify({ template: { governanceOrder: 'latest' } })),
+      (e: unknown) => e instanceof InputError && e.code === 'TEMPLATE_BAD_GOVERNANCE_ORDER',
+    );
+    const tunk = writeDvpWorkbook(dir, 'tunk.xlsx', JSON.stringify({ template: { theme: 'dark' } }));
+    assert.ok(tunk.notices.some((n) => n.includes('UNKNOWN_KEYS_IGNORED:template.theme')), tunk.notices.join(' | '));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Subject Status/Matrix 区有行时默认也生成对应页（无需 template 开关）；folrder 别名与 forms 文本分隔', () => {
+  const dir = withTempDir();
+  try {
+    const payload = JSON.stringify({
+      subjectStatus: [{ status: 'Screen Failed', condition: '【筛选/入组确认.入选标准】不满足' }],
+      matrix: [{ id: 'DYN_VISIT_03', folrder: '肿瘤评估', oid: 'TUM', forms: '影像评估;疗效评估' }],
+    });
+    const result = writeDvpWorkbook(dir, 'ss.xlsx', payload);
+    assert.equal(result.sheets.find((s) => s.name === 'Subject Status')?.rows, 1);
+    assert.equal(result.sheets.find((s) => s.name === 'Matrix')?.rows, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('DXP 实物形态旋钮：Testcase 两列、ALS 14 列布局、MR note 行、尾词规范化', () => {
+  const dir = withTempDir();
+  try {
+    // 表头组装（与写簿同源）
+    assert.deepEqual(composeEditChecksHeaders({ editChecksQueryType: false, editChecksTestcaseColumns: true }).slice(-2),
+      ['Testcase Query Fired \r\n', 'Testcase Query not Fired '], '字节级原文：I 列尾随 CRLF+空格、J 列尾随空格');
+    assert.equal(composeEditChecksHeaders({ editChecksQueryType: false, editChecksTestcaseColumns: true }).length, 10);
+    assert.equal(composeEditChecksHeaders({}).length, 9, '默认契约不变：9 列含 Query Type');
+    assert.equal(composeFieldLevelHeaders({ fieldLevelLayout: 'als' }).length, 14);
+    assert.equal(composeFieldLevelHeaders({}).length, 11, '默认契约不变：11 列含 IsLog');
+    assert.equal(composeFieldLevelHeaders({ fieldLevelLayout: 'als' })[0], 'Add/Delete/Update\r\n (applicable for database amendment)', '字节级原文：CRLF+前导空格');
+    assert.equal(composeFieldLevelHeaders({ fieldLevelLayout: 'als' })[7], 'Is\r\nRequired\r\n(True/False)', '字节级原文：H1 三行折行');
+    assert.equal(composeFieldLevelHeaders({ fieldLevelLayout: 'als' })[10], 'Test Subject Number ', '字节级原文：K1 尾随空格');
+
+    const payload = JSON.stringify({
+      template: {
+        editChecksQueryType: false, editChecksTestcaseColumns: true,
+        fieldLevelSheetName: 'ALS', fieldLevelLayout: 'als',
+        manualReviewNote: ['Note for Listing Programmer:  1. 所有的Data listing的最初几列固定为：Protocol, Site, Subject, Visit;'],
+        discrepancyTail: '请核查',
+      },
+      crossField: [{ id: 'IE_01', visits: '筛选期（D-14~D-1）', formName: '入选标准', targetField: '年龄', discrepancyText: '筛选年龄超出方案范围。请核实。', logic: '年龄 > 75' }],
+      fieldLevel: [{ changeMark: { action: 'Add', version: 'V1.0' }, formOid: 'IE', formName: '入选标准', fieldOid: 'IEAGE', preText: '年龄', controlType: 'Text', dataFormat: '', isLog: false, isRequired: true, queryFutureDate: false, queryNonConformance: false }],
+      manualReview: [{ id: 'MR_01', visits: 'ALL', formName: '血常规', relatedFields: 'WBC', reportDescription: '复核白细胞异常。', discrepancyText: '白细胞计数异常，请核实。', logic: '人工核查' }],
+    });
+    const result = writeDvpWorkbook(dir, 'dxp-form.xlsx', payload);
+    assert.ok(result.sheets.find((s) => s.name === 'ALS'), 'fieldLevelSheetName=ALS 应生效');
+    assert.ok(result.notices.every((n) => !n.startsWith('UNKNOWN_KEYS_IGNORED')), '新旋钮不应记未知键：' + result.notices.join(' | '));
+    // 尾词规范化经 parse 往返校验（Edit Checks 差异文本列）
+    return (async () => {
+      const { document } = await parseDvpWorkbook(dir, 'dxp-form.xlsx');
+      assert.equal(document.crossField[0].discrepancyText.endsWith('请核查'), true, document.crossField[0].discrepancyText);
+      assert.equal(document.crossField[0].discrepancyText.includes('请核实'), false, '旧尾词应被替换');
+    })();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('fieldLevel bool 原值透传：源模板三列 raw 字面输出（消除 bool 归一残差）', async () => {
+  const dir = withTempDir();
+  try {
+    const payload = JSON.stringify({
+      template: { fieldLevelLayout: 'als' },
+      fieldLevel: [
+        { formOid: 'AE', formName: '不良事件', fieldOid: 'AETERM', preText: '不良事件名称', controlType: 'TextField', dataFormat: '$200',
+          isRequired: true, queryFutureDate: false, queryNonConformance: false, isRequiredRaw: 'True', queryFutureDateRaw: 'False', queryNonConformanceRaw: 'False' },
+        { formOid: 'AE', formName: '不良事件', fieldOid: 'AESTDAT', preText: '开始日期', controlType: 'DateTime', dataFormat: '',
+          isRequired: true, queryFutureDate: false, queryNonConformance: true },
+      ],
+    });
+    const result = writeDvpWorkbook(dir, 'raw-bool.xlsx', payload);
+    assert.ok(result.notices.every((n) => !n.startsWith('UNKNOWN_KEYS_IGNORED')), 'raw 三键应为已知键：' + result.notices.join(' | '));
+    const files = unzipSync(readWrittenWorkbook(join(dir, 'raw-bool.xlsx')));
+    const sheetXml = Object.entries(files)
+      .filter(([n]) => n.startsWith('xl/worksheets/'))
+      .map(([, b]) => strFromU8(b))
+      .find((x) => x.includes('AETERM'));
+    assert.ok(sheetXml, 'ALS sheet XML 应存在');
+    assert.equal(sheetXml.includes('>True<'), true, 'isRequiredRaw 字面 True 原样输出');
+    assert.equal((sheetXml.match(/>True</g) ?? []).length, 1);
+    assert.equal((sheetXml.match(/>False</g) ?? []).length, 2, 'queryFutureDateRaw/queryNonConformanceRaw 字面 False 原样输出');
+    assert.equal((sheetXml.match(/>TRUE</g) ?? []).length, 2, '未传 raw 的行仍走 boolText 归一（契约不变；第 2 行 isRequired+queryNonConformance）');
+    assert.equal((sheetXml.match(/>FALSE</g) ?? []).length, 1, '未传 raw 的行仍走 boolText 归一（契约不变）');
+    const { document } = await parseDvpWorkbook(dir, 'raw-bool.xlsx');
+    assert.equal(document.fieldLevel[0].isRequired, true);
+    assert.equal(document.fieldLevel[1].isRequired, true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('源模板原文通道：relatedFields 尾换行与 Dynamic extra 列逐字保留', () => {
+  const dir = withTempDir();
+  try {
+    const payload = JSON.stringify({
+      template: { changeMarkStyle: 'version' },
+      crossField: [
+        { id: 'EC-RAW-1', changeMark: { action: 'Update', version: 'v2.0' }, changeMarkRaw: 'Update-v2.0 ', formName: 'AE', targetField: 'AETERM', relatedFields: ['AEEND'], relatedFieldsRaw: 'AEEND\n', queryType: 'Custom', discrepancyText: 'Check.', logic: 'AETERM <> Null', sourceCells: ['EC-RAW-1', 'Update-v2.0 ', 'ALL', 'AE', 'AETERM', 'AEEND\n', 'Custom', 'Check.', 'AETERM <> Null'] },
+        { id: 'EC-IR-1', formName: 'AE', targetField: 'AETERM', relatedFields: ['AEEND', 'AESEV'], queryType: 'Custom', discrepancyText: 'Check.', logic: 'AETERM <> Null' },
+      ],
+      dynamic: [{ id: 'DYN-RAW-1', changeMark: { action: 'Update', version: 'v3.0' }, changeMarkRaw: 'update-v3.0', formName: 'AE', fieldName: 'AETERM', type: 'Dynamic Field', extra: ['Template note\\r\\n'] }],
+    });
+    const result = writeDvpWorkbook(dir, 'raw-fields.xlsx', payload);
+    assert.ok(result.notices.every((n) => !n.startsWith('UNKNOWN_KEYS_IGNORED')), result.notices.join(' | '));
+    const files = unzipSync(readWrittenWorkbook(join(dir, 'raw-fields.xlsx')));
+    const sheetXmls = Object.entries(files).filter(([n]) => n.startsWith('xl/worksheets/')).map(([, b]) => strFromU8(b));
+    const ecXml = sheetXmls.find((x) => x.includes('EC-RAW-1'));
+    const dynXml = sheetXmls.find((x) => x.includes('DYN-RAW-1'));
+    assert.ok(ecXml?.includes('Update-v2.0 '), 'changeMarkRaw 不应用 version/style 归一');
+    assert.ok(dynXml?.includes('update-v3.0'), 'Dynamic changeMarkRaw 原样透传');
+    assert.ok(ecXml?.includes('AEEND\n</t>'), 'relatedFieldsRaw 保留尾换行');
+    assert.ok(ecXml?.includes('AEEND\nAESEV'), '未提供 raw 时继续按 IR 列表换行 join');
+    assert.ok(dynXml?.includes('Template note\\r\\n</t>'), 'Dynamic extra 按模板原序逐字追加');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('源模板字段级尾列：ALS extra 按原序透传', () => {
+  const dir = withTempDir();
+  try {
+    const payload = JSON.stringify({
+      template: { fieldLevelLayout: 'als', fieldLevelSheetName: 'Field Checks' },
+      fieldLevel: [{ formOid: 'F1', formName: 'Form', fieldOid: 'ITEM', preText: 'Label', controlType: 'Text', dataFormat: '',
+        isLog: false, isRequired: true, queryFutureDate: false, queryNonConformance: false,
+        extra: ['Marker A', 'Marker B'] }],
+    });
+    const result = writeDvpWorkbook(dir, 'field-extra.xlsx', payload);
+    assert.ok(result.notices.every((n) => !n.startsWith('UNKNOWN_KEYS_IGNORED')), result.notices.join(' | '));
+    const files = unzipSync(readWrittenWorkbook(join(dir, 'field-extra.xlsx')));
+    const xml = Object.entries(files).filter(([n]) => n.startsWith('xl/worksheets/')).map(([, b]) => strFromU8(b)).find((x) => x.includes('ITEM'));
+    assert.ok(xml?.includes('Marker A'));
+    assert.ok(xml?.includes('Marker B'));
+    assert.ok(xml!.indexOf('Marker A') < xml!.indexOf('Marker B'));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('旋钮非法值硬拒：fieldLevelLayout 非枚举、MR note 非字符串数组、尾词超长', () => {
+  const dir = withTempDir();
+  try {
+    assert.throws(
+      () => writeDvpWorkbook(dir, 'bad-layout.xlsx', JSON.stringify({ template: { fieldLevelLayout: 'dxp' } })),
+      (e: unknown) => e instanceof InputError && e.code === 'TEMPLATE_BAD_FIELD_LEVEL_LAYOUT',
+    );
+    assert.throws(
+      () => writeDvpWorkbook(dir, 'bad-note.xlsx', JSON.stringify({ template: { manualReviewNote: [1, 2] } })),
+      (e: unknown) => e instanceof InputError && e.code === 'TEMPLATE_BAD_MANUAL_REVIEW_NOTE',
+    );
+    assert.throws(
+      () => writeDvpWorkbook(dir, 'bad-tail.xlsx', JSON.stringify({ template: { discrepancyTail: 'x'.repeat(21) } })),
+      (e: unknown) => e instanceof InputError && e.code === 'TEMPLATE_BAD_DISCREPANCY_TAIL',
+    );
+    assert.throws(
+      () => writeDvpWorkbook(dir, 'bad-mrh.xlsx', JSON.stringify({ template: { sheetHeaders: '11列' } })),
+      (e: unknown) => e instanceof InputError && e.code === 'TEMPLATE_BAD_SHEET_HEADERS',
+    );
+    assert.throws(
+      () => writeDvpWorkbook(dir, 'bad-mrh2.xlsx', JSON.stringify({ template: { sheetHeaders: { 'Manual Review': { a: 1 } } } })),
+      (e: unknown) => e instanceof InputError && e.code === 'TEMPLATE_BAD_SHEET_HEADERS',
+    );
+    assert.throws(
+      () => writeDvpWorkbook(dir, 'bad-mrh3.xlsx', JSON.stringify({ template: { sheetHeaders: { 'Manual Review': ['x'.repeat(201)] } } })),
+      (e: unknown) => e instanceof InputError && e.code === 'TEMPLATE_BAD_SHEET_HEADERS',
+    );
+    assert.throws(
+      () => writeDvpWorkbook(dir, 'bad-cms.xlsx', JSON.stringify({ template: { changeMarkStyle: 'dxp' } })),
+      (e: unknown) => e instanceof InputError && e.code === 'TEMPLATE_BAD_CHANGE_MARK_STYLE',
+    );
+    assert.throws(
+      () => writeDvpWorkbook(dir, 'bad-order.xlsx', JSON.stringify({ template: { sheetOrder: 'ALS' } })),
+      (e: unknown) => e instanceof InputError && e.code === 'TEMPLATE_BAD_SHEET_ORDER',
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('DXP r2 旋钮：testcase 值列、sheetHeaders 表头覆盖与 MR extra、version 风格 B 列、sheetOrder 重排', () => {
+  const dir = withTempDir();
+  try {
+    // B 列渲染同源断言
+    assert.equal(changeMarkText({ changeMarkStyle: 'version' }, { action: 'Add', version: 'V1.0' }), '1.0');
+    assert.equal(changeMarkText({ changeMarkStyle: 'version' }, { action: 'Add', version: 'v2.1' }), '2.1');
+    assert.equal(changeMarkText({ changeMarkStyle: 'version' }, null), '');
+    assert.equal(changeMarkText({}, { action: 'Add', version: 'V1.0' }), 'Add/V1.0', '默认契约不变');
+
+    const payload = JSON.stringify({
+      template: {
+        changeMarkStyle: 'version',
+        sheetHeaders: {
+          'Manual Review': ['Unique ID', '版本', '访视', '表单', '相关字段', '复核说明', '差异文本', '逻辑', 'Flag', 'Review Comments', 'Initial/Date'],
+          'Edit Checks': ['Unique ID (provide by DBD)\r\n', 'Add/ Delete/ Update (applicable for database amendment)', 'Visit(s) Applied To\r\n', 'Form Name\r\n', 'Query Targeted Field\r\n', 'Related Field', 'Discrepancy Text Message\r\n', 'Logic\r\n', 'Testcase Query Fired \r\n', 'Testcase Query not Fired '],
+          'Version History': ['Version\r\n版本', 'Version Date\r\n版本日期', 'Modified By\r\n更新者', 'Comments\r\n备注'],
+        },
+        sheetOrder: ['DVP Approval Form', 'Cover', 'Version History', 'ALS', 'Edit Checks', 'Manual Review', 'Dynamic'],
+        fieldLevelSheetName: 'ALS',
+        editChecksTestcaseColumns: true,
+        includeProgramming: false,
+      },
+      crossField: [{ id: 'EC_01', changeMark: { action: 'Add', version: 'V1.0' }, formName: '访视日期', targetField: '访视日期', visits: '筛选期', discrepancyText: '计划访视日期外。', logic: '访视日期 > 计划访视日期上限', testcaseFired: '16 Feb 2021', testcaseNotFired: '17 Feb 2021' }],
+      fieldLevel: [{ changeMark: { action: 'Add', version: 'V1.0' }, formOid: 'SV', formName: '访视日期', fieldOid: 'SVDATE', preText: '访视日期', controlType: 'DateTime', dataFormat: 'dd mmm yyyy', isLog: false, isRequired: true, queryFutureDate: false, queryNonConformance: false }],
+      manualReview: [{ id: 'MR_01', visits: 'ALL', formName: '血常规', relatedFields: 'WBC', reportDescription: '复核白细胞。', discrepancyText: '白细胞异常。', logic: '人工核查', extraCells: ['Fail', 'WBC 偏高', 'XY 2021-03-01'] }],
+    });
+    const result = writeDvpWorkbook(dir, 'r2.xlsx', payload);
+    assert.deepEqual(result.sheets.map((s) => s.name),
+      ['DVP Approval Form', 'Cover', 'Version History', 'ALS', 'Edit Checks', 'Manual Review', 'Dynamic'],
+      'sheetOrder 应把 ALS 排到 Edit Checks 前：' + result.sheets.map((s) => s.name).join(','));
+    // 未传 manualReviewNote 时默认落 STD 公司便签行（1 note + 1 data），行数统计不含表头
+    assert.equal(result.sheets.find((s) => s.name === 'Manual Review')?.rows, 2, '默认 STD 便签行应计入');
+    assert.ok(result.notices.every((n) => !n.startsWith('UNKNOWN_KEYS_IGNORED')), '新键名应全部已知：' + result.notices.join(' | '));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

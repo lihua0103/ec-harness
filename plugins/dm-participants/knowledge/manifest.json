@@ -1,0 +1,249 @@
+{
+  "schemaVersion": 2,
+  "pluginId": "ec-clinical-dm-participants",
+  "owner": "dm-participants 维护者",
+  "source": "src/knowledge-seeds.ts",
+  "taxonomy": {
+    "topics": [
+      "channel",
+      "page",
+      "pairing",
+      "rbqm-ops"
+    ]
+  },
+  "seeds": [
+    {
+      "knowledgeId": "dm-participants.channel.pipeline",
+      "topics": [
+        "channel"
+      ]
+    },
+    {
+      "knowledgeId": "dm-participants.page.assembly",
+      "topics": [
+        "page"
+      ]
+    },
+    {
+      "knowledgeId": "dm-participants.pairing.acceptance",
+      "topics": [
+        "pairing"
+      ]
+    },
+    {
+      "knowledgeId": "dm-participants.rbqm-ops.sql-endpoints",
+      "topics": [
+        "rbqm-ops"
+      ]
+    },
+    {
+      "knowledgeId": "dm-participants.rbqm-ops.temp-table-write",
+      "topics": [
+        "rbqm-ops"
+      ]
+    },
+    {
+      "knowledgeId": "dm-participants.rbqm-ops.registry-replace",
+      "topics": [
+        "rbqm-ops"
+      ]
+    },
+    {
+      "knowledgeId": "dm-participants.rbqm-ops.shared-scope",
+      "topics": [
+        "rbqm-ops"
+      ]
+    },
+    {
+      "knowledgeId": "dm-participants.rbqm-ops.import-queue",
+      "topics": [
+        "rbqm-ops"
+      ]
+    },
+    {
+      "knowledgeId": "dm-participants.rbqm-ops.dataset-schema-reuse",
+      "topics": [
+        "rbqm-ops"
+      ]
+    },
+    {
+      "knowledgeId": "dm-participants.rbqm-ops.source-rows-complete",
+      "topics": [
+        "rbqm-ops"
+      ]
+    }
+  ],
+  "validators": [],
+  "capabilities": [
+    {
+      "tool": "pt_viz_import_xlsx",
+      "topics": [
+        "channel"
+      ]
+    },
+    {
+      "tool": "pt_viz_describe_dataset",
+      "topics": [
+        "channel"
+      ]
+    },
+    {
+      "tool": "pt_viz_build",
+      "topics": [
+        "page"
+      ]
+    },
+    {
+      "tool": "pt_viz_render",
+      "topics": [
+        "page"
+      ]
+    },
+    {
+      "tool": "pt_viz_design_extract",
+      "topics": [
+        "pairing"
+      ]
+    },
+    {
+      "tool": "pt_viz_design_pair",
+      "topics": [
+        "pairing"
+      ]
+    },
+    {
+      "tool": "pt_viz_verify",
+      "topics": [
+        "pairing"
+      ]
+    },
+    {
+      "tool": "pt_viz_deliver",
+      "topics": [
+        "pairing"
+      ]
+    },
+    {
+      "tool": "pt_viz_methods",
+      "topics": [
+        "channel",
+        "page",
+        "pairing"
+      ]
+    }
+  ],
+  "noMethodKnowledge": [
+    {
+      "tool": "pt_viz_status",
+      "reason": "状态报告，无方法语义"
+    }
+  ],
+  "agent": {
+    "id": "dm-participants.agent",
+    "version": "1.0.0",
+    "owner": "dm-participants 维护者",
+    "topics": [
+      "channel",
+      "page",
+      "pairing",
+      "rbqm-ops"
+    ],
+    "tools": [
+      {
+        "tool": "pt_viz_methods",
+        "topics": [
+          "channel",
+          "page",
+          "pairing"
+        ]
+      },
+      {
+        "tool": "pt_viz_import_xlsx",
+        "topics": [
+          "channel"
+        ]
+      },
+      {
+        "tool": "pt_viz_describe_dataset",
+        "topics": [
+          "channel"
+        ]
+      },
+      {
+        "tool": "pt_viz_build",
+        "topics": [
+          "page"
+        ]
+      },
+      {
+        "tool": "pt_viz_render",
+        "topics": [
+          "page"
+        ]
+      },
+      {
+        "tool": "pt_viz_verify",
+        "topics": [
+          "pairing"
+        ]
+      }
+    ],
+    "noMethodTools": [
+      {
+        "tool": "pt_viz_status",
+        "reason": "状态报告，无方法语义"
+      }
+    ]
+  },
+  "feedback": {
+    "events": [
+      "run.failed",
+      "qc.completed",
+      "business.clarified"
+    ],
+    "projectionVersion": "1"
+  },
+  "goldenSet": {
+    "id": "dm-participants.golden",
+    "version": "1",
+    "cases": [
+      {
+        "query": "原始数据保留",
+        "expect": [
+          "dm-participants.channel.pipeline"
+        ]
+      },
+      {
+        "query": "18 张固定图",
+        "expect": [
+          "dm-participants.page.assembly"
+        ]
+      },
+      {
+        "query": "零泄漏核对",
+        "expect": [
+          "dm-participants.pairing.acceptance"
+        ]
+      },
+      {
+        "query": "完全不存在的黄金集探针词",
+        "expect": [],
+        "expectEmpty": true
+      },
+      {
+        "query": "failureFileList",
+        "expect": [
+          "dm-participants.rbqm-ops.import-queue"
+        ]
+      },
+      {
+        "query": "方案偏离",
+        "expect": [],
+        "expectEmpty": true
+      }
+    ]
+  },
+  "scope": {
+    "projects": "all"
+  }
+}

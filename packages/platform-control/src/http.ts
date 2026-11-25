@@ -15,7 +15,10 @@ import { PlatformError } from './registry.js';
 import { AuthorizationError, type Principal } from './policy.js';
 import { RunError } from '../../platform-runtime/src/run.js';
 import { publicCatalog } from './models.js';
+import { readDataBoundary, writeDataBoundary } from './data-boundary.js';
+import type { DoctorReport } from './doctor.js';
 import type { AppRecord, ArtifactRecord, InputCommit, RunRecord, WorkRecord } from './store.js';
+import { correlationFromHeader, metrics, runWithCorrelation } from './observability.js';
 
 export type Authenticator = (req: IncomingMessage) => Principal | Promise<Principal>;
 
@@ -24,6 +27,8 @@ export interface WorkbenchApiOptions {
   authenticate: Authenticator;
   /** Static workbench assets served on the same origin; API-only when omitted. */
   appDir?: string;
+  /** 数据安全开关文件（缺省：仓库根下 `.runtime/data-boundary.json`，与 CLI 和 dm-dvp 插件共用）。 */
+  dataBoundaryFile?: string;
   /** Display context included in the bootstrap payload. */
   workspace?: { name: string; note?: string };
   configuration?: {
@@ -31,6 +36,9 @@ export interface WorkbenchApiOptions {
     worker: { configured: boolean; profile?: string; workspace?: string };
     instructions: string[];
   };
+  /** Operations panel (E3-1): the deployment's doctor probe. Absent means the panel states
+   *  "doctor 未接入" instead of inventing checks. */
+  doctor?: () => Promise<DoctorReport> | DoctorReport;
 }
 
 const MAX_BODY = 1024 * 1024;
@@ -54,6 +62,18 @@ export const publicApp = (app: AppRecord) => ({
   releaseDigest: app.releaseDigest,
   createdAt: app.createdAt,
   ...(app.revokedAt ? { revokedAt: app.revokedAt } : {}),
+});
+/** Bounded employee-surface projection (W2/R2): identity, availability digests and display
+ *  metadata only — no descriptor, result views or input schema. The full declaration is served
+ *  by the catalog detail endpoint after a project and release have been selected. */
+export const publicAppSummary = (app: AppRecord) => ({
+  appId: app.appId,
+  appVersion: app.appVersion,
+  state: app.state,
+  displayName: app.draft.descriptor.displayName,
+  ...(app.draft.descriptor.listingTypes !== undefined ? { listingTypes: app.draft.descriptor.listingTypes } : {}),
+  planDigest: app.plan.planDigest,
+  releaseDigest: app.releaseDigest,
 });
 export const publicRun = (record: RunRecord) => {
   // Run input and prior-work context are exposed only through their authorized scoped views.
@@ -86,17 +106,39 @@ const errorStatus = (error: unknown): number => {
     if (/_NOT_FOUND$|_NOT_BOUND$/.test(error.code)) return 404;
     if (/_ACCESS_DENIED$|_AUTHORIZATION_DENIED$/.test(error.code)) return 403;
     if (/_TOO_LARGE$/.test(error.code)) return 413;
-    if (/_EXISTS$|_ARCHIVED$|_TERMINAL$|_NOT_ACTIVE$|_REVISION_STALE$|_CANCEL_/.test(error.code)) return 409;
-    if (/_INVALID$|_UNKNOWN$|_REQUIRED$|_UNAVAILABLE$|_MISMATCH$|_OPTION_|_CHANGED$/.test(error.code)) return 400;
+    if (/_QUOTA_/.test(error.code)) return 429;
+    // §5 故障语义：知识/偏好权威服务不可用是部署降级（503），不是请求错误。
+    if (error.code === 'KNOWLEDGE_SERVICE_UNAVAILABLE' || error.code === 'PREFERENCE_SERVICE_UNAVAILABLE') return 503;
+    if (/_EXISTS$|_ARCHIVED$|_TERMINAL$|_NOT_ACTIVE$|_REVISION_STALE$|_VERSION_STALE$|_CANCEL_|_ALREADY_|_CONFLICT$/.test(error.code)) return 409;
+    if (/_INVALID$|_UNKNOWN$|_REQUIRED$|_UNAVAILABLE$|_MISMATCH$|_OPTION_|_CHANGED$|_LEAK$/.test(error.code)) return 400;
     return 409;
   }
   if (error instanceof RunError) return 409;
+  // 知识权威服务经 KnowledgeAccess 抛出 Error('CODE') 形式的错误代码：按同一张表映射，
+  // 不让代理错误静默变成 500（越权/不存在掩蔽、修订冲突等语义必须对工作台如实可见）。
+  const knowledgeCode = knowledgeCodeOf(error);
+  if (knowledgeCode) return knowledgeErrorStatus(knowledgeCode);
   return 500;
+};
+/** 知识服务错误形如 `KNOWLEDGE_NOT_FOUND` / `PREFERENCE_REVISION_STALE`；识别 ALLCAPS 代码。 */
+const knowledgeCodeOf = (error: unknown): string | null => {
+  if (!(error instanceof Error)) return null;
+  const firstLine = error.message.split('\n')[0] ?? '';
+  const match = /^([A-Z][A-Z0-9_]{3,80})(?::|$)/.exec(firstLine);
+  return match ? match[1] : null;
+};
+const knowledgeErrorStatus = (code: string): number => {
+  if (/_NOT_FOUND$|_UNAVAILABLE$/.test(code) && code !== 'KNOWLEDGE_SERVICE_UNAVAILABLE') return 404;
+  if (code === 'KNOWLEDGE_SERVICE_UNAVAILABLE' || code === 'PREFERENCE_SERVICE_UNAVAILABLE') return 503;
+  if (/REVISION_STALE$|VERSION_STALE$|_ALREADY_|_CONFLICT$|_WITHDRAW_CONFLICT$/.test(code)) return 409;
+  return 400;
 };
 const errorBody = (error: unknown): { ok: false; code: string; detail: string } => {
   if (error instanceof PlatformError || error instanceof AuthorizationError || error instanceof RunError) {
     return { ok: false, code: error.code, detail: error.message };
   }
+  const knowledgeCode = knowledgeCodeOf(error);
+  if (knowledgeCode) return { ok: false, code: knowledgeCode, detail: '知识权威服务拒绝该请求（见错误代码）。' };
   return { ok: false, code: 'PLATFORM_OPERATION_FAILED', detail: '操作未完成；控制面未返回可公开的错误正文。' };
 };
 
@@ -209,23 +251,85 @@ export function createWorkbenchServer(options: WorkbenchApiOptions): Server {
       json(res, 200, { ok: true });
       return;
     }
+    if (segments[1] === 'metrics' && segments.length === 2 && method === 'GET') {
+      service.authorizeMetrics(principal);
+      if (url.searchParams.get('format') === 'prometheus') {
+        const text = metrics.text();
+        res.writeHead(200, {
+          'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
+          'Content-Length': Buffer.byteLength(text),
+          'Cache-Control': 'no-store',
+        });
+        res.end(text);
+        return;
+      }
+      json(res, 200, metrics.snapshot());
+      return;
+    }
+    // E3-1 operations panel: process metrics (p50/p95/p99), outbox depth, run counts, storage
+    // and quota facts, plus the deployment's doctor probe in one authorized read. SLO targets
+    // are a deployment decision that has not been made yet — the panel shows measurements and
+    // says so, it never claims a target is met.
+    if (segments[1] === 'ops' && segments[2] === 'panel' && method === 'GET') {
+      service.authorizeMetrics(principal);
+      let doctor: DoctorReport | null = null;
+      let doctorNote = 'doctor 探针未接入部署（可用 scripts/doctor-cli.ts 本地运行）';
+      if (options.doctor) {
+        try {
+          doctor = await options.doctor();
+          doctorNote = doctor.ok ? 'doctor 全部检查通过（warn 不计为失败）' : 'doctor 存在失败检查，按 runbook 处置';
+        } catch (error) {
+          doctor = null;
+          doctorNote = `doctor 探针执行失败：${error instanceof Error ? error.message.slice(0, 200) : 'UNKNOWN'}`;
+        }
+      }
+      json(res, 200, {
+        generatedAt: new Date().toISOString(),
+        metrics: metrics.snapshot(),
+        status: service.status(),
+        storage: service.storageFacts(principal),
+        quotas: service.quotaFacts(principal),
+        doctor,
+        doctorNote,
+        slo: { targets: null, note: '尚未定义 SLO 目标；本面板展示实测分布（p50/p95/p99），不冒充达标。' },
+      });
+      return;
+    }
     if (segments[1] === 'workbench' && method === 'GET') {
       const works = service.listWorks(undefined, 0, 50, principal);
       const runs = service.listRuns(undefined, 0, 50, principal);
       json(res, 200, {
         projects: service.listProjects(principal),
-        apps: service.listApps(undefined, principal).map(publicApp),
+        // W2/R2: the employee home no longer ships full declarations; apps are ACTIVE-only
+        // bounded summaries, gated per app by policy.
+        apps: service.workbenchApps(principal).map(publicAppSummary),
         works: { total: works.total, items: works.items.map(publicWork) },
         runs: { total: runs.total, items: runs.items.map(publicRun) },
         pending: service.pendingInteractions(principal),
+        todos: service.pendingTodos(principal),
         models: {
           catalog: publicCatalog(service.modelCatalog(principal)),
           preference: service.modelPreference(principal),
+          health: service.modelHealth(principal),
+          approvals: service.listModelApprovals(principal),
         },
         status: service.status(),
+        storage: service.storageFacts(principal),
+        quotas: service.quotaFacts(principal),
         ...(options.configuration ? { configuration: options.configuration } : {}),
         ...(workspace ? { workspace } : {}),
       });
+      return;
+    }
+    // 数据安全开关（与模型无关）：GET 读取，PUT { dataSecurity: boolean } 写入。与 .runtime/data-boundary.cjs
+    // 和 dm-dvp 插件共用同一个文件；工具描述在插件加载时选定，改后需重启 WebUI 才完全生效（响应里如实提示）。
+    if (segments[1] === 'data-boundary' && segments.length === 2 && (method === 'GET' || method === 'PUT')) {
+      if (method === 'PUT') {
+        const body = objectBody(await readBody(req));
+        if (typeof body.dataSecurity !== 'boolean') throw new PlatformError('REQUEST_JSON_INVALID');
+        writeDataBoundary(body.dataSecurity, options.dataBoundaryFile);
+      }
+      json(res, 200, { ...readDataBoundary(options.dataBoundaryFile), restartRequired: true });
       return;
     }
     if (segments[1] === 'models') {
@@ -233,6 +337,8 @@ export function createWorkbenchServer(options: WorkbenchApiOptions): Server {
         json(res, 200, {
           catalog: publicCatalog(service.modelCatalog(principal)),
           preference: service.modelPreference(principal),
+          health: service.modelHealth(principal),
+          approvals: service.listModelApprovals(principal),
         });
         return;
       }
@@ -242,10 +348,274 @@ export function createWorkbenchServer(options: WorkbenchApiOptions): Server {
         json(res, 200, service.setModelPreference(body.selectionId, principal));
         return;
       }
+      // E2-4 model approvals: GET /api/models/:selectionId/approval, POST to grant,
+      // POST .../approval/revoke to revoke, GET /api/models/approvals to list.
+      if (segments.length === 4 && segments[3] === 'approval') {
+        if (method === 'GET') {
+          json(res, 200, { approval: service.modelApproval(segments[2], principal) });
+          return;
+        }
+        if (method === 'POST') {
+          const body = objectBody(await readBody(req));
+          json(res, 201, service.approveModel({
+            selectionId: segments[2],
+            ...(body.evidence !== undefined ? { evidence: body.evidence as string } : {}),
+            ...(body.expiresAt !== undefined ? { expiresAt: body.expiresAt as string } : {}),
+          }, principal));
+          return;
+        }
+      }
+      if (segments.length === 5 && segments[3] === 'approval' && segments[4] === 'revoke' && method === 'POST') {
+        const body = objectBody(await readBody(req));
+        json(res, 200, service.revokeModelApproval(segments[2], body.reason as string, principal));
+        return;
+      }
+      if (segments.length === 3 && segments[2] === 'approvals' && method === 'GET') {
+        json(res, 200, { items: service.listModelApprovals(principal) });
+        return;
+      }
+    }
+    // ── L2 个人记忆（我的习惯）：owner 由服务端身份派生；偏好服务未装配时 503 如实降级 ──
+    if (segments[1] === 'preferences') {
+      if (segments.length === 2 && method === 'GET') {
+        const pluginId = url.searchParams.get('pluginId') ?? undefined;
+        json(res, 200, { items: await service.preferencesGetMine(principal, pluginId ? { pluginId } : {}) });
+        return;
+      }
+      if (segments.length === 3 && method === 'PUT') {
+        const body = objectBody(await readBody(req));
+        json(res, 200, await service.preferencesSetMine(principal, {
+          key: decodeURIComponent(segments[2]),
+          value: body.value,
+          ...(typeof body.pluginId === 'string' ? { pluginId: body.pluginId } : {}),
+          expectedRevision: typeof body.expectedRevision === 'number' ? body.expectedRevision : 0,
+        }));
+        return;
+      }
+      if (segments.length === 4 && segments[3] === 'pause' && method === 'POST') {
+        const body = objectBody(await readBody(req));
+        json(res, 200, await service.preferencesPauseMine(
+          principal,
+          decodeURIComponent(segments[2]),
+          typeof body.pluginId === 'string' ? body.pluginId : undefined,
+        ));
+        return;
+      }
+      if (segments.length === 3 && method === 'DELETE') {
+        const pluginId = url.searchParams.get('pluginId') ?? undefined;
+        json(res, 200, await service.preferencesDeleteMine(principal, decodeURIComponent(segments[2]), pluginId));
+        return;
+      }
+    }
+    // ── L2 私人方法草稿：仅本人可见 ──
+    if (segments[1] === 'personal-drafts') {
+      if (segments.length === 2 && method === 'GET') {
+        json(res, 200, { items: await service.personalDraftListMine(principal) });
+        return;
+      }
+      if (segments.length === 2 && method === 'POST') {
+        const body = objectBody(await readBody(req));
+        json(res, 201, await service.personalDraftCreate(principal, {
+          ...(typeof body.pluginId === 'string' ? { pluginId: body.pluginId } : {}),
+          title: String(body.title ?? ''),
+          body: String(body.body ?? ''),
+        }));
+        return;
+      }
+      if (segments.length === 3 && method === 'PUT') {
+        const body = objectBody(await readBody(req));
+        json(res, 200, await service.personalDraftUpdateMine(principal, decodeURIComponent(segments[2]), Number(body.expectedRevision ?? 0), {
+          ...(typeof body.title === 'string' ? { title: body.title } : {}),
+          ...(typeof body.body === 'string' ? { body: body.body } : {}),
+        }));
+        return;
+      }
+      if (segments.length === 3 && method === 'DELETE') {
+        json(res, 200, await service.personalDraftDeleteMine(principal, decodeURIComponent(segments[2])));
+        return;
+      }
+    }
+    // ── L3 学习个案与提案（§5 learning.proposeFromCase 行为合同） ──
+    if (segments[1] === 'learning') {
+      if (segments.length === 3 && segments[2] === 'cases' && method === 'GET') {
+        const pluginId = url.searchParams.get('pluginId') ?? '';
+        if (!pluginId) throw new PlatformError('REQUEST_JSON_INVALID', 'pluginId');
+        json(res, 200, {
+          items: await service.learningCasesList(principal, {
+            pluginId,
+            ...(url.searchParams.get('projectId') ? { projectId: url.searchParams.get('projectId')! } : {}),
+            ...(url.searchParams.get('status')
+              ? { status: url.searchParams.get('status') as 'PENDING' | 'NO_REUSABLE' | 'PROPOSED' | 'CONFLICT' }
+              : {}),
+          }),
+        });
+        return;
+      }
+      if (segments.length === 4 && segments[2] === 'cases' && segments[3] === 'open' && method === 'POST') {
+        const body = objectBody(await readBody(req));
+        json(res, 201, await service.learningCaseOpen(principal, {
+          pluginId: String(body.pluginId ?? ''),
+          ...(typeof body.projectId === 'string' ? { projectId: body.projectId } : {}),
+          sourceEvent: body.sourceEvent as Parameters<typeof service.learningCaseOpen>[1]['sourceEvent'],
+          hypothesisKey: String(body.hypothesisKey ?? ''),
+          ...(typeof body.category === 'string' ? { category: body.category } : {}),
+        }));
+        return;
+      }
+      if (segments.length === 5 && segments[2] === 'cases' && segments[4] === 'disposition' && method === 'POST') {
+        const body = objectBody(await readBody(req));
+        json(res, 200, await service.learningCaseDispose(principal, {
+          pluginId: String(body.pluginId ?? ''),
+          ...(typeof body.projectId === 'string' ? { projectId: body.projectId } : {}),
+          caseId: decodeURIComponent(segments[3]),
+          disposition: body.disposition as 'NO_REUSABLE' | 'PENDING' | 'CONFLICT',
+          ...(typeof body.reason === 'string' ? { reason: body.reason } : {}),
+        }));
+        return;
+      }
+      if (segments.length === 5 && segments[2] === 'cases' && segments[4] === 'propose' && method === 'POST') {
+        const body = objectBody(await readBody(req));
+        json(res, 201, await service.learningProposeFromCase(principal, {
+          pluginId: String(body.pluginId ?? ''),
+          ...(typeof body.projectId === 'string' ? { projectId: body.projectId } : {}),
+          caseId: decodeURIComponent(segments[3]),
+          contributionConfirmed: body.contributionConfirmed === true,
+          idempotencyKey: String(body.idempotencyKey ?? ''),
+          draft: (body.draft ?? {}) as Record<string, unknown>,
+        }));
+        return;
+      }
+    }
+    // ── L3 知识发布清单（不可变清单 + expectedVersion 指针 + 撤回台账） ──
+    if (segments[1] === 'knowledge' && segments[2] === 'releases') {
+      if (segments.length === 3 && method === 'GET') {
+        const pluginId = url.searchParams.get('pluginId') ?? '';
+        if (!pluginId) throw new PlatformError('REQUEST_JSON_INVALID', 'pluginId');
+        const pointer = await service.knowledgeReleasePointer(principal, pluginId);
+        const items = await service.releasesList(principal, {
+          pluginId,
+          ...(url.searchParams.get('state')
+            ? { state: url.searchParams.get('state') as 'CURRENT' | 'WITHDRAWN' }
+            : {}),
+        });
+        json(res, 200, { pointer, items });
+        return;
+      }
+      if (segments.length === 3 && method === 'POST') {
+        const body = objectBody(await readBody(req));
+        json(res, 201, await service.knowledgeReleasePublish(principal, {
+          pluginId: String(body.pluginId ?? ''),
+          audience: String(body.audience ?? ''),
+          entries: Array.isArray(body.entries) ? (body.entries as Array<{ knowledgeId: string; revision: number }>) : [],
+          ...(typeof body.evalReportRef === 'string' ? { evalReportRef: body.evalReportRef } : {}),
+          expectedVersion: typeof body.expectedVersion === 'number' ? body.expectedVersion : 0,
+        }));
+        return;
+      }
+      if (segments.length === 5 && segments[4] === 'impact' && method === 'GET') {
+        json(res, 200, service.knowledgeReleaseImpact(principal, decodeURIComponent(segments[3])));
+        return;
+      }
+      if (segments.length === 5 && (segments[4] === 'withdraw' || segments[4] === 'rollback') && method === 'POST') {
+        const body = objectBody(await readBody(req));
+        if (segments[4] === 'withdraw') {
+          json(res, 200, await service.knowledgeReleaseWithdraw(principal, decodeURIComponent(segments[3]), String(body.reason ?? '')));
+          return;
+        }
+        json(res, 200, await service.knowledgeReleaseRollback(principal, {
+          pluginId: String(body.pluginId ?? ''),
+          expectedVersion: typeof body.expectedVersion === 'number' ? body.expectedVersion : 0,
+          ...(typeof body.toReleaseId === 'string' ? { toReleaseId: body.toReleaseId } : {}),
+          reason: String(body.reason ?? ''),
+        }));
+        return;
+      }
+    }
+    // ── T04：知识捕获 outbox 状态与死信重放（运维观测面，不记录私有正文） ──
+    if (segments[1] === 'learning' && segments[2] === 'capture-outbox' && method === 'POST' && segments.length === 3) {
+      json(res, 200, service.replayKnowledgeCaptureDeadLetters());
+      return;
+    }
+    if (segments[1] === 'learning' && segments[2] === 'capture-outbox' && method === 'GET' && segments.length === 3) {
+      json(res, 200, { counts: service.knowledgeCaptureOutboxStatus() });
+      return;
+    }
+    // W2/R6: per-app default release pointer — read for CAS clients, set through the
+    // dedicated 'app.default.set' action (never the security-revocation path).
+    if (segments[1] === 'apps' && segments.length === 4 && segments[3] === 'default-release') {
+      if (method === 'GET') {
+        json(res, 200, { default: service.defaultRelease(segments[2], principal) });
+        return;
+      }
+      if (method === 'POST') {
+        const body = objectBody(await readBody(req));
+        if (typeof body.version !== 'string' || (body.expectedRevision !== null && typeof body.expectedRevision !== 'number')) {
+          throw new PlatformError('REQUEST_JSON_INVALID', 'version / expectedRevision');
+        }
+        json(res, 200, service.setDefaultRelease(segments[2], body.version, {
+          expectedRevision: body.expectedRevision as number | null,
+          ...(body.reason !== undefined && typeof body.reason === 'string' ? { reason: body.reason } : {}),
+        }, principal));
+        return;
+      }
+    }
+    // W2/R2: per-project employee catalog — creatable release summaries before the full
+    // descriptor; the detail read resolves through the server-owned default pointer.
+    if (segments[1] === 'catalog' && method === 'GET') {
+      const projectId = url.searchParams.get('projectId') ?? '';
+      if (segments.length === 2) {
+        const cursor = url.searchParams.get('cursor');
+        const limit = page(url.searchParams.get('limit'), 50, 100);
+        json(res, 200, service.catalogSummaries(projectId, cursor, limit, principal));
+        return;
+      }
+      if (segments.length === 3) {
+        const { app, catalog } = service.catalogRelease(segments[2], projectId, principal);
+        json(res, 200, { app: publicApp(app), catalog });
+        return;
+      }
     }
     if (segments[1] === 'apps') {
       if (segments.length === 4 && segments[3] === 'models' && method === 'GET') {
         json(res, 200, service.availableModels(segments[2], url.searchParams.get('version') ?? '', principal));
+        return;
+      }
+      if (segments.length === 5 && segments[4] === 'approval') {
+        if (method === 'GET') {
+          json(res, 200, { approval: service.releaseApproval(segments[2], segments[3], principal) });
+          return;
+        }
+        if (method === 'POST') {
+          const body = objectBody(await readBody(req));
+          json(res, 201, service.approveRelease({
+            appId: segments[2],
+            appVersion: segments[3],
+            releaseDigest: body.releaseDigest as string,
+            ...(body.evidence !== undefined ? { evidence: body.evidence as string } : {}),
+            ...(body.rollbackTarget !== undefined ? { rollbackTarget: body.rollbackTarget as string } : {}),
+            ...(body.expiresAt !== undefined ? { expiresAt: body.expiresAt as string } : {}),
+          }, principal));
+          return;
+        }
+      }
+      if (segments.length === 6 && segments[4] === 'approval' && segments[5] === 'revoke' && method === 'POST') {
+        const body = objectBody(await readBody(req));
+        json(res, 200, service.revokeReleaseApproval(segments[2], segments[3], body.reason as string, principal));
+        return;
+      }
+      if (segments.length === 5 && segments[4] === 'rollback' && method === 'POST') {
+        const body = objectBody(await readBody(req));
+        // W2/R6: ordinary rollback switches the default pointer; expectedRevision guards
+        // concurrent pointer switches. No revocation happens on this path.
+        const opts = body.expectedRevision === undefined ? {} : { expectedRevision: body.expectedRevision as number | null };
+        json(res, 200, service.rollbackRelease(
+          segments[2],
+          segments[3],
+          body.toVersion as string,
+          body.reason as string,
+          principal,
+          opts,
+        ));
         return;
       }
       if (segments.length === 2 && method === 'GET') {
@@ -256,6 +626,49 @@ export function createWorkbenchServer(options: WorkbenchApiOptions): Server {
         json(res, 200, publicApp(service.getApp(segments[2], segments[3], principal)));
         return;
       }
+    }
+    if (segments[1] === 'approvals' && segments.length === 2 && method === 'GET') {
+      json(res, 200, { items: service.listReleaseApprovals(principal) });
+      return;
+    }
+    if (segments[1] === 'quotas' && segments.length === 2 && method === 'GET') {
+      json(res, 200, service.quotaFacts(principal));
+      return;
+    }
+    // E3-4 unified todos: questions, open reviews and delivered packages on one read surface,
+    // each item keeping its own kind and resolution verb.
+    if (segments[1] === 'todos' && segments.length === 2 && method === 'GET') {
+      json(res, 200, { items: service.pendingTodos(principal) });
+      return;
+    }
+    // E4-6 global search across works, runs, projects and apps.
+    if (segments[1] === 'search' && segments.length === 2 && method === 'GET') {
+      json(res, 200, { items: service.globalSearch(url.searchParams.get('q') ?? '', principal) });
+      return;
+    }
+    if (segments[1] === 'audit' && segments[2] === 'export' && method === 'GET') {
+      const numeric = (value: string | null): number | undefined => {
+        if (value === null) return undefined;
+        const parsed = Number(value);
+        if (!Number.isSafeInteger(parsed) || parsed < 0) throw new PlatformError('AUDIT_EXPORT_RANGE_INVALID');
+        return parsed;
+      };
+      const result = service.auditExport(principal, {
+        ...(url.searchParams.get('target') ? { target: url.searchParams.get('target') as string } : {}),
+        ...(numeric(url.searchParams.get('after')) !== undefined ? { after: numeric(url.searchParams.get('after')) as number } : {}),
+        ...(numeric(url.searchParams.get('limit')) !== undefined ? { limit: numeric(url.searchParams.get('limit')) as number } : {}),
+      });
+      const text = result.lines.length ? `${result.lines.join('\n')}\n` : '';
+      res.writeHead(200, {
+        'Content-Type': 'application/x-ndjson; charset=utf-8',
+        'Content-Length': Buffer.byteLength(text),
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'X-Audit-Head': result.headDigest,
+        'X-Audit-Last-Sequence': String(result.lastSequence),
+      });
+      res.end(text);
+      return;
     }
     if (segments[1] === 'fs' && segments.length === 3 && segments[2] === 'pick' && method === 'POST') {
       service.authorizePick(principal);
@@ -288,6 +701,22 @@ export function createWorkbenchServer(options: WorkbenchApiOptions): Server {
       }
     }
     if (segments[1] === 'works') {
+      if (segments.length === 3 && segments[2] === 'query' && method === 'GET') {
+        // E4-3: server-side filter + keyset cursor; offset pagination stays on /api/works.
+        const param = (name: string) => {
+          const value = url.searchParams.get(name);
+          return value === null || value === '' ? undefined : value;
+        };
+        const state = param('state');
+        const result = service.queryWorks({
+          ...(param('projectId') !== undefined ? { projectId: param('projectId') } : {}),
+          ...(param('appId') !== undefined ? { appId: param('appId') } : {}),
+          ...(state !== undefined ? { state: state as 'ACTIVE' | 'ARCHIVED' } : {}),
+          ...(param('q') !== undefined ? { q: param('q') } : {}),
+        }, param('cursor') ?? null, limit(50), principal);
+        json(res, 200, { items: result.items.map(publicWork), nextCursor: result.nextCursor });
+        return;
+      }
       if (segments.length === 2 && method === 'GET') {
         const state = url.searchParams.get('state') ?? undefined;
         json(res, 200, service.listWorks(state as 'ACTIVE' | 'ARCHIVED' | undefined, offset(), limit(), principal));
@@ -411,6 +840,21 @@ export function createWorkbenchServer(options: WorkbenchApiOptions): Server {
           return;
         }
       }
+      if (segments.length === 4 && segments[3] === 'delivery-packages') {
+        if (method === 'GET') {
+          const result = service.deliveryPackagesForWork(segments[2], offset(), limit(), principal);
+          json(res, 200, { total: result.total, items: result.items });
+          return;
+        }
+        if (method === 'POST') {
+          const body = objectBody(await readBody(req));
+          json(res, 201, service.sealDeliveryPackage(segments[2], {
+            runId: body.runId as string,
+            ...(body.note !== undefined ? { note: body.note as string } : {}),
+          }, principal));
+          return;
+        }
+      }
     }
     if (segments[1] === 'domains') {
       if (segments.length === 2 && method === 'GET') {
@@ -487,7 +931,99 @@ export function createWorkbenchServer(options: WorkbenchApiOptions): Server {
         return;
       }
     }
+    if (segments[1] === 'reviews') {
+      if (segments.length === 4 && segments[3] === 'decision' && method === 'POST') {
+        const body = objectBody(await readBody(req));
+        json(res, 200, service.recordReviewDecision(
+          segments[2],
+          body.decision as 'APPROVED' | 'REJECTED',
+          body.note as string | undefined,
+          body.expectedRevision as number,
+          body.expectedManifestDigest as string | undefined,
+          principal,
+        ));
+        return;
+      }
+    }
+    if (segments[1] === 'evaluations') {
+      // E2-1 fallback: deterministic evaluation sets — expert gold sets stay deferred.
+      if (segments.length === 2 && method === 'GET') {
+        json(res, 200, { items: service.listEvaluationSets(url.searchParams.get('appId') ?? undefined, principal) });
+        return;
+      }
+      if (segments.length === 2 && method === 'POST') {
+        const body = objectBody(await readBody(req));
+        json(res, 201, service.createEvaluationSet(
+          { appId: body.appId, name: body.name, description: body.description, entries: body.entries },
+          principal,
+        ));
+        return;
+      }
+      if (segments.length === 3 && method === 'GET') {
+        json(res, 200, service.getEvaluationSet(segments[2], principal));
+        return;
+      }
+      if (segments.length === 4 && segments[3] === 'evaluate' && method === 'POST') {
+        const body = objectBody(await readBody(req));
+        json(res, 200, service.evaluateEvaluationSet(segments[2], body.runId as string, principal));
+        return;
+      }
+      if (segments.length === 4 && segments[3] === 'runs' && method === 'GET') {
+        json(res, 200, { items: service.listEvaluationRuns(segments[2], principal) });
+        return;
+      }
+      if (segments.length === 4 && segments[3] === 'archive' && method === 'POST') {
+        json(res, 200, service.archiveEvaluationSet(segments[2], principal));
+        return;
+      }
+    }
+    if (segments[1] === 'evaluation-runs' && segments.length === 3 && method === 'GET') {
+      json(res, 200, service.getEvaluationRun(segments[2], principal));
+      return;
+    }
+    if (segments[1] === 'delivery-packages') {
+      if (segments.length === 3 && method === 'GET') {
+        json(res, 200, service.getDeliveryPackage(segments[2], principal));
+        return;
+      }
+      if (segments.length === 4 && method === 'POST') {
+        const body = objectBody(await readBody(req));
+        if (segments[3] === 'deliver') {
+          json(res, 200, service.deliverDeliveryPackage(segments[2], body.note, body.expectedRevision as number, principal));
+          return;
+        }
+        if (segments[3] === 'acknowledge') {
+          json(res, 200, service.acknowledgeDeliveryPackage(segments[2], body.note, body.expectedRevision as number, principal));
+          return;
+        }
+        if (segments[3] === 'withdraw') {
+          json(res, 200, service.withdrawDeliveryPackage(segments[2], body.reason, body.expectedRevision as number, principal));
+          return;
+        }
+        if (segments[3] === 'supersede') {
+          json(res, 200, service.supersedeDeliveryPackage(segments[2], body.supersededBy, body.expectedRevision as number, principal));
+          return;
+        }
+      }
+    }
     if (segments[1] === 'runs') {
+      if (segments.length === 3 && segments[2] === 'query' && method === 'GET') {
+        // E4-3: server-side filter + keyset cursor; offset pagination stays on /api/runs.
+        const param = (name: string) => {
+          const value = url.searchParams.get(name);
+          return value === null || value === '' ? undefined : value;
+        };
+        const state = param('state');
+        const result = service.queryRuns({
+          ...(param('appId') !== undefined ? { appId: param('appId') } : {}),
+          ...(param('workId') !== undefined ? { workId: param('workId') } : {}),
+          ...(param('projectId') !== undefined ? { projectId: param('projectId') } : {}),
+          ...(state !== undefined ? { state } : {}),
+          ...(param('q') !== undefined ? { q: param('q') } : {}),
+        }, param('cursor') ?? null, limit(50), principal);
+        json(res, 200, { items: result.items.map(publicRun), nextCursor: result.nextCursor });
+        return;
+      }
       if (segments.length === 2 && method === 'GET') {
         const appId = url.searchParams.get('appId') ?? undefined;
         const result = service.listRuns(appId, offset(), limit(), principal);
@@ -500,6 +1036,55 @@ export function createWorkbenchServer(options: WorkbenchApiOptions): Server {
       }
       if (segments.length === 3 && method === 'GET') {
         json(res, 200, publicRun(service.getRun(segments[2], principal)));
+        return;
+      }
+      if (segments.length === 5 && segments[3] === 'activities' && segments[4] === 'stream' && method === 'GET') {
+        // Live activity feed (E4-7): replay after a cursor, then push each recorded activity.
+        // Not durable by design — activities are the worker's public notification projection, and
+        // the stream says so instead of pretending to be conversation history.
+        const raw = req.headers['last-event-id'] ?? url.searchParams.get('after') ?? '0';
+        const after = Number(Array.isArray(raw) ? raw[0] : raw);
+        if (!Number.isSafeInteger(after) || after < 0) throw new PlatformError('RUN_EVENT_CURSOR_INVALID');
+        // Authorize before headers so a 403/404 is an honest HTTP answer, not an empty stream.
+        service.getRun(segments[2], principal);
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-store',
+          Connection: 'keep-alive',
+          'X-Content-Type-Options': 'nosniff',
+        });
+        res.flushHeaders();
+        let stopped = false;
+        let unsubscribe: (() => void) | undefined;
+        const stop = (): void => {
+          if (stopped) return;
+          stopped = true;
+          clearInterval(ping);
+          clearInterval(watch);
+          unsubscribe?.();
+          res.end();
+        };
+        const send = (entry: { cursor: number; activity: unknown }): void => {
+          if (stopped) return;
+          res.write(`id: ${entry.cursor}\ndata: ${JSON.stringify(entry)}\n\n`);
+        };
+        const ping = setInterval(() => { if (!stopped) res.write(': keep-alive\n\n'); }, 15_000);
+        // End honestly once the run is terminal and its last activity has been delivered.
+        const watch = setInterval(() => {
+          try {
+            const state = service.getRun(segments[2], principal).snapshot.state;
+            if (['SUCCEEDED', 'FAILED', 'CANCELLED', 'UNKNOWN'].includes(state)) stop();
+          } catch {
+            stop();
+          }
+        }, 2_000);
+        req.on('close', stop);
+        res.on('close', stop);
+        try {
+          unsubscribe = service.activityStream(segments[2], after, principal, send);
+        } catch {
+          stop();
+        }
         return;
       }
       if (segments.length === 5 && segments[3] === 'events' && segments[4] === 'stream' && method === 'GET') {
@@ -575,8 +1160,30 @@ export function createWorkbenchServer(options: WorkbenchApiOptions): Server {
         json(res, 200, { total: items.length, items });
         return;
       }
+      if (segments.length === 4 && segments[3] === 'reviews') {
+        if (method === 'GET') {
+          json(res, 200, { items: service.reviewsForRun(segments[2], principal) });
+          return;
+        }
+        if (method === 'POST') {
+          const raw = await readBody(req);
+          const body = raw === undefined ? {} : objectBody(raw);
+          json(res, 201, service.requestReview(segments[2], principal, body.note as string | undefined));
+          return;
+        }
+      }
       if (segments.length === 4 && segments[3] === 'artifacts' && method === 'GET') {
         json(res, 200, { items: service.artifacts(segments[2], principal).map(publicArtifact) });
+        return;
+      }
+      if (segments.length === 4 && segments[3] === 'findings' && method === 'GET') {
+        json(res, 200, { items: service.findings(segments[2], principal) });
+        return;
+      }
+      if (segments.length === 4 && segments[3] === 'findings-diff' && method === 'GET') {
+        const against = url.searchParams.get('against');
+        if (!against) throw new PlatformError('RUN_FINDING_INVALID', 'against');
+        json(res, 200, service.diffRunFindings(segments[2], against, principal));
         return;
       }
       if (
@@ -625,32 +1232,48 @@ export function createWorkbenchServer(options: WorkbenchApiOptions): Server {
   };
 
   return createServer(async (req, res) => {
-    try {
-      const url = new URL(req.url ?? '/', 'http://localhost');
-      if (url.pathname.startsWith('/api/')) {
-        let principal: Principal;
-        try {
-          principal = await authenticate(req);
-        } catch (error) {
-          json(res, error instanceof AuthorizationError ? 403 : 401, {
-            ok: false,
-            code: error instanceof Error && 'code' in error ? String(error.code) : 'UNAUTHENTICATED',
-            detail: '请求未通过平台身份校验。',
-          });
+    const requestId = correlationFromHeader(req.headers['x-request-id']);
+    const startedAt = performance.now();
+    res.setHeader('x-request-id', requestId);
+    await runWithCorrelation({ requestId, correlationId: requestId }, async () => {
+      try {
+        const url = new URL(req.url ?? '/', 'http://localhost');
+        if (url.pathname.startsWith('/api/')) {
+          let principal: Principal;
+          try {
+            principal = await authenticate(req);
+          } catch (error) {
+            json(res, error instanceof AuthorizationError ? 403 : 401, {
+              ok: false,
+              code: error instanceof Error && 'code' in error ? String(error.code) : 'UNAUTHENTICATED',
+              detail: '请求未通过平台身份校验。',
+            });
+            return;
+          }
+          await handleApi(req, res, url, principal);
           return;
         }
-        await handleApi(req, res, url, principal);
-        return;
+        if ((req.method === 'GET' || req.method === 'HEAD') && appDir) {
+          if (await serveAsset(appDir, url.pathname, req, res)) return;
+        }
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Not found');
+      } catch (error) {
+        if (!res.headersSent) json(res, errorStatus(error), errorBody(error));
+        else res.end();
+      } finally {
+        const path = (req.url ?? '/').split('?')[0];
+        const route = path
+          .replace(/\/[0-9a-f]{8}-[0-9a-f-]{20,}(?=\/|$)/gi, '/:id')
+          .replace(/\/api\/(runs|works|projects|apps|sessions|interactions|domains)\/[^/]+/g, '/api/$1/:id');
+        const labels = { method: req.method ?? 'GET', route, status: res.statusCode };
+        metrics.counter('platform_http_requests', labels);
+        metrics.observe('platform_http_duration_ms', performance.now() - startedAt, {
+          method: labels.method,
+          route: labels.route,
+        });
       }
-      if ((req.method === 'GET' || req.method === 'HEAD') && appDir) {
-        if (await serveAsset(appDir, url.pathname, req, res)) return;
-      }
-      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('Not found');
-    } catch (error) {
-      if (!res.headersSent) json(res, errorStatus(error), errorBody(error));
-      else res.end();
-    }
+    });
   });
 }
 

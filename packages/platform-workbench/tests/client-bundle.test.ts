@@ -37,4 +37,7 @@ test('the client bundle never embeds a second React or a top-level ESM import', 
   // and the upstream conversation factory the session host calls.
   assert.match(text, /workbench\.session/);
   assert.match(text, /conversation\.content/);
+  // The platform fact "which application does the conversation on screen belong to" ships in the
+  // bundle as a root standard-source contribution (the public slots seat).
+  assert.match(text, /provideRoot\(\{ hooks: \{ conversationApplication: conversationApplication\.observable \} \}\)/);
 });

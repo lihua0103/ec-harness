@@ -29,6 +29,7 @@ const manifest = {
   },
   dsh: {
     profile: {
+      // P0-6：基线写死为 base + sdk-app（sdk-minimal 不叠 dsh-base，行集合不同会整段空转）。
       bundles: [
         '@deepseek-ai/dsh-base',
         '@deepseek-ai/dsh-sdk-app',
@@ -51,14 +52,21 @@ writeFileSync(
 writeFileSync(
   path.join(profile, 'cordis.patch.yml'),
   [
-    '# Worker governance: runtime plugin installation and native schedule auto-resume are disabled.',
-    '# The model/provider route and credentials are deployment inputs; add the llm patch used by the',
-    '# worker environment here. Do not commit credentials.',
+    '# Worker governance: runtime plugin installation, native schedule auto-resume and goal tools',
+    '# are disabled. The model/provider route and credentials are deployment inputs; add the llm',
+    '# patch used by the worker environment here. Do not commit credentials.',
     '- id: tool-plugin-manager',
     '  disabled: true',
     '- id: schedule',
     '  disabled: true',
     '- id: tool-schedule',
+    '  disabled: true',
+    // P0-6：goal 三行必须写入生成器——base 里 goal/command-goal/tool-goal 默认无 disabled。
+    '- id: goal',
+    '  disabled: true',
+    '- id: command-goal',
+    '  disabled: true',
+    '- id: tool-goal',
     '  disabled: true',
     '- id: hmr',
     '  disabled: true',

@@ -1,0 +1,347 @@
+{
+  "schemaVersion": 2,
+  "pluginId": "dm-dvp",
+  "owner": "dm-dvp 维护者",
+  "source": "src/knowledge-seeds.ts",
+  "taxonomy": {
+    "topics": [
+      "template",
+      "writer",
+      "firewhen",
+      "render",
+      "protocol",
+      "extraction",
+      "uat",
+      "boundary",
+      "cases",
+      "design",
+      "change-mark"
+    ]
+  },
+  "seeds": [
+    {
+      "knowledgeId": "dm-dvp.template.discipline",
+      "topics": [
+        "template",
+        "writer"
+      ]
+    },
+    {
+      "knowledgeId": "dm-dvp.firewhen.dialect",
+      "topics": [
+        "firewhen",
+        "render"
+      ],
+      "claims": 5,
+      "validator": "dm-dvp.methods-suite"
+    },
+    {
+      "knowledgeId": "dm-dvp.protocol.extraction",
+      "topics": [
+        "protocol",
+        "extraction"
+      ]
+    },
+    {
+      "knowledgeId": "dm-dvp.uat.boundaries",
+      "topics": [
+        "uat",
+        "boundary"
+      ],
+      "claims": 1,
+      "validator": "dm-dvp.methods-suite"
+    },
+    {
+      "knowledgeId": "dm-dvp.cases.design",
+      "topics": [
+        "cases",
+        "design"
+      ]
+    },
+    {
+      "knowledgeId": "dm-dvp.changemark.format",
+      "topics": [
+        "template",
+        "change-mark"
+      ],
+      "claims": 2,
+      "validator": "dm-dvp.methods-suite"
+    },
+    {
+      "knowledgeId": "dm-dvp.bulkwrite.scale",
+      "topics": [
+        "template",
+        "writer"
+      ],
+      "claims": 3
+    },
+    {
+      "knowledgeId": "dm-dvp.conventions.evidence",
+      "topics": [
+        "template"
+      ]
+    },
+    {
+      "knowledgeId": "dm-dvp.classification.visit-matrix",
+      "topics": [
+        "template",
+        "design"
+      ]
+    },
+    {
+      "knowledgeId": "dm-dvp.id.matrix-suffix",
+      "topics": [
+        "template"
+      ]
+    },
+    {
+      "knowledgeId": "dm-dvp.text.density",
+      "topics": [
+        "template"
+      ]
+    },
+    {
+      "knowledgeId": "dm-dvp.template.knobs",
+      "topics": [
+        "template",
+        "writer"
+      ]
+    }
+  ],
+  "validators": [
+    {
+      "id": "dm-dvp.methods-suite",
+      "version": "1.1.0",
+      "covers": [
+        "dm-dvp.changemark.format",
+        "dm-dvp.firewhen.dialect",
+        "dm-dvp.uat.boundaries"
+      ]
+    }
+  ],
+  "capabilities": [
+    {
+      "tool": "dm_dvp_overview",
+      "topics": [
+        "template"
+      ]
+    },
+    {
+      "tool": "dm_dvp_parse_workbook",
+      "topics": [
+        "template"
+      ]
+    },
+    {
+      "tool": "dm_dvp_validate_rules",
+      "topics": [
+        "template",
+        "firewhen"
+      ]
+    },
+    {
+      "tool": "dm_dvp_read_protocol",
+      "topics": [
+        "protocol",
+        "extraction"
+      ]
+    },
+    {
+      "tool": "dm_dvp_render_checks",
+      "topics": [
+        "firewhen",
+        "render"
+      ]
+    },
+    {
+      "tool": "dm_dvp_suggest_cases",
+      "topics": [
+        "cases",
+        "design"
+      ]
+    },
+    {
+      "tool": "dm_dvp_write_workbook",
+      "topics": [
+        "template",
+        "writer",
+        "uat",
+        "boundary"
+      ]
+    },
+    {
+      "tool": "dm_dvp_methods",
+      "topics": [
+        "template",
+        "firewhen",
+        "protocol",
+        "uat",
+        "cases",
+        "change-mark"
+      ]
+    }
+  ],
+  "noMethodKnowledge": [
+    {
+      "tool": "dm_dvp_status",
+      "reason": "状态与种子导入报告，无方法语义"
+    },
+    {
+      "tool": "dm_dvp_scan",
+      "reason": "目录发现只列出输入文件的存在、类型、大小与时间，不读内容，也不含 DVP 方法判断；读到内容后的方法由各自工具承担"
+    },
+    {
+      "tool": "dm_dvp_read_workbook",
+      "reason": "非 DVP 模板工作簿的通用 sheet 读取：格式正确性由公共包 platform-workbook 承担，DVP 模板由专用工具拒绝并保证边界，本工具没有 DVP 方法语义"
+    }
+  ],
+  "agent": {
+    "id": "dm-dvp.agent",
+    "version": "1.1.0",
+    "owner": "dm-dvp 维护者",
+    "topics": [
+      "template",
+      "writer",
+      "firewhen",
+      "render",
+      "protocol",
+      "extraction",
+      "uat",
+      "boundary",
+      "cases",
+      "design",
+      "change-mark"
+    ],
+    "tools": [
+      {
+        "tool": "dm_dvp_methods",
+        "topics": [
+          "template",
+          "firewhen",
+          "protocol",
+          "uat",
+          "cases",
+          "change-mark"
+        ]
+      },
+      {
+        "tool": "dm_dvp_validate_rules",
+        "topics": [
+          "template",
+          "firewhen"
+        ]
+      },
+      {
+        "tool": "dm_dvp_render_checks",
+        "topics": [
+          "firewhen",
+          "render"
+        ]
+      },
+      {
+        "tool": "dm_dvp_write_workbook",
+        "topics": [
+          "template",
+          "writer",
+          "uat",
+          "boundary"
+        ]
+      },
+      {
+        "tool": "dm_dvp_suggest_cases",
+        "topics": [
+          "cases",
+          "design"
+        ]
+      }
+    ],
+    "noMethodTools": [
+      {
+        "tool": "dm_dvp_status",
+        "reason": "状态与种子导入报告，无方法语义"
+      }
+    ]
+  },
+  "feedback": {
+    "events": [
+      "run.failed",
+      "qc.completed",
+      "program.revised",
+      "business.clarified"
+    ],
+    "projectionVersion": "1"
+  },
+  "goldenSet": {
+    "id": "dm-dvp.golden",
+    "version": "2",
+    "cases": [
+      {
+        "query": "fire when",
+        "expect": [
+          "dm-dvp.firewhen.dialect"
+        ]
+      },
+      {
+        "query": "NEEDS_OCR",
+        "expect": [
+          "dm-dvp.protocol.extraction"
+        ]
+      },
+      {
+        "query": "TEST CASE",
+        "expect": [
+          "dm-dvp.uat.boundaries"
+        ]
+      },
+      {
+        "query": "完全不存在的黄金集探针词",
+        "expect": [],
+        "expectEmpty": true
+      },
+      {
+        "query": "变更标记动作",
+        "expect": [
+          "dm-dvp.changemark.format"
+        ]
+      },
+      {
+        "query": "随机化种子",
+        "expect": [],
+        "expectEmpty": true
+      },
+      {
+        "query": "三型模板",
+        "expect": [
+          "dm-dvp.conventions.evidence"
+        ]
+      },
+      {
+        "query": "跨页归类",
+        "expect": [
+          "dm-dvp.classification.visit-matrix"
+        ]
+      },
+      {
+        "query": "矩阵后缀",
+        "expect": [
+          "dm-dvp.id.matrix-suffix"
+        ]
+      },
+      {
+        "query": "全局包裹",
+        "expect": [
+          "dm-dvp.text.density"
+        ]
+      },
+      {
+        "query": "旋钮",
+        "expect": [
+          "dm-dvp.template.knobs"
+        ]
+      }
+    ]
+  },
+  "scope": {
+    "projects": "all"
+  }
+}

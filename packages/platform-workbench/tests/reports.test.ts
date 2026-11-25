@@ -87,6 +87,11 @@ test('activity labels are derived from a recorded time, never invented for a mis
   assert.equal(relativeTime(undefined, now), '时间未记录');
   assert.equal(relativeTime('not-a-date', now), '时间未记录');
   assert.equal(relativeTime('', now), '时间未记录');
+  // The host session catalog reports updatedAt as epoch milliseconds, not an ISO string.
+  assert.equal(relativeTime(new Date(2026, 10, 13, 16, 44).getTime(), now), '8 分钟前');
+  assert.equal(relativeTime(new Date(2026, 10, 13, 9, 10).getTime(), now), '今天 09:10');
+  assert.equal(relativeTime(0, now), '时间未记录');
+  assert.equal(relativeTime(Number.NaN, now), '时间未记录');
 });
 
 test('tile monograms come from the title itself and never render an empty tile', () => {

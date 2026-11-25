@@ -2,8 +2,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { RunLedger, type RunEvent } from '../../platform-runtime/src/run.js';
 import { PlatformError } from './registry.js';
+import { validateRunInput } from './input-schema.js';
 import { PlatformStore, type AppRecord, type InputCommit, type RunRecord } from './store.js';
 import type { ModelConfigSnapshot } from './models.js';
+import { metrics } from './observability.js';
 
 const canonical = (value: unknown): string =>
   JSON.stringify(value, (_key, item) => {
@@ -17,6 +19,10 @@ const canonical = (value: unknown): string =>
     return item;
   });
 const digest = (value: unknown): string => createHash('sha256').update(canonical(value)).digest('hex');
+/** Exported for the W3 freeze operation: a work-level input revision's digest must be the exact
+ *  same canonical SHA-256 the Run records as its `inputDigest`, or the ledger and the execution
+ *  would disagree about what was frozen. */
+export const runInputDigest = digest;
 const MAX_INPUT_BYTES = 1024 * 1024;
 
 export class RunRepository {
@@ -28,10 +34,12 @@ export class RunRepository {
     actor: string,
     model: ModelConfigSnapshot | null = null,
     workId: string | null = null,
-    context: Pick<RunRecord, 'workspace' | 'context'> = {},
+    context: Pick<RunRecord, 'workspace' | 'context' | 'knowledge'> = {},
   ): RunRecord {
     const inputBody = canonical(input);
     if (Buffer.byteLength(inputBody, 'utf8') > MAX_INPUT_BYTES) throw new PlatformError('RUN_INPUT_TOO_LARGE');
+    // R1/R3：声明的封闭参数合同在冻结前校验（创建与换批共用此入口）；非法输入零写入。
+    validateRunInput(app.draft.descriptor, input);
     const runId = randomUUID();
     const ledger = new RunLedger(runId);
     const now = new Date().toISOString();
@@ -53,6 +61,11 @@ export class RunRepository {
       updatedAt: now,
     };
     return this.store.transaction(() => {
+      // Same-Work admission is checked INSIDE the freeze transaction: a duplicate submission that
+      // races an in-flight admit must see the first Run and refuse, so it can never cause a
+      // second dispatch. The service-level check before this call stays only as a fast fail.
+      const active = record.workId ? this.store.activeRunForWork(record.workId) : undefined;
+      if (active) throw new PlatformError('WORK_ACTIVE_RUN_EXISTS', `${active.runId}:${active.snapshot.state}`);
       if (record.workspace && this.store.activeRunForDirectory(record.workspace.directory)) {
         throw new PlatformError('WORKSPACE_ACTIVE_RUN_EXISTS', '此目录仍有未结清的运行，请先完成或停止该运行。');
       }
@@ -66,6 +79,9 @@ export class RunRepository {
         state: 'PENDING',
         createdAt: now,
       });
+      // Dispatch intent is durable and committed with the run: a crash before the worker starts
+      // resumes from the queue instead of stranding a QUEUED run.
+      this.store.outboxEnqueue(runId, now);
       this.store.audit(actor, 'RUN_CREATED', runId, {
         appId: app.appId,
         appVersion: app.appVersion,
@@ -83,6 +99,7 @@ export class RunRepository {
             }
           : { modelSelectionId: null }),
       });
+      metrics.counter('platform_run_created', { appId: app.appId });
       return record;
     });
   }
@@ -93,9 +110,9 @@ export class RunRepository {
     return record;
   }
 
-  list(appId: string | undefined, offset: number, limit: number): { items: RunRecord[]; total: number } {
+  list(appId: string | undefined, offset: number, limit: number, projectIds?: string[]): { items: RunRecord[]; total: number } {
     if (offset < 0 || limit < 1 || limit > 100) throw new PlatformError('RUN_PAGE_INVALID');
-    return this.store.runList(appId, offset, limit);
+    return this.store.runList(appId, offset, limit, projectIds);
   }
 
   apply(runId: string, event: RunEvent, expectedRevision: number, actor: string): RunRecord {
@@ -118,6 +135,12 @@ export class RunRepository {
         to: snapshot.state,
         revision: snapshot.revision,
       });
+      // A run that can no longer be dispatched leaves the durable queue; the message keeps the
+      // reason so an operator can see why it never started.
+      if (['SUCCEEDED', 'FAILED', 'CANCELLED', 'UNKNOWN'].includes(snapshot.state)) {
+        this.store.outboxCancelRun(runId, `RUN_${snapshot.state}`);
+      }
+      metrics.counter('platform_run_transition', { to: snapshot.state });
       return next;
     });
   }

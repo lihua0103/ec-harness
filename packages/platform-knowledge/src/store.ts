@@ -1,12 +1,206 @@
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, type StatementSync, type SQLInputValue } from 'node:sqlite';
 import { mkdirSync, lstatSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { canonical, digest, normalizeDraft, type KnowledgeDraft, type KnowledgeRecord, type State } from './schema.js';
+import type { PersonalDraftRecord, PersonalSettingRecord } from './preferences.js';
+import type {
+  KnowledgeReleaseEntry,
+  KnowledgeReleasePointer,
+  KnowledgeReleaseRecord,
+  LearningCaseProposal,
+  LearningCaseRecord,
+  LearningCaseStatus,
+} from './learning.js';
 const APPLICATION_ID = 1162038091;
+/** v1: 修订/事件/验证/种子/快照表。v2: 作用域索引、FTS5 trigram 全文索引与标签表。v3: 文档语料分片表。
+ *  v4: 租户 org/region 列与索引（KA07/08）。
+ *  v5: 事件投影去重（M2-02）、一次性验证回执（M2-03）与引用对账（M1-03）。
+ *  v6: 学习平台数据面（L2/L3）：个人偏好、私人草稿、学习个案、提案幂等台账、
+ *      不可变发布清单 + 当前指针 + 撤回台账（ADR-0004）。 */
+const SCHEMA_VERSION = 7;
+/** FTS 正文：覆盖 canonical 记录的全部字段值（不含 JSON 键名）；与查询侧同样做 NFKC + 小写折叠。 */
+export function searchText(record: KnowledgeRecord | KnowledgeDraft): string {
+  const parts = [
+    record.knowledgeId,
+    record.scope,
+    record.kind,
+    record.pluginId,
+    record.projectId,
+    record.title,
+    record.problemSignal,
+    record.cause,
+    record.method,
+    ...record.scenarios,
+    ...record.edc,
+    ...record.topics,
+    ...record.preconditions,
+    ...record.notApplicable,
+    ...record.counterexamples,
+    ...record.sources,
+    ...(record.claims ?? []),
+    // 多语言面（KA09）：别名、语言标记进入全文索引，使跨语言查询可召回同一条方法。
+    record.i18n?.primaryLocale,
+    ...(record.i18n?.locales ?? []),
+    ...Object.values(record.i18n?.aliases ?? {}).flat(),
+  ];
+  return parts
+    .filter((value) => typeof value === 'string' && value.length > 0)
+    .join('\n')
+    .normalize('NFKC')
+    .toLocaleLowerCase();
+}
+/** 标签面：供 SQL 侧过滤（scenario/edc/topic）。值为空的数组不写入标签行，检索时按“无该面标签即通过”处理。 */
+const TAG_FACETS = ['scenarios', 'edc', 'topics'] as const;
+type TagFacet = (typeof TAG_FACETS)[number];
+/** 语料入口前缀约束（M1-01）：在 SQL 内过滤，保证分页与总数一致。 */
+function prefixClause(prefixes?: readonly string[]): { clause: string; args: string[] } {
+  if (!prefixes?.length) return { clause: '', args: [] };
+  return {
+    clause: ` AND (${prefixes.map(() => "doc_path LIKE ? ESCAPE '\\'").join(' OR ')})`,
+    args: prefixes.map((prefix) => `${prefix.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`),
+  };
+}
+type TagWriter = (id: string, revision: number, facet: string, value: string) => unknown;
+function insertTags(write: TagWriter, id: string, revision: number, body: KnowledgeRecord | KnowledgeDraft): void {
+  for (const facet of TAG_FACETS) for (const value of body[facet]) write(id, revision, facet, value);
+}
+export type ProjectionOutcome = 'PENDING_ANALYSIS' | 'CANDIDATE' | 'NO_REUSABLE_CONCLUSION' | 'CONFLICT' | 'RETRY_REQUIRED';
+export interface ProjectionRecord {
+  projectionKey: string;
+  pluginId: string;
+  eventId: string;
+  contributor: string;
+  projectionVersion: string;
+  outcome: ProjectionOutcome;
+  knowledgeId?: string;
+  detail: unknown;
+  createdAt: string;
+  /** R5：认领时间/主体；NULL = 待认领。老化与产出率按 created_at 计算。 */
+  claimedAt?: string;
+  claimant?: string;
+}
+export interface ReceiptRecord {
+  receiptDigest: string;
+  requestId: string;
+  pluginId: string;
+  knowledgeId: string;
+  revision: number;
+  executorId: string;
+  outcome: string;
+  validationScope: string;
+  detail: unknown;
+  appliedAt: string;
+}
+export interface CitationRecord {
+  runId: string;
+  snapshotDigest: string;
+  knowledgeId: string;
+  revision: number;
+  contentDigest: string;
+  citedBy: string;
+  citedAt: string;
+}
+function decodeProjection(row: Record<string, unknown>): ProjectionRecord {
+  return {
+    projectionKey: String(row.projection_key),
+    pluginId: String(row.plugin_id),
+    eventId: String(row.event_id),
+    contributor: String(row.contributor),
+    projectionVersion: String(row.projection_version),
+    outcome: String(row.outcome) as ProjectionOutcome,
+    ...(row.knowledge_id === null ? {} : { knowledgeId: String(row.knowledge_id) }),
+    detail: JSON.parse(String(row.detail)),
+    createdAt: String(row.created_at),
+    ...(row.claimed_at !== null && row.claimed_at !== undefined ? { claimedAt: String(row.claimed_at) } : {}),
+    ...(row.claimant !== null && row.claimant !== undefined ? { claimant: String(row.claimant) } : {}),
+  };
+}
+function decodeReceipt(row: Record<string, unknown>): ReceiptRecord {
+  return {
+    receiptDigest: String(row.receipt_digest),
+    requestId: String(row.request_id),
+    pluginId: String(row.plugin_id),
+    knowledgeId: String(row.knowledge_id),
+    revision: Number(row.revision),
+    executorId: String(row.executor_id),
+    outcome: String(row.outcome),
+    validationScope: String(row.validation_scope),
+    detail: JSON.parse(String(row.detail)),
+    appliedAt: String(row.applied_at),
+  };
+}
+function decodeSetting(row: Record<string, unknown>): PersonalSettingRecord {
+  return {
+    orgId: String(row.org_id),
+    region: String(row.region),
+    owner: String(row.owner),
+    pluginKey: String(row.plugin_key),
+    key: String(row.key),
+    revision: Number(row.revision),
+    value: row.value_json === null ? null : (JSON.parse(String(row.value_json)) as string | boolean),
+    state: String(row.state) as PersonalSettingRecord['state'],
+    updatedAt: String(row.updated_at),
+  };
+}
+function decodeDraft(row: Record<string, unknown>): PersonalDraftRecord {
+  const body = JSON.parse(String(row.body)) as { title: string; body: string; pluginId?: string };
+  return {
+    draftId: String(row.draft_id),
+    orgId: String(row.org_id),
+    region: String(row.region),
+    owner: String(row.owner),
+    ...(body.pluginId !== undefined ? { pluginId: body.pluginId } : {}),
+    revision: Number(row.revision),
+    title: body.title,
+    body: body.body,
+    digest: String(row.digest),
+    state: String(row.state) as PersonalDraftRecord['state'],
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+function decodeCase(row: Record<string, unknown>): LearningCaseRecord {
+  return {
+    caseId: String(row.case_id),
+    orgId: String(row.org_id),
+    region: String(row.region),
+    pluginId: String(row.plugin_id),
+    ...(row.project_id === null ? {} : { projectId: String(row.project_id) }),
+    sourceEvent: JSON.parse(String(row.source_event)) as LearningCaseRecord['sourceEvent'],
+    hypothesisKey: String(row.hypothesis_key),
+    ...(row.category === null || row.category === undefined ? {} : { category: String(row.category) }),
+    status: String(row.status) as LearningCaseStatus,
+    ...(row.proposal === null ? {} : { proposal: JSON.parse(String(row.proposal)) as LearningCaseProposal }),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+function decodeRelease(row: Record<string, unknown>): KnowledgeReleaseRecord {
+  return {
+    releaseId: String(row.release_id),
+    pluginId: String(row.plugin_id),
+    orgId: String(row.org_id),
+    region: String(row.region),
+    audience: String(row.audience),
+    entries: JSON.parse(String(row.entries)) as KnowledgeReleaseEntry[],
+    manifestDigest: String(row.manifest_digest),
+    ...(row.eval_report_ref === null || row.eval_report_ref === undefined ? {} : { evalReportRef: String(row.eval_report_ref) }),
+    approver: String(row.approver),
+    ...(row.prev_release_id === null ? {} : { prevReleaseId: String(row.prev_release_id) }),
+    state: String(row.state) as KnowledgeReleaseRecord['state'],
+    createdAt: String(row.created_at),
+  };
+}
 export class KnowledgeStore {
   private readonly db: DatabaseSync;
+  private readonly dbPath: string;
   private closed = false;
+  /** FTS5 + trigram 是否可用（运行时探测；不可用时检索降级为作用域子串扫描并如实上报）。 */
+  readonly ftsEnabled: boolean;
+  /** 文档语料 FTS 是否可用。 */
+  readonly chunksFtsEnabled: boolean;
   constructor(path: string) {
+    this.dbPath = path;
     mkdirSync(dirname(path), { recursive: true });
     let existing = false;
     try {
@@ -19,13 +213,9 @@ export class KnowledgeStore {
     const identity = (db: DatabaseSync) => {
       const version = Number(db.prepare('PRAGMA user_version').get()!.user_version),
         id = Number(db.prepare('PRAGMA application_id').get()!.application_id);
-      if (
-        version === 0 &&
-        id === 0 &&
-        db.prepare("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").all().length === 0
-      )
+      if (version === 0 && id === 0 && db.prepare("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").all().length === 0)
         return;
-      if (version !== 1 || id !== APPLICATION_ID) throw new Error('KNOWLEDGE_STORE_IDENTITY_MISMATCH');
+      if (id !== APPLICATION_ID || version < 1 || version > SCHEMA_VERSION) throw new Error('KNOWLEDGE_STORE_IDENTITY_MISMATCH');
     };
     if (existing) {
       const probe = new DatabaseSync(path, { readOnly: true, allowExtension: false });
@@ -51,7 +241,215 @@ export class KnowledgeStore {
       CREATE TABLE IF NOT EXISTS knowledge_seed_imports(plugin_id TEXT NOT NULL,package_version TEXT NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(plugin_id,package_version)) STRICT;
       CREATE TABLE IF NOT EXISTS knowledge_seed_states(plugin_id TEXT NOT NULL,knowledge_id TEXT NOT NULL,digest TEXT NOT NULL,package_version TEXT NOT NULL,PRIMARY KEY(plugin_id,knowledge_id)) STRICT;
       CREATE TABLE IF NOT EXISTS knowledge_snapshots(id TEXT PRIMARY KEY,body TEXT NOT NULL) STRICT;
-      PRAGMA application_id=${APPLICATION_ID}; PRAGMA user_version=1; COMMIT;`);
+      CREATE TABLE IF NOT EXISTS knowledge_projections(
+        projection_key TEXT PRIMARY KEY,
+        plugin_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        contributor TEXT NOT NULL,
+        projection_version TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        knowledge_id TEXT,
+        detail TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX IF NOT EXISTS kp_event ON knowledge_projections(plugin_id,event_id,contributor,projection_version);
+      CREATE TABLE IF NOT EXISTS knowledge_receipts(
+        receipt_digest TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        plugin_id TEXT NOT NULL,
+        knowledge_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        executor_id TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        validation_scope TEXT NOT NULL,
+        detail TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX IF NOT EXISTS krq_request ON knowledge_receipts(request_id);
+      CREATE TABLE IF NOT EXISTS knowledge_citations(
+        run_id TEXT NOT NULL,
+        snapshot_digest TEXT NOT NULL,
+        knowledge_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        digest TEXT NOT NULL,
+        cited_by TEXT NOT NULL,
+        cited_at TEXT NOT NULL,
+        PRIMARY KEY(run_id,knowledge_id,revision,digest)
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS knowledge_tags(
+        id TEXT NOT NULL,revision INTEGER NOT NULL,facet TEXT NOT NULL,value TEXT NOT NULL,
+        PRIMARY KEY(id,revision,facet,value)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS kr_scope ON knowledge_revisions(scope);
+      CREATE INDEX IF NOT EXISTS kr_plugin ON knowledge_revisions(plugin_id,scope);
+      CREATE INDEX IF NOT EXISTS kr_project ON knowledge_revisions(plugin_id,project_id,scope);
+      CREATE INDEX IF NOT EXISTS kt_lookup ON knowledge_tags(facet,value);`);
+      // 文档语料分片（KA10）：按文档整体重导；FTS rowid 与 chunk_id 对齐。
+      this.db.exec(`CREATE TABLE IF NOT EXISTS knowledge_chunks(
+        chunk_id INTEGER PRIMARY KEY,
+        doc_path TEXT NOT NULL,
+        doc_digest TEXT NOT NULL,
+        line_start INTEGER NOT NULL,
+        line_end INTEGER NOT NULL,
+        heading TEXT NOT NULL,
+        heading_path TEXT NOT NULL,
+        body TEXT NOT NULL,
+        locale TEXT NOT NULL,
+        indexed_at TEXT NOT NULL
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS kc_doc ON knowledge_chunks(doc_path);`);
+      // v4：为存量修订增加租户/区域列。ALTER TABLE 幂等失败仅在列已存在时允许；旧行保持 NULL，
+      // 迁移不会猜测租户归属。未显式提供 org/region 的旧记录只能在本地兼容上下文中检索。
+      const revisionColumns = new Set(
+        (this.db.prepare('PRAGMA table_info(knowledge_revisions)').all() as Array<{ name: string }>).map((row) => row.name),
+      );
+      if (!revisionColumns.has('org_id')) this.db.exec('ALTER TABLE knowledge_revisions ADD COLUMN org_id TEXT');
+      if (!revisionColumns.has('region')) this.db.exec('ALTER TABLE knowledge_revisions ADD COLUMN region TEXT');
+      this.db.exec('CREATE INDEX IF NOT EXISTS kr_tenant ON knowledge_revisions(org_id,region,plugin_id,scope);');
+      // v7（R5 学习台账）：投影台账增加认领/老化字段。旧行 claimed_at/claimant 为 NULL = 待认领；
+      // 老化与候选产出率按 created_at 计算，不把 outbox delivered 当学习完成。
+      const projectionColumns = new Set(
+        (this.db.prepare('PRAGMA table_info(knowledge_projections)').all() as Array<{ name: string }>).map((row) => row.name),
+      );
+      if (!projectionColumns.has('claimed_at')) this.db.exec('ALTER TABLE knowledge_projections ADD COLUMN claimed_at TEXT');
+      if (!projectionColumns.has('claimant')) this.db.exec('ALTER TABLE knowledge_projections ADD COLUMN claimant TEXT');
+      // v6（学习平台数据面）：租户列统一 NOT NULL DEFAULT ''（''=未声明，避免 NULL 主键歧义）。
+      // 个人偏好：唯一 (tenant, owner, plugin-or-global, key)；删除=墓碑（state DELETED 且值清空），
+      // 备份恢复不复活（T03）。值 schema 由 preferences.ts 封闭注册表校验，库里只存已通过校验的标量。
+      this.db.exec(`CREATE TABLE IF NOT EXISTS personal_settings(
+        org_id TEXT NOT NULL DEFAULT '',
+        region TEXT NOT NULL DEFAULT '',
+        owner TEXT NOT NULL,
+        plugin_key TEXT NOT NULL DEFAULT '',
+        key TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        value_json TEXT,
+        state TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(org_id,region,owner,plugin_key,key),
+        CHECK(state IN ('ACTIVE','PAUSED','DELETED'))
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS ps_owner ON personal_settings(org_id,region,owner);
+      -- 私人方法草稿：仅本人可读写；不入 knowledge_fts、不进快照，不当作事实或组织标准。
+      CREATE TABLE IF NOT EXISTS personal_drafts(
+        draft_id TEXT NOT NULL,
+        org_id TEXT NOT NULL DEFAULT '',
+        region TEXT NOT NULL DEFAULT '',
+        owner TEXT NOT NULL,
+        plugin_id TEXT,
+        revision INTEGER NOT NULL,
+        body TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(draft_id,revision),
+        CHECK(state IN ('ACTIVE','DELETED'))
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS pd_owner ON personal_drafts(org_id,region,owner,state);
+      -- 学习个案：同 (tenant, pluginId, eventId, hypothesisKey) 唯一；来源事件与投影台账同标识。
+      CREATE TABLE IF NOT EXISTS learning_cases(
+        case_id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL DEFAULT '',
+        region TEXT NOT NULL DEFAULT '',
+        plugin_id TEXT NOT NULL,
+        project_id TEXT,
+        event_id TEXT NOT NULL,
+        source_event TEXT NOT NULL,
+        hypothesis_key TEXT NOT NULL,
+        category TEXT,
+        status TEXT NOT NULL,
+        proposal TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK(status IN ('PENDING','NO_REUSABLE','PROPOSED','CONFLICT'))
+      ) STRICT;
+      CREATE UNIQUE INDEX IF NOT EXISTS lc_event ON learning_cases(org_id,region,plugin_id,event_id,hypothesis_key);
+      -- 学习提案幂等台账（§5：同幂等键同内容→原回执；不同内容→冲突，不用最后写入覆盖）。
+      CREATE TABLE IF NOT EXISTS learning_proposals(
+        org_id TEXT NOT NULL DEFAULT '',
+        region TEXT NOT NULL DEFAULT '',
+        idempotency_key TEXT NOT NULL,
+        case_id TEXT NOT NULL,
+        knowledge_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        content_digest TEXT NOT NULL,
+        draft_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(org_id,region,idempotency_key)
+      ) STRICT;
+      -- 不可变发布清单：行内容一经写入不可改（manifest 内容寻址）。
+      CREATE TABLE IF NOT EXISTS knowledge_releases(
+        release_id TEXT PRIMARY KEY,
+        plugin_id TEXT NOT NULL,
+        org_id TEXT NOT NULL DEFAULT '',
+        region TEXT NOT NULL DEFAULT '',
+        audience TEXT NOT NULL,
+        entries TEXT NOT NULL,
+        manifest_digest TEXT NOT NULL,
+        eval_report_ref TEXT,
+        approver TEXT NOT NULL,
+        prev_release_id TEXT,
+        state TEXT NOT NULL DEFAULT 'CURRENT',
+        created_at TEXT NOT NULL,
+        CHECK(state IN ('CURRENT','WITHDRAWN'))
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS krl_plugin ON knowledge_releases(plugin_id,org_id,region,state);
+      -- 当前指针：expectedVersion 原子切换（RELEASE_VERSION_STALE）。
+      CREATE TABLE IF NOT EXISTS knowledge_release_pointers(
+        plugin_id TEXT NOT NULL,
+        org_id TEXT NOT NULL DEFAULT '',
+        region TEXT NOT NULL DEFAULT '',
+        release_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(plugin_id,org_id,region)
+      ) STRICT;
+      -- 撤回台账：撤回是逐 (release, knowledgeId, revision) 的显式失效；回滚切换指针也不复活这些条目。
+      CREATE TABLE IF NOT EXISTS knowledge_release_withdrawals(
+        release_id TEXT NOT NULL,
+        knowledge_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        withdrawn_at TEXT NOT NULL,
+        PRIMARY KEY(release_id,knowledge_id,revision)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS krw_entry ON knowledge_release_withdrawals(knowledge_id,revision);`);
+      // FTS5/trigram 在部分构建中不可用；建表失败不阻断存储，只降级检索路径。
+      const ftsExisted = this.db.prepare("SELECT 1 FROM sqlite_schema WHERE name='knowledge_fts'").get() !== undefined;
+      let fts = true;
+      try {
+        this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+          id UNINDEXED,revision UNINDEXED,text,tokenize = 'trigram')`);
+      } catch {
+        fts = false;
+      }
+      this.ftsEnabled = fts;
+      let chunksFts = true;
+      try {
+        this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunks_fts USING fts5(text, tokenize = 'trigram')`);
+      } catch {
+        chunksFts = false;
+      }
+      this.chunksFtsEnabled = chunksFts;
+      const tagsExisted = this.db.prepare("SELECT 1 FROM sqlite_schema WHERE name='knowledge_tags'").get() !== undefined;
+      if ((fts && !ftsExisted) || !tagsExisted) {
+        // v1 → v2 迁移，或 v2 库首次在支持 FTS 的环境打开：为全部存量修订补建全文索引与标签行，不修改既有行。
+        const rows = this.db.prepare('SELECT id,revision,body FROM knowledge_revisions').all() as Array<{
+          id: string;
+          revision: number;
+          body: string;
+        }>;
+        const insertFts = this.db.prepare('INSERT INTO knowledge_fts(id,revision,text) VALUES(?,?,?)');
+        const tagStmt = this.db.prepare('INSERT OR IGNORE INTO knowledge_tags(id,revision,facet,value) VALUES(?,?,?,?)');
+        const insertTag: TagWriter = (id, revision, facet, value) => tagStmt.run(id, revision, facet, value);
+        for (const row of rows) {
+          const body = normalizeDraft(JSON.parse(String(row.body)));
+          if (fts && !ftsExisted) insertFts.run(row.id, Number(row.revision), searchText(body));
+          if (!tagsExisted) insertTags(insertTag, row.id, Number(row.revision), body);
+        }
+      }
+      this.db.exec(`PRAGMA application_id=${APPLICATION_ID}; PRAGMA user_version=${SCHEMA_VERSION}; COMMIT;`);
     } catch (error) {
       this.db.close();
       throw error;
@@ -62,6 +460,10 @@ export class KnowledgeStore {
       this.db.close();
       this.closed = true;
     }
+  }
+  /** 库文件路径：快照公式共用（service.createSnapshot 委托 snapshot-readonly.readSnapshot 保证逐字节一致）。 */
+  get path(): string {
+    return this.dbPath;
   }
   transaction<T>(action: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -86,7 +488,9 @@ export class KnowledgeStore {
       body.knowledgeId !== row.id ||
       body.scope !== row.scope ||
       (body.pluginId ?? null) !== row.plugin_id ||
-      (body.projectId ?? null) !== row.project_id
+      (body.projectId ?? null) !== row.project_id ||
+      (body.orgId ?? null) !== (row.org_id ?? null) ||
+      (body.region ?? null) !== (row.region ?? null)
     )
       throw new Error('KNOWLEDGE_RECORD_CHANGED');
     return {
@@ -105,14 +509,185 @@ export class KnowledgeStore {
     return row ? this.decode(row) : undefined;
   }
   /** Scope filtering occurs in SQL before bodies are loaded or text searched. */
-  scoped(pluginId: string, projectId?: string): KnowledgeRecord[] {
-    return this.db
+  scoped(
+    pluginId: string,
+    projectId?: string,
+    tenant?: { orgId?: string; region?: string },
+  ): KnowledgeRecord[] {
+    // 租户/区域来自可信上下文；NULL 旧行仅在未提供对应过滤值时可见（不猜测迁移归属）。
+    const orgClause = tenant?.orgId !== undefined ? "AND (r.org_id=? OR r.org_id IS NULL)" : '';
+    const regionClause = tenant?.region !== undefined ? "AND (r.region=? OR r.region IS NULL)" : '';
+    const args: SQLInputValue[] = [pluginId, pluginId, projectId ?? ''];
+    if (tenant?.orgId !== undefined) args.push(tenant.orgId);
+    if (tenant?.region !== undefined) args.push(tenant.region);
+    return (
+      this.db
+        .prepare(
+          `SELECT r.* FROM knowledge_revisions r WHERE (r.scope='shared' OR
+      (r.plugin_id=? AND r.scope='plugin') OR (r.plugin_id=? AND r.project_id=? AND r.scope='project'))
+      ${orgClause} ${regionClause} ORDER BY r.id,r.revision DESC`,
+        )
+        .all(...args)
+        .map((row) => this.decode(row))
+    );
+  }
+  /**
+   * 全文检索：匹配、作用域、状态、标签过滤、按 id 取最新命中修订、排序（作用域级别 → bm25 → id）
+   * 与分页全部在 SQL 内完成；只解码当前页正文。命中语义 = trigram 短语包含于记录字段值
+   * （searchText 覆盖全部字段值，不含 JSON 结构记号）；降级路径保持 v1 的 canonical 子串语义。
+   */
+  ftsPage(
+    match: string,
+    states: readonly State[],
+    pluginId: string,
+    projectId: string | undefined,
+    facets: Partial<Record<TagFacet, string[]>>,
+    offset: number,
+    limit: number,
+    tenant?: { orgId?: string; region?: string },
+  ): { items: KnowledgeRecord[]; total: number; refs: Array<{ id: string; revision: number; digest: string; state: string }> } {
+    if (!this.ftsEnabled) return { items: [], total: 0, refs: [] };
+    const stateList = [...new Set(states)];
+    const args: SQLInputValue[] = [match, ...stateList, pluginId, pluginId, projectId ?? ''];
+    const tenantClause =
+      (tenant?.orgId !== undefined ? ' AND (r.org_id=? OR r.org_id IS NULL)' : '') +
+      (tenant?.region !== undefined ? ' AND (r.region=? OR r.region IS NULL)' : '');
+    if (tenant?.orgId !== undefined) args.push(tenant.orgId);
+    if (tenant?.region !== undefined) args.push(tenant.region);
+    const statePlaceholders = stateList.map(() => '?').join(',');
+    const facetClauses: string[] = [];
+    for (const facet of TAG_FACETS) {
+      const values = facets[facet];
+      if (!values?.length) continue;
+      const inList = values.map(() => '?').join(',');
+      // 无该面标签（字段为空数组）的记录按 v1 语义直接通过过滤。
+      facetClauses.push(
+        `AND (NOT EXISTS(SELECT 1 FROM knowledge_tags t WHERE t.id=f.id AND t.revision=f.revision AND t.facet='${facet}')
+          OR EXISTS(SELECT 1 FROM knowledge_tags t WHERE t.id=f.id AND t.revision=f.revision AND t.facet='${facet}' AND t.value IN (${inList})))`,
+      );
+      args.push(...values);
+    }
+    const cte = `WITH matched AS (
+        SELECT f.id AS id, f.revision AS revision, bm25(knowledge_fts) AS rank
+        FROM knowledge_fts f JOIN knowledge_revisions r ON r.id=f.id AND r.revision=f.revision
+        WHERE knowledge_fts MATCH ? AND r.state IN (${statePlaceholders}) AND (
+          r.scope='shared' OR (r.plugin_id=? AND r.scope='plugin')
+          OR (r.plugin_id=? AND r.project_id=? AND r.scope='project'))${tenantClause}
+        ${facetClauses.join('\n')}
+      ),
+      newest AS (SELECT id, MAX(revision) AS revision FROM matched GROUP BY id)`;
+    const order = `ORDER BY CASE r.scope WHEN 'project' THEN 0 WHEN 'plugin' THEN 1 ELSE 2 END, x.rank, r.id`;
+    // matched 只计算一次：轻量列（id/revision/digest/state）取全量命中，正文按 PK 只取当前页。
+    const refRows = this.db
       .prepare(
-        `SELECT * FROM knowledge_revisions WHERE scope='shared' OR
-      (plugin_id=? AND scope='plugin') OR (plugin_id=? AND project_id=? AND scope='project') ORDER BY id,revision DESC`,
+        `${cte}
+        SELECT r.id AS id, r.revision AS revision, r.digest AS digest, r.state AS state
+        FROM matched x JOIN newest n ON x.id=n.id AND x.revision=n.revision
+        JOIN knowledge_revisions r ON r.id=x.id AND r.revision=n.revision
+        ${order}`,
       )
-      .all(pluginId, pluginId, projectId ?? '')
-      .map((row) => this.decode(row));
+      .all(...args) as Array<{ id: string; revision: number; digest: string; state: string }>;
+    const refs = refRows.map((row) => ({
+      id: String(row.id),
+      revision: Number(row.revision),
+      digest: String(row.digest),
+      state: String(row.state),
+    }));
+    const items = refs
+      .slice(offset, offset + limit)
+      .map((ref) => this.get(ref.id, ref.revision))
+      .filter((record): record is KnowledgeRecord => record !== undefined);
+    return { items, total: refs.length, refs };
+  }
+  /** 文档语料：按文档整体替换分片（幂等重导）。FTS rowid 与 chunk_id 对齐。 */
+  replaceDocChunks(
+    docPath: string,
+    docDigest: string,
+    chunks: ReadonlyArray<import('./corpus.js').CorpusChunk>,
+  ): { docPath: string; docDigest: string; chunks: number } {
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          'DELETE FROM knowledge_chunks_fts WHERE rowid IN (SELECT chunk_id FROM knowledge_chunks WHERE doc_path=?)',
+        )
+        .run(docPath);
+      this.db.prepare('DELETE FROM knowledge_chunks WHERE doc_path=?').run(docPath);
+      const insertChunk = this.db.prepare(
+        'INSERT INTO knowledge_chunks(chunk_id,doc_path,doc_digest,line_start,line_end,heading,heading_path,body,locale,indexed_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+      );
+      const insertFts = this.db.prepare('INSERT INTO knowledge_chunks_fts(rowid,text) VALUES(?,?)');
+      let chunkId = 1 + Number(
+        (this.db.prepare('SELECT COALESCE(MAX(chunk_id),0) AS max FROM knowledge_chunks').get() as { max: number }).max,
+      );
+      const indexedAt = new Date().toISOString();
+      for (const chunk of chunks) {
+        insertChunk.run(
+          chunkId, docPath, docDigest, chunk.lineStart, chunk.lineEnd,
+          chunk.heading, chunk.headingPath.join(' / '), chunk.body, chunk.locale, indexedAt,
+        );
+        if (this.chunksFtsEnabled)
+          insertFts.run(chunkId, `${chunk.heading}\n${chunk.body}`.normalize('NFKC').toLocaleLowerCase());
+        chunkId++;
+      }
+      return { docPath, docDigest, chunks: chunks.length };
+    });
+  }
+  /** 语料当前状态：每文档 digest 与分片数（重导前比对，避免无谓重写）。 */
+  corpusDocState(docPath: string): { docDigest: string; chunks: number } | undefined {
+    const row = this.db
+      .prepare('SELECT doc_digest, COUNT(*) AS chunks FROM knowledge_chunks WHERE doc_path=? GROUP BY doc_digest')
+      .get(docPath) as { doc_digest: string; chunks: number } | undefined;
+    return row ? { docDigest: String(row.doc_digest), chunks: Number(row.chunks) } : undefined;
+  }
+  /** 语料检索：bm25 排序，引用（doc_path/行号/标题路径/digest）随行返回。 */
+  searchChunksFts(
+    match: string,
+    offset: number,
+    limit: number,
+    docPrefixes?: readonly string[],
+  ): { items: Array<Record<string, unknown>>; total: number } {
+    if (!this.chunksFtsEnabled) return { items: [], total: 0 };
+    const prefix = prefixClause(docPrefixes);
+    const rows = this.db
+      .prepare(
+        `SELECT c.*, f.rank AS fts_rank FROM knowledge_chunks_fts f
+        JOIN knowledge_chunks c ON c.chunk_id = f.rowid
+        WHERE knowledge_chunks_fts MATCH ?${prefix.clause}
+        ORDER BY f.rank, c.doc_path, c.line_start LIMIT ? OFFSET ?`,
+      )
+      .all(match, ...prefix.args, limit, offset) as Array<Record<string, unknown>>;
+    const total = Number(
+      (
+        this.db
+          .prepare(
+            `SELECT COUNT(*) AS total FROM knowledge_chunks_fts f
+            JOIN knowledge_chunks c ON c.chunk_id = f.rowid WHERE knowledge_chunks_fts MATCH ?${prefix.clause}`,
+          )
+          .get(match, ...prefix.args) as { total: number }
+      ).total,
+    );
+    return { items: rows, total };
+  }
+  /** 短词降级：SQL LIKE 扫描语料正文（不折叠 NFKC，语义弱于 FTS 路径，searchMode 如实区分）。多词按 AND 组合。 */
+  searchChunksLike(
+    terms: readonly string[],
+    offset: number,
+    limit: number,
+    docPrefixes?: readonly string[],
+  ): { items: Array<Record<string, unknown>>; total: number } {
+    if (!terms.length) return { items: [], total: 0 };
+    const clauses = terms.map(() => `lower(body) LIKE ? ESCAPE '\\'`);
+    const args = terms.map((term) => `%${term.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`);
+    const prefix = prefixClause(docPrefixes);
+    const where = `WHERE ${clauses.join(' AND ')}${prefix.clause}`;
+    const all = [...args, ...prefix.args];
+    const rows = this.db
+      .prepare(`SELECT * FROM knowledge_chunks ${where} ORDER BY doc_path, line_start LIMIT ? OFFSET ?`)
+      .all(...all, limit, offset) as Array<Record<string, unknown>>;
+    const total = Number(
+      (this.db.prepare(`SELECT COUNT(*) AS total FROM knowledge_chunks ${where}`).get(...all) as { total: number }).total,
+    );
+    return { items: rows, total };
   }
   insert(value: KnowledgeDraft, expectedRevision: number): KnowledgeRecord {
     const body = normalizeDraft(value),
@@ -120,7 +695,8 @@ export class KnowledgeStore {
     if ((previous?.revision ?? 0) !== expectedRevision) throw new Error('KNOWLEDGE_REVISION_STALE');
     if (
       previous &&
-      (previous.scope !== body.scope || previous.pluginId !== body.pluginId || previous.projectId !== body.projectId)
+      (previous.scope !== body.scope || previous.pluginId !== body.pluginId || previous.projectId !== body.projectId ||
+        previous.orgId !== body.orgId || previous.region !== body.region)
     )
       throw new Error('KNOWLEDGE_PROMOTION_REQUIRES_NEW_ID');
     const hash = digest(body);
@@ -129,7 +705,7 @@ export class KnowledgeStore {
       createdAt = new Date().toISOString();
     this.db
       .prepare(
-        "INSERT INTO knowledge_revisions(id,revision,digest,state,scope,plugin_id,project_id,body,created_at) VALUES(?,?,?,'CANDIDATE',?,?,?,?,?)",
+        "INSERT INTO knowledge_revisions(id,revision,digest,state,scope,plugin_id,project_id,body,created_at,org_id,region) VALUES(?,?,?,'CANDIDATE',?,?,?,?,?,?,?)",
       )
       .run(
         body.knowledgeId,
@@ -140,7 +716,13 @@ export class KnowledgeStore {
         body.projectId ?? null,
         canonical(body),
         createdAt,
+        body.orgId ?? null,
+        body.region ?? null,
       );
+    if (this.ftsEnabled)
+      this.db.prepare('INSERT INTO knowledge_fts(id,revision,text) VALUES(?,?,?)').run(body.knowledgeId, revision, searchText(body));
+    const tagStmt = this.db.prepare('INSERT OR IGNORE INTO knowledge_tags(id,revision,facet,value) VALUES(?,?,?,?)');
+    insertTags((id, revision, facet, value) => tagStmt.run(id, revision, facet, value), body.knowledgeId, revision, body);
     this.event(body.knowledgeId, revision, 'CANDIDATE_CAPTURED', { contentDigest: hash });
     return { ...body, revision, contentDigest: hash, state: 'CANDIDATE', createdAt };
   }
@@ -202,7 +784,7 @@ export class KnowledgeStore {
     const row = this.db
       .prepare('SELECT digest,package_version FROM knowledge_seed_states WHERE plugin_id=? AND knowledge_id=?')
       .get(pluginId, knowledgeId);
-    return row ? { digest: String(row.digest), packageVersion: String(row.package_version) } : undefined;
+    return row ? { digest: String(row.digest), packageVersion: String(row.packageVersion) } : undefined;
   }
   setSeedState(pluginId: string, knowledgeId: string, digest: string, packageVersion: string): void {
     this.db
@@ -221,5 +803,451 @@ export class KnowledgeStore {
     const row = this.db.prepare('SELECT body FROM knowledge_snapshots WHERE id=?').get(id);
     if (!row) throw new Error('KNOWLEDGE_SNAPSHOT_NOT_FOUND');
     return JSON.parse(String(row.body));
+  }
+  /** 事件投影台账：同一 (eventId, contributor, projectionVersion) 只产生一个结局。 */
+  projection(key: string): ProjectionRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM knowledge_projections WHERE projection_key=?').get(key);
+    return row ? decodeProjection(row) : undefined;
+  }
+  /** 按插件的投影台账（M2-02 智能体侧读取）：最近在前，可按结局过滤。 */
+  projectionsFor(pluginId: string, limit: number, outcome?: ProjectionOutcome): ProjectionRecord[] {
+    const rows = outcome
+      ? this.db
+          .prepare('SELECT * FROM knowledge_projections WHERE plugin_id=? AND outcome=? ORDER BY created_at DESC, projection_key DESC LIMIT ?')
+          .all(pluginId, outcome, limit)
+      : this.db
+          .prepare('SELECT * FROM knowledge_projections WHERE plugin_id=? ORDER BY created_at DESC, projection_key DESC LIMIT ?')
+          .all(pluginId, limit);
+    return rows.map((row) => decodeProjection(row as Record<string, unknown>));
+  }
+  recordProjection(value: ProjectionRecord): void {
+    this.db
+      .prepare(
+        'INSERT INTO knowledge_projections(projection_key,plugin_id,event_id,contributor,projection_version,outcome,knowledge_id,detail,created_at,claimed_at,claimant) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        value.projectionKey,
+        value.pluginId,
+        value.eventId,
+        value.contributor,
+        value.projectionVersion,
+        value.outcome,
+        value.knowledgeId ?? null,
+        canonical(value.detail),
+        value.createdAt,
+        value.claimedAt ?? null,
+        value.claimant ?? null,
+      );
+  }
+  /** R5：认领一条待分析投影（幂等：已认领返回原认领，不覆盖）。 */
+  claimProjection(projectionKey: string, claimant: string, claimedAt: string): boolean {
+    const row = this.db.prepare('SELECT claimant FROM knowledge_projections WHERE projection_key=?').get(projectionKey);
+    if (!row) return false;
+    if (row.claimant !== null && row.claimant !== undefined) return true;
+    this.db.prepare('UPDATE knowledge_projections SET claimant=?, claimed_at=? WHERE projection_key=? AND claimant IS NULL')
+      .run(claimant, claimedAt, projectionKey);
+    return true;
+  }
+  /** R5 指标：按插件聚合投影台账的投递/待分析/已认领/候选产出/明确不产出计数。 */
+  projectionMetrics(pluginId: string): { delivered: number; pendingAnalysis: number; claimed: number; candidate: number; noReusable: number } {
+    const row = this.db.prepare(
+      `SELECT
+         COUNT(*) AS delivered,
+         SUM(CASE WHEN outcome='PENDING_ANALYSIS' AND claimant IS NULL THEN 1 ELSE 0 END) AS pending_analysis,
+         SUM(CASE WHEN claimant IS NOT NULL THEN 1 ELSE 0 END) AS claimed,
+         SUM(CASE WHEN outcome='CANDIDATE' THEN 1 ELSE 0 END) AS candidate,
+         SUM(CASE WHEN outcome='NO_REUSABLE_CONCLUSION' THEN 1 ELSE 0 END) AS no_reusable
+       FROM knowledge_projections WHERE plugin_id=?`,
+    ).get(pluginId) as Record<string, number>;
+    return {
+      delivered: Number(row.delivered ?? 0),
+      pendingAnalysis: Number(row.pending_analysis ?? 0),
+      claimed: Number(row.claimed ?? 0),
+      candidate: Number(row.candidate ?? 0),
+      noReusable: Number(row.no_reusable ?? 0),
+    };
+  }
+  receiptByDigest(receipt: string): ReceiptRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM knowledge_receipts WHERE receipt_digest=?').get(receipt);
+    return row ? decodeReceipt(row) : undefined;
+  }
+  receiptByRequest(requestId: string): ReceiptRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM knowledge_receipts WHERE request_id=?').get(requestId);
+    return row ? decodeReceipt(row) : undefined;
+  }
+  recordReceipt(value: ReceiptRecord): void {
+    this.db
+      .prepare(
+        'INSERT INTO knowledge_receipts(receipt_digest,request_id,plugin_id,knowledge_id,revision,executor_id,outcome,validation_scope,detail,applied_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        value.receiptDigest,
+        value.requestId,
+        value.pluginId,
+        value.knowledgeId,
+        value.revision,
+        value.executorId,
+        value.outcome,
+        value.validationScope,
+        canonical(value.detail),
+        value.appliedAt,
+      );
+  }
+  /** 引用台账：同一 Run 对同一修订的引用幂等。 */
+  recordCitation(value: CitationRecord): 'new' | 'existing' {
+    const result = this.db
+      .prepare(
+        'INSERT OR IGNORE INTO knowledge_citations(run_id,snapshot_digest,knowledge_id,revision,digest,cited_by,cited_at) VALUES(?,?,?,?,?,?,?)',
+      )
+      .run(value.runId, value.snapshotDigest, value.knowledgeId, value.revision, value.contentDigest, value.citedBy, value.citedAt);
+    return Number(result.changes) ? 'new' : 'existing';
+  }
+  citationsForRun(runId: string): CitationRecord[] {
+    return (this.db.prepare('SELECT * FROM knowledge_citations WHERE run_id=? ORDER BY knowledge_id,revision').all(runId) as Array<
+      Record<string, unknown>
+    >).map((row) => ({
+      runId: String(row.run_id),
+      snapshotDigest: String(row.snapshot_digest),
+      knowledgeId: String(row.knowledge_id),
+      revision: Number(row.revision),
+      contentDigest: String(row.digest),
+      citedBy: String(row.cited_by),
+      citedAt: String(row.cited_at),
+    }));
+  }
+  // ---------- L2 个人偏好：owner 由服务层从可信身份派生；唯一 (tenant, owner, plugin-or-global, key) ----------
+  personalSetting(
+    tenant: { orgId?: string; region?: string },
+    owner: string,
+    pluginKey: string,
+    key: string,
+  ): PersonalSettingRecord | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM personal_settings WHERE org_id=? AND region=? AND owner=? AND plugin_key=? AND key=?')
+      .get(tenant.orgId ?? '', tenant.region ?? '', owner, pluginKey, key);
+    return row ? decodeSetting(row as Record<string, unknown>) : undefined;
+  }
+  /** 未删除（ACTIVE/PAUSED）的全部本人偏好；墓碑不出现。 */
+  personalSettingsForOwner(tenant: { orgId?: string; region?: string }, owner: string): PersonalSettingRecord[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM personal_settings WHERE org_id=? AND region=? AND owner=? AND state!='DELETED' ORDER BY plugin_key,key",
+        )
+        .all(tenant.orgId ?? '', tenant.region ?? '', owner) as Array<Record<string, unknown>>
+    ).map(decodeSetting);
+  }
+  /** 版本比较更新（§5）：同键不同 expectedRevision 拒绝，不用最后写入覆盖。
+   *  墓碑上的重写是一次显式新选择，必须 expectedRevision=0 从修订 1 重新开始。 */
+  personalSettingUpsert(
+    input: { orgId?: string; region?: string; owner: string; pluginKey: string; key: string; value: string | boolean },
+    expectedRevision: number,
+  ): PersonalSettingRecord {
+    return this.transaction(() => {
+      const now = new Date().toISOString();
+      const existing = this.personalSetting(input, input.owner, input.pluginKey, input.key);
+      if (existing) {
+        if (existing.state === 'DELETED') {
+          if (expectedRevision !== 0) throw new Error('PREFERENCE_REVISION_STALE');
+        } else if (existing.revision !== expectedRevision) throw new Error('PREFERENCE_REVISION_STALE');
+        const revision = existing.state === 'DELETED' ? 1 : existing.revision + 1;
+        this.db
+          .prepare(
+            "UPDATE personal_settings SET revision=?, value_json=?, state='ACTIVE', updated_at=? WHERE org_id=? AND region=? AND owner=? AND plugin_key=? AND key=?",
+          )
+          .run(
+            revision, canonical(input.value), now,
+            input.orgId ?? '', input.region ?? '', input.owner, input.pluginKey, input.key,
+          );
+        return {
+          orgId: input.orgId ?? '', region: input.region ?? '', owner: input.owner,
+          pluginKey: input.pluginKey, key: input.key, revision, value: input.value, state: 'ACTIVE' as const, updatedAt: now,
+        };
+      }
+      if (expectedRevision !== 0) throw new Error('PREFERENCE_REVISION_STALE');
+      this.db
+        .prepare(
+          "INSERT INTO personal_settings(org_id,region,owner,plugin_key,key,revision,value_json,state,updated_at) VALUES(?,?,?,?,?,1,?,'ACTIVE',?)",
+        )
+        .run(input.orgId ?? '', input.region ?? '', input.owner, input.pluginKey, input.key, canonical(input.value), now);
+      return {
+        orgId: input.orgId ?? '', region: input.region ?? '', owner: input.owner,
+        pluginKey: input.pluginKey, key: input.key, revision: 1, value: input.value, state: 'ACTIVE' as const, updatedAt: now,
+      };
+    });
+  }
+  /** 暂停/恢复保留值与修订；删除写墓碑（state DELETED、值清空、修订+1）。重复同状态幂等返回原记录。 */
+  personalSettingSetState(
+    tenant: { orgId?: string; region?: string },
+    owner: string,
+    pluginKey: string,
+    key: string,
+    state: 'PAUSED' | 'ACTIVE' | 'DELETED',
+  ): PersonalSettingRecord {
+    return this.transaction(() => {
+      const existing = this.personalSetting(tenant, owner, pluginKey, key);
+      if (!existing) throw new Error('PREFERENCE_NOT_FOUND');
+      if (existing.state === state) return existing;
+      const now = new Date().toISOString();
+      if (state === 'DELETED') {
+        this.db
+          .prepare(
+            "UPDATE personal_settings SET state='DELETED', value_json=NULL, revision=revision+1, updated_at=? WHERE org_id=? AND region=? AND owner=? AND plugin_key=? AND key=?",
+          )
+          .run(now, tenant.orgId ?? '', tenant.region ?? '', owner, pluginKey, key);
+      } else {
+        this.db
+          .prepare(
+            'UPDATE personal_settings SET state=?, updated_at=? WHERE org_id=? AND region=? AND owner=? AND plugin_key=? AND key=?',
+          )
+          .run(state, now, tenant.orgId ?? '', tenant.region ?? '', owner, pluginKey, key);
+      }
+      return this.personalSetting(tenant, owner, pluginKey, key)!;
+    });
+  }
+  // ---------- L2 私人方法草稿：仅本人可见；不入检索面、不进快照 ----------
+  personalDraftInsert(input: {
+    draftId: string; orgId?: string; region?: string; owner: string; pluginId?: string; title: string; body: string; digest: string;
+  }): PersonalDraftRecord {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "INSERT INTO personal_drafts(draft_id,org_id,region,owner,plugin_id,revision,body,digest,state,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,'ACTIVE',?,?)",
+      )
+      .run(
+        input.draftId, input.orgId ?? '', input.region ?? '', input.owner, input.pluginId ?? null,
+        canonical({ title: input.title, body: input.body, ...(input.pluginId !== undefined ? { pluginId: input.pluginId } : {}) }),
+        input.digest, now, now,
+      );
+    return this.personalDraftGet(input.draftId)!;
+  }
+  personalDraftGet(draftId: string): PersonalDraftRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM personal_drafts WHERE draft_id=?').get(draftId);
+    return row ? decodeDraft(row as Record<string, unknown>) : undefined;
+  }
+  personalDraftsForOwner(tenant: { orgId?: string; region?: string }, owner: string): PersonalDraftRecord[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM personal_drafts WHERE org_id=? AND region=? AND owner=? AND state='ACTIVE' ORDER BY updated_at DESC,draft_id",
+        )
+        .all(tenant.orgId ?? '', tenant.region ?? '', owner) as Array<Record<string, unknown>>
+    ).map(decodeDraft);
+  }
+  personalDraftUpdate(
+    draftId: string,
+    owner: string,
+    expectedRevision: number,
+    patch: { title: string; body: string; digest: string },
+  ): PersonalDraftRecord {
+    return this.transaction(() => {
+      const existing = this.personalDraftGet(draftId);
+      if (!existing || existing.owner !== owner || existing.state !== 'ACTIVE') throw new Error('PERSONAL_DRAFT_NOT_FOUND');
+      if (existing.revision !== expectedRevision) throw new Error('PERSONAL_DRAFT_REVISION_STALE');
+      const now = new Date().toISOString();
+      const body = canonical({
+        title: patch.title,
+        body: patch.body,
+        ...(existing.pluginId !== undefined ? { pluginId: existing.pluginId } : {}),
+      });
+      this.db
+        .prepare('UPDATE personal_drafts SET revision=revision+1, body=?, digest=?, updated_at=? WHERE draft_id=?')
+        .run(body, patch.digest, now, draftId);
+      return this.personalDraftGet(draftId)!;
+    });
+  }
+  /** 删除=墓碑（state DELETED）；重复删除幂等。备份恢复先重放墓碑（T03）。 */
+  personalDraftDelete(draftId: string, owner: string): PersonalDraftRecord {
+    return this.transaction(() => {
+      const existing = this.personalDraftGet(draftId);
+      if (!existing || existing.owner !== owner) throw new Error('PERSONAL_DRAFT_NOT_FOUND');
+      if (existing.state === 'DELETED') return existing;
+      this.db
+        .prepare("UPDATE personal_drafts SET state='DELETED', updated_at=? WHERE draft_id=?")
+        .run(new Date().toISOString(), draftId);
+      return this.personalDraftGet(draftId)!;
+    });
+  }
+  // ---------- L3 学习个案：幂等键 (tenant, pluginId, eventId, hypothesisKey) ----------
+  learningCaseInsert(record: LearningCaseRecord): void {
+    this.db
+      .prepare(
+        'INSERT INTO learning_cases(case_id,org_id,region,plugin_id,project_id,event_id,source_event,hypothesis_key,category,status,proposal,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        record.caseId, record.orgId, record.region, record.pluginId, record.projectId ?? null,
+        record.sourceEvent.eventId, canonical(record.sourceEvent), record.hypothesisKey, record.category ?? null,
+        record.status, record.proposal ? canonical(record.proposal) : null, record.createdAt, record.updatedAt,
+      );
+  }
+  learningCaseByEventKey(
+    tenant: { orgId?: string; region?: string },
+    pluginId: string,
+    eventId: string,
+    hypothesisKey: string,
+  ): LearningCaseRecord | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM learning_cases WHERE org_id=? AND region=? AND plugin_id=? AND event_id=? AND hypothesis_key=?')
+      .get(tenant.orgId ?? '', tenant.region ?? '', pluginId, eventId, hypothesisKey);
+    return row ? decodeCase(row as Record<string, unknown>) : undefined;
+  }
+  learningCaseGet(caseId: string): LearningCaseRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM learning_cases WHERE case_id=?').get(caseId);
+    return row ? decodeCase(row as Record<string, unknown>) : undefined;
+  }
+  learningCasesList(
+    tenant: { orgId?: string; region?: string },
+    pluginId: string,
+    options: { status?: LearningCaseStatus; limit?: number } = {},
+  ): LearningCaseRecord[] {
+    const limit = Math.min(Math.max(Math.trunc(options.limit ?? 50), 1), 200);
+    const rows = options.status
+      ? this.db
+          .prepare(
+            'SELECT * FROM learning_cases WHERE org_id=? AND region=? AND plugin_id=? AND status=? ORDER BY created_at DESC,case_id LIMIT ?',
+          )
+          .all(tenant.orgId ?? '', tenant.region ?? '', pluginId, options.status, limit)
+      : this.db
+          .prepare(
+            'SELECT * FROM learning_cases WHERE org_id=? AND region=? AND plugin_id=? ORDER BY created_at DESC,case_id LIMIT ?',
+          )
+          .all(tenant.orgId ?? '', tenant.region ?? '', pluginId, limit);
+    return (rows as Array<Record<string, unknown>>).map(decodeCase);
+  }
+  learningCaseUpdateStatus(caseId: string, status: LearningCaseStatus, proposal?: LearningCaseProposal): LearningCaseRecord {
+    return this.transaction(() => {
+      const existing = this.learningCaseGet(caseId);
+      if (!existing) throw new Error('LEARNING_CASE_NOT_FOUND');
+      this.db
+        .prepare('UPDATE learning_cases SET status=?, proposal=?, updated_at=? WHERE case_id=?')
+        .run(status, proposal ? canonical(proposal) : existing.proposal ? canonical(existing.proposal) : null, new Date().toISOString(), caseId);
+      return this.learningCaseGet(caseId)!;
+    });
+  }
+  // ---------- L3 提案幂等台账：同幂等键同内容返回原回执，不同内容冲突 ----------
+  learningProposalGet(
+    tenant: { orgId?: string; region?: string },
+    idempotencyKey: string,
+  ): { caseId: string; knowledgeId: string; revision: number; contentDigest: string; draftDigest: string } | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM learning_proposals WHERE org_id=? AND region=? AND idempotency_key=?')
+      .get(tenant.orgId ?? '', tenant.region ?? '', idempotencyKey);
+    if (!row) return undefined;
+    return {
+      caseId: String(row.case_id),
+      knowledgeId: String(row.knowledge_id),
+      revision: Number(row.revision),
+      contentDigest: String(row.content_digest),
+      draftDigest: String(row.draft_digest),
+    };
+  }
+  learningProposalInsert(input: {
+    orgId?: string; region?: string; idempotencyKey: string; caseId: string; knowledgeId: string;
+    revision: number; contentDigest: string; draftDigest: string;
+  }): void {
+    this.db
+      .prepare(
+        'INSERT INTO learning_proposals(org_id,region,idempotency_key,case_id,knowledge_id,revision,content_digest,draft_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        input.orgId ?? '', input.region ?? '', input.idempotencyKey, input.caseId,
+        input.knowledgeId, input.revision, input.contentDigest, input.draftDigest, new Date().toISOString(),
+      );
+  }
+  // ---------- L3 发布清单：不可变清单 + expectedVersion 指针 + 撤回台账 ----------
+  releaseInsert(record: KnowledgeReleaseRecord): void {
+    this.db
+      .prepare(
+        "INSERT INTO knowledge_releases(release_id,plugin_id,org_id,region,audience,entries,manifest_digest,eval_report_ref,approver,prev_release_id,state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,'CURRENT',?)",
+      )
+      .run(
+        record.releaseId, record.pluginId, record.orgId, record.region, record.audience,
+        canonical(record.entries), record.manifestDigest, record.evalReportRef ?? null,
+        record.approver, record.prevReleaseId ?? null, record.createdAt,
+      );
+  }
+  releaseGet(releaseId: string): KnowledgeReleaseRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM knowledge_releases WHERE release_id=?').get(releaseId);
+    return row ? decodeRelease(row as Record<string, unknown>) : undefined;
+  }
+  releasesList(
+    tenant: { orgId?: string; region?: string },
+    pluginId: string,
+    options: { state?: KnowledgeReleaseRecord['state']; limit?: number } = {},
+  ): KnowledgeReleaseRecord[] {
+    const limit = Math.min(Math.max(Math.trunc(options.limit ?? 50), 1), 200);
+    const rows = options.state
+      ? this.db
+          .prepare(
+            'SELECT * FROM knowledge_releases WHERE org_id=? AND region=? AND plugin_id=? AND state=? ORDER BY created_at DESC,release_id LIMIT ?',
+          )
+          .all(tenant.orgId ?? '', tenant.region ?? '', pluginId, options.state, limit)
+      : this.db
+          .prepare(
+            'SELECT * FROM knowledge_releases WHERE org_id=? AND region=? AND plugin_id=? ORDER BY created_at DESC,release_id LIMIT ?',
+          )
+          .all(tenant.orgId ?? '', tenant.region ?? '', pluginId, limit);
+    return (rows as Array<Record<string, unknown>>).map(decodeRelease);
+  }
+  releasePointer(pluginId: string, tenant: { orgId?: string; region?: string }): KnowledgeReleasePointer | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT p.release_id AS release_id, p.version AS version, r.manifest_digest AS manifest_digest
+         FROM knowledge_release_pointers p JOIN knowledge_releases r ON r.release_id=p.release_id
+         WHERE p.plugin_id=? AND p.org_id=? AND p.region=?`,
+      )
+      .get(pluginId, tenant.orgId ?? '', tenant.region ?? '');
+    if (!row) return undefined;
+    return { releaseId: String(row.release_id), version: Number(row.version), manifestDigest: String(row.manifest_digest) };
+  }
+  /** expectedVersion 原子切换（§4：当前版本指针带 expectedVersion）。无指针时 expectedVersion 必须 0。
+   *  不自开事务：publishRelease 在外层事务内调用；CAS 由 UPDATE ... WHERE version=? 单语句保证。 */
+  releasePointerSwitch(
+    pluginId: string,
+    tenant: { orgId?: string; region?: string },
+    releaseId: string,
+    manifestDigest: string,
+    expectedVersion: number,
+  ): KnowledgeReleasePointer {
+    const now = new Date().toISOString();
+    if (expectedVersion === 0) {
+      const existing = this.releasePointer(pluginId, tenant);
+      if (existing) throw new Error('RELEASE_VERSION_STALE');
+      this.db
+        .prepare('INSERT INTO knowledge_release_pointers(plugin_id,org_id,region,release_id,version,updated_at) VALUES(?,?,?,?,1,?)')
+        .run(pluginId, tenant.orgId ?? '', tenant.region ?? '', releaseId, now);
+      return { releaseId, version: 1, manifestDigest };
+    }
+    const result = this.db
+      .prepare(
+        'UPDATE knowledge_release_pointers SET release_id=?, version=version+1, updated_at=? WHERE plugin_id=? AND org_id=? AND region=? AND version=?',
+      )
+      .run(releaseId, now, pluginId, tenant.orgId ?? '', tenant.region ?? '', expectedVersion);
+    if (Number(result.changes) !== 1) throw new Error('RELEASE_VERSION_STALE');
+    return { releaseId, version: expectedVersion + 1, manifestDigest };
+  }
+  /** 撤回：发布置 WITHDRAWN，条目逐条入台账（先阻止新取用，T06/§5 release.withdraw）。 */
+  releaseWithdraw(releaseId: string, entries: KnowledgeReleaseEntry[], reason: string): void {
+    this.transaction(() => {
+      const withdrawnAt = new Date().toISOString();
+      this.db.prepare("UPDATE knowledge_releases SET state='WITHDRAWN' WHERE release_id=? AND state='CURRENT'").run(releaseId);
+      const row = this.db.prepare('SELECT state FROM knowledge_releases WHERE release_id=?').get(releaseId);
+      if (!row || String(row.state) !== 'WITHDRAWN') throw new Error('RELEASE_WITHDRAW_CONFLICT');
+      const insert = this.db.prepare(
+        'INSERT OR IGNORE INTO knowledge_release_withdrawals(release_id,knowledge_id,revision,reason,withdrawn_at) VALUES(?,?,?,?,?)',
+      );
+      for (const entry of entries) insert.run(releaseId, entry.knowledgeId, entry.revision, reason, withdrawnAt);
+    });
+  }
+  /** 撤回台账查询：任何发布撤回过该 (knowledgeId, revision) 即失效——同一记录在同一租户内是同一事实。 */
+  releaseWithdrawal(knowledgeId: string, revision: number): { releaseId: string; reason: string } | undefined {
+    const row = this.db
+      .prepare('SELECT release_id,reason FROM knowledge_release_withdrawals WHERE knowledge_id=? AND revision=? LIMIT 1')
+      .get(knowledgeId, revision);
+    return row ? { releaseId: String(row.release_id), reason: String(row.reason) } : undefined;
+  }
+  /** KA16：事务一致备份到新文件（SQLite VACUUM INTO），不修改源库。 */
+  backup(targetPath: string): void {
+    this.db.exec(`VACUUM INTO '${targetPath.replace(/'/g, "''")}'`);
   }
 }

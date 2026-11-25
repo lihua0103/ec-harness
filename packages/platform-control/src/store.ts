@@ -1,13 +1,30 @@
 /** Persistent control-plane state: approved application releases, runs, inputs, events and audit.
  *  SQLite is the local single-owner store; a deployment may replace it with its central service. */
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { mkdirSync, lstatSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import type { ExecutionPlan } from '../../platform-runtime/src/plan.js';
 import type { RunEvent, RunSnapshot } from '../../platform-runtime/src/run.js';
 import type { ModelCatalogRecord, ModelConfigSnapshot } from './models.js';
+import type { RunFinding } from './service.js';
+import { currentCorrelation } from './observability.js';
+import { PlatformError } from './registry.js';
 
 export const CONTROL_APPLICATION_ID = 1162038092;
+
+/** E4-3 keyset cursor: opaque to clients, base64url of the sort key that produced the page.
+ *  Exported so the service's catalog pagination encodes cursors the same way. */
+export const encodeCursor = (t: string, id: string): string =>
+  Buffer.from(JSON.stringify({ t, id }), 'utf8').toString('base64url');
+export const decodeCursor = (cursor: string): { t: string; id: string } | null => {
+  try {
+    const value = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as { t?: unknown; id?: unknown };
+    return typeof value.t === 'string' && typeof value.id === 'string' ? { t: value.t, id: value.id } : null;
+  } catch {
+    return null;
+  }
+};
 
 export interface AppReleaseDraft {
   descriptor: {
@@ -18,6 +35,24 @@ export interface AppReleaseDraft {
     listingTypes?: string[];
     materialRoles?: string[];
     resultTypes?: string[];
+    /** 知识域 ID（插件 knowledge/manifest.json 的 pluginId）：Run 创建时据此绑定知识快照。 */
+    knowledgePluginId?: string;
+    /** 封闭参数 schema（R1/R3）：合同身份以 digest 固定进计划 v2；登记时拒绝封闭子集外的
+     *  关键字（registry → assertClosedSchema），提交值在 Run 冻结入口校验（runs.create →
+     *  validateRunInput，创建与换批共用）。必须是 JSON 对象，canonical ≤ 64KB；版本缺省 '1'。 */
+    inputSchema?: unknown;
+    inputSchemaVersion?: string;
+    /** Declarative result views (E1-5): the app describes how its contributed findings render.
+     *  The platform renders generically from this declaration and never branches on an appId. */
+    resultViews?: Array<{
+      viewId: string;
+      title: string;
+      kind: 'table' | 'metrics';
+      /** Which finding kind this view renders; findings align across runs by stable key. */
+      findingKind: string;
+      columns?: Array<{ field: string; label: string }>;
+      metrics?: Array<{ field: string; label: string; unit?: string; stat: 'count' | 'sum' | 'avg' }>;
+    }>;
   };
   requiredCapabilities: Array<{ capabilityId: string; version: string }>;
   providers: Array<{
@@ -32,6 +67,16 @@ export interface AppReleaseDraft {
     dependencies: Array<{ capabilityId: string; version: string }>;
   }>;
   runtimeBundleDigest: string;
+  /** Build provenance: who built the bytes and from which source. Digest-only; no secrets. */
+  provenance?: {
+    sourceRevision?: string;
+    builder?: string;
+    builtAt?: string;
+    /** SHA-256 of the SBOM produced for this release. */
+    sbomDigest?: string;
+    /** SHA-256 over the locked dependency graph. */
+    dependenciesDigest?: string;
+  };
 }
 export type AppState = 'ACTIVE' | 'REVOKED';
 export interface ProjectRecord {
@@ -76,6 +121,17 @@ export interface WorkRecord {
   createdAt: string;
   updatedAt: string;
 }
+/** The per-app default release pointer (W2/R6): which registered release new Works are created
+ *  from. One row per app; `revision` is a monotonic CAS counter so concurrent switches cannot
+ *  silently overwrite each other, and a stale creation form can be detected against it. */
+export interface AppDefaultReleaseRecord {
+  appId: string;
+  appVersion: string;
+  releaseDigest: string;
+  revision: number;
+  updatedBy: string;
+  updatedAt: string;
+}
 export interface StoredAppBody {
   draft: AppReleaseDraft;
   plan: ExecutionPlan;
@@ -86,6 +142,8 @@ export interface AppRecord extends StoredAppBody {
   appVersion: string;
   state: AppState;
   createdAt: string;
+  /** 登记该发布的已验证主体（P0-1 职责分离）：审批人不得与它相同。旧记录缺省，不猜测。 */
+  registeredBy?: string;
   revokedAt?: string;
   revokeReason?: string;
 }
@@ -93,6 +151,23 @@ export interface RunRecord {
   /** Trusted server-derived context, never accepted from run input. */
   workspace?: WorkspaceRecord;
   context?: { goal: string; previousRuns: Array<{ runId: string; input: unknown; result: RunRecord['result'] }>; truncated: boolean };
+  /** Run 创建时绑定的知识快照（KA11）：只读摘要，在途运行不随知识更新漂移；未配置知识源时缺省。
+   *  records 是实际修订集合（M1-02）：Run 可据此重放固定知识，而不只是校验一个摘要。
+   *  orgId/region 是绑定时的可信租户范围（WP2）：快照按它过滤，重放按同一规则校验。
+   *  LearningBinding（开发设计 §4）：release 是发布清单指针引用；preferences 是本人 ACTIVE 偏好的
+   *  受限引用（只有键与修订）——共享运行记录不暴露私有偏好正文，撤权/删除后也不得重取正文。 */
+  knowledge?: {
+    snapshotDigest: string;
+    total: number;
+    pluginId: string;
+    projectId?: string;
+    orgId?: string;
+    region?: string;
+    boundAt: string;
+    records?: Array<{ knowledgeId: string; revision: number; contentDigest: string }>;
+    release?: { releaseId: string; version: number; manifestDigest: string };
+    preferences?: Array<{ key: string; pluginKey: string; revision: number }>;
+  };
   runId: string;
   workId: string | null;
   appId: string;
@@ -129,6 +204,8 @@ export interface AuditEntry {
   target: string;
   details: unknown;
   createdAt: string;
+  /** Request correlation id captured when the entry was written (absent for old rows). */
+  correlationId?: string;
 }
 export interface ArtifactRecord {
   name: string;
@@ -185,6 +262,215 @@ export interface LaunchAttempt {
   startedAt: string;
   endedAt?: string;
   detail?: string;
+  /** Supervisor that owns the launch lease (a service principal id). */
+  leaseOwner?: string;
+  /** ISO time after which the lease no longer proves the launch is supervised. */
+  leaseExpiresAt?: string;
+  /** Last lease renewal, distinct from process-exit evidence. */
+  heartbeatAt?: string;
+  /** Host process that runs the launch. `in-process` means the SDK harness runs inside the
+   *  control process, so OS-level process-tree supervision cannot prove its exit separately;
+   *  `child-process` means a deployment supplied a separately supervised worker process. */
+  pid?: number;
+  processIdentity?: string;
+  processMode?: 'in-process' | 'child-process';
+}
+
+/** Durable dispatch queue. A run and its dispatch message are committed in one transaction, so a
+ *  crash between "run created" and "worker started" resumes instead of losing the run. */
+export type OutboxState = 'PENDING' | 'CLAIMED' | 'DONE' | 'DEAD';
+export interface OutboxMessage {
+  messageId: string;
+  runId: string;
+  kind: 'run.dispatch';
+  state: OutboxState;
+  attempts: number;
+  nextAttemptAt: string;
+  claimedBy?: string;
+  claimExpiresAt?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** L3/T04 知识捕获 outbox：终端运行事实先持久入队（消费崩溃不丢失），泵投递 + 有限重试 + 死信 + 人工重放。
+ *  幂等键 (kind, eventId)：同一终态/复核决定重复投递只占一条；DONE 不复活。 */
+export interface KnowledgeOutboxMessage {
+  messageId: string;
+  kind: string;
+  eventId: string;
+  state: OutboxState;
+  attempts: number;
+  nextAttemptAt: string;
+  claimedBy?: string;
+  claimExpiresAt?: string;
+  payload: unknown;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A deployment approval binding a release digest to an approver and its evidence. */
+export type ReleaseApprovalState = 'ACTIVE' | 'REVOKED';
+export interface ReleaseApprovalRecord {
+  approvalId: string;
+  appId: string;
+  appVersion: string;
+  releaseDigest: string;
+  state: ReleaseApprovalState;
+  approvedBy: string;
+  approvedAt: string;
+  /** Deployment-supplied evidence reference (test run, review ticket); never a secret. */
+  evidence?: string;
+  /** Version this approval rolls back to when the release is withdrawn. */
+  rollbackTarget?: string;
+  expiresAt?: string;
+  revokedAt?: string;
+  revokeReason?: string;
+  revision: number;
+}
+
+/** E2-4 model governance: an approval for one catalog selection, reusing the release-approval
+ *  lifecycle. An approval binds to the selection id — the catalog entry itself is immutable data. */
+export interface ModelApprovalRecord {
+  approvalId: string;
+  selectionId: string;
+  state: ReleaseApprovalState;
+  approvedBy: string;
+  approvedAt: string;
+  evidence?: string;
+  expiresAt?: string;
+  revokedAt?: string;
+  revokeReason?: string;
+  revision: number;
+}
+
+/** Last recorded health of one catalog selection. Health is a deployment probe fact, not a
+ *  guarantee that the next request succeeds. */
+export type ModelHealthState = 'healthy' | 'degraded' | 'unavailable' | 'unknown';
+export interface ModelHealthRecord {
+  selectionId: string;
+  state: ModelHealthState;
+  reason?: string;
+  checkedAt: string;
+  catalogDigest?: string;
+  revision: number;
+}
+
+/** A business review of one succeeded execution's results. Technical success, sealed artifacts
+ *  and business approval are separate facts; this record is only the last one. */
+export type ReviewState = 'REQUESTED' | 'APPROVED' | 'REJECTED' | 'SUPERSEDED';
+/**
+ * R5 deliverable binding: the immutable manifest a review is requested against, built by the
+ * server from the run's own sealed artifacts at request time. Records without one are legacy
+ * reviews bound only to the run (未绑定具体成果版本) — they keep their existing facts and never
+ * match any deliverable manifest.
+ */
+export interface ReviewDeliverable {
+  /** Server-computed digest over the deliverable manifest; a decision must bind this exact
+   *  target. Deliberately excludes review state, so a decision or a delivery package's seal-time
+   *  snapshot can never change the target it binds (no circular dependency). */
+  manifestDigest: string;
+  manifest: { runId: string; artifacts: Array<{ name: string; digest: string; bytes: number }> };
+}
+export interface ReviewRecord {
+  reviewId: string;
+  runId: string;
+  state: ReviewState;
+  requestedBy: string;
+  reviewer?: string;
+  note?: string;
+  /** Present on reviews requested after deliverable binding (R5); absent on legacy records. */
+  deliverable?: ReviewDeliverable;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+/**
+ * A delivery package (E1-3): sealing, delivering and receiving are three separate facts and one
+ * package never silently replaces another. The manifest freezes the sealed artifact digests and
+ * the review snapshot at seal time; a later review never migrates into an old package.
+ */
+export type DeliveryPackageState = 'SEALED' | 'DELIVERED' | 'RECEIVED' | 'WITHDRAWN' | 'SUPERSEDED';
+export interface DeliveryManifest {
+  runId: string;
+  appId: string;
+  appVersion: string;
+  artifacts: Array<{ name: string; digest: string; bytes: number }>;
+  /** Review snapshot read at seal time; null means the run was never reviewed. */
+  review: { reviewId: string; state: ReviewState; updatedAt: string } | null;
+}
+export interface DeliveryPackageRecord {
+  packageId: string;
+  workId: string;
+  runId: string;
+  appId: string;
+  state: DeliveryPackageState;
+  manifest: DeliveryManifest;
+  /** Deterministic digest over the frozen manifest; changes mean the package content changed. */
+  packageDigest: string;
+  note?: string;
+  deliveredAt?: string;
+  deliveredNote?: string;
+  receivedAt?: string;
+  receivedNote?: string;
+  withdrawnAt?: string;
+  withdrawReason?: string;
+  /** Set when this package was explicitly replaced by a newer package of the same Work. */
+  supersededBy?: string;
+  sealedBy: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+/**
+ * Deterministic evaluation harness (E2-1 fallback): expert gold sets are not yet available, so
+ * quality assurance starts with checks that need no expert judgement — artifact presence, sealed
+ * digests, byte ceilings and goal-text anchors — executed against a Run's own records. Every
+ * check is pure and recomputable; nothing here claims expert equivalence, and expert
+ * expectations (gold sets) remain deferred until the business supplies them.
+ */
+export type DeterministicCheck =
+  | { kind: 'artifact-present'; artifactName: string }
+  | { kind: 'artifact-digest'; artifactName: string; digest: string }
+  | { kind: 'artifact-bytes-max'; artifactName: string; maxBytes: number }
+  | { kind: 'goal-contains'; text: string };
+export interface EvaluationEntry {
+  entryId: string;
+  label: string;
+  checks: DeterministicCheck[];
+}
+export type EvaluationSetState = 'ACTIVE' | 'ARCHIVED';
+export interface EvaluationSetRecord {
+  evaluationSetId: string;
+  appId: string;
+  name: string;
+  description: string;
+  entries: EvaluationEntry[];
+  state: EvaluationSetState;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface EvaluationCheckResult {
+  entryId: string;
+  label: string;
+  check: DeterministicCheck;
+  pass: boolean;
+  detail: string;
+}
+export interface EvaluationRunRecord {
+  evaluationRunId: string;
+  evaluationSetId: string;
+  runId: string;
+  appId: string;
+  /** Deterministic checks always complete: no model, no pending expert state. */
+  state: 'COMPLETED';
+  results: EvaluationCheckResult[];
+  passed: number;
+  failed: number;
+  createdBy: string;
+  createdAt: string;
 }
 /** A registered execution domain: where native Sessions actually run. Public metadata only,
  *  never credentials or arbitrary proxy addresses. */
@@ -256,7 +542,8 @@ export interface InputBaselineRecord {
   createdAt: string;
 }
 
-const canonical = (value: unknown): string =>
+/** Deterministic JSON (sorted keys) shared by digest computations over stored facts. */
+export const canonical = (value: unknown): string =>
   JSON.stringify(value, (_key, item) => {
     if (item && typeof item === 'object' && !Array.isArray(item)) {
       return Object.fromEntries(
@@ -268,10 +555,85 @@ const canonical = (value: unknown): string =>
     return item;
   });
 
+/** Deterministic digest over a review's deliverable manifest (R5): runId + artifact identities
+ *  only. Review state is deliberately excluded so the digest can never feed back into itself
+ *  through a decision or a delivery package's seal-time review snapshot. */
+export const reviewDeliverableDigest = (manifest: {
+  runId: string;
+  artifacts: Array<{ name: string; digest: string; bytes: number }>;
+}): string =>
+  createHash('sha256').update(canonical({ schema: 'review-deliverable/v1', ...manifest })).digest('hex');
+
+const decodeAuditRow = (row: Record<string, unknown>): AuditEntry => ({
+  sequence: Number(row.sequence),
+  actor: String(row.actor),
+  action: String(row.action),
+  target: String(row.target),
+  details: JSON.parse(String(row.details)),
+  createdAt: String(row.created_at),
+  ...(row.correlation_id ? { correlationId: String(row.correlation_id) } : {}),
+});
+
+const decodeAttempt = (row: Record<string, unknown>): LaunchAttempt => ({
+  launchId: String(row.launch_id),
+  runId: String(row.run_id),
+  fencingToken: Number(row.fencing_token),
+  state: String(row.state) as AttemptState,
+  startedAt: String(row.started_at),
+  ...(row.ended_at ? { endedAt: String(row.ended_at) } : {}),
+  ...(row.detail ? { detail: String(row.detail) } : {}),
+  ...(row.lease_owner ? { leaseOwner: String(row.lease_owner) } : {}),
+  ...(row.lease_expires_at ? { leaseExpiresAt: String(row.lease_expires_at) } : {}),
+  ...(row.heartbeat_at ? { heartbeatAt: String(row.heartbeat_at) } : {}),
+  ...(row.pid !== null && row.pid !== undefined ? { pid: Number(row.pid) } : {}),
+  ...(row.process_identity ? { processIdentity: String(row.process_identity) } : {}),
+  ...(row.process_mode ? { processMode: String(row.process_mode) as 'in-process' | 'child-process' } : {}),
+});
+
+const decodeModelHealth = (row: Record<string, unknown>): ModelHealthRecord => ({
+  selectionId: String(row.selection_id),
+  state: String(row.state) as ModelHealthState,
+  ...(row.reason ? { reason: String(row.reason) } : {}),
+  checkedAt: String(row.checked_at),
+  ...(row.catalog_digest ? { catalogDigest: String(row.catalog_digest) } : {}),
+  revision: Number(row.revision),
+});
+
+const decodeOutbox = (row: Record<string, unknown>): OutboxMessage => ({
+  messageId: String(row.message_id),
+  runId: String(row.run_id),
+  kind: String(row.kind) as OutboxMessage['kind'],
+  state: String(row.state) as OutboxState,
+  attempts: Number(row.attempts),
+  nextAttemptAt: String(row.next_attempt_at),
+  ...(row.claimed_by ? { claimedBy: String(row.claimed_by) } : {}),
+  ...(row.claim_expires_at ? { claimExpiresAt: String(row.claim_expires_at) } : {}),
+  ...(row.last_error ? { lastError: String(row.last_error) } : {}),
+  createdAt: String(row.created_at),
+  updatedAt: String(row.updated_at),
+});
+
+const decodeKnowledgeOutbox = (row: Record<string, unknown>): KnowledgeOutboxMessage => ({
+  messageId: String(row.message_id),
+  kind: String(row.kind),
+  eventId: String(row.event_id),
+  state: String(row.state) as OutboxState,
+  attempts: Number(row.attempts),
+  nextAttemptAt: String(row.next_attempt_at),
+  ...(row.claimed_by ? { claimedBy: String(row.claimed_by) } : {}),
+  ...(row.claim_expires_at ? { claimExpiresAt: String(row.claim_expires_at) } : {}),
+  payload: JSON.parse(String(row.payload)),
+  ...(row.last_error ? { lastError: String(row.last_error) } : {}),
+  createdAt: String(row.created_at),
+  updatedAt: String(row.updated_at),
+});
+
 export class PlatformStore {
   private readonly db: DatabaseSync;
+  private readonly storeLocation: string;
   private closed = false;
   constructor(path: string) {
+    this.storeLocation = resolve(path);
     mkdirSync(dirname(path), { recursive: true });
     let existing = false;
     try {
@@ -383,6 +745,12 @@ export class PlatformStore {
           ended_at TEXT,
           detail TEXT,
           exit_proven INTEGER,
+          lease_owner TEXT,
+          lease_expires_at TEXT,
+          heartbeat_at TEXT,
+          pid INTEGER,
+          process_identity TEXT,
+          process_mode TEXT,
           CHECK(state IN ('STARTING','RUNNING','SUCCEEDED','FAILED','CANCELLED','UNKNOWN'))
         ) STRICT;
         CREATE TABLE IF NOT EXISTS projects(
@@ -421,7 +789,8 @@ export class PlatformStore {
           action TEXT NOT NULL,
           target TEXT NOT NULL,
           details TEXT NOT NULL,
-          created_at TEXT NOT NULL
+          created_at TEXT NOT NULL,
+          correlation_id TEXT
         ) STRICT;
         CREATE TABLE IF NOT EXISTS model_catalog(
           singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -480,6 +849,105 @@ export class PlatformStore {
           created_at TEXT NOT NULL,
           UNIQUE(work_id, revision)
         ) STRICT;
+        CREATE TABLE IF NOT EXISTS outbox_messages(
+          message_id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          state TEXT NOT NULL,
+          attempts INTEGER NOT NULL,
+          next_attempt_at TEXT NOT NULL,
+          claimed_by TEXT,
+          claim_expires_at TEXT,
+          last_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK(state IN ('PENDING','CLAIMED','DONE','DEAD')),
+          CHECK(kind IN ('run.dispatch'))
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS knowledge_capture_outbox(
+          message_id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          event_id TEXT NOT NULL,
+          state TEXT NOT NULL,
+          attempts INTEGER NOT NULL,
+          next_attempt_at TEXT NOT NULL,
+          claimed_by TEXT,
+          claim_expires_at TEXT,
+          payload TEXT NOT NULL,
+          last_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK(state IN ('PENDING','CLAIMED','DONE','DEAD'))
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS kco_due ON knowledge_capture_outbox(state, next_attempt_at);
+        CREATE TABLE IF NOT EXISTS release_approvals(
+          app_id TEXT NOT NULL,
+          app_version TEXT NOT NULL,
+          approval_id TEXT NOT NULL,
+          release_digest TEXT NOT NULL,
+          state TEXT NOT NULL,
+          body TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(app_id, app_version),
+          CHECK(state IN ('ACTIVE','REVOKED'))
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS app_default_releases(
+          app_id TEXT PRIMARY KEY,
+          app_version TEXT NOT NULL,
+          release_digest TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          updated_by TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS model_health(
+          selection_id TEXT PRIMARY KEY,
+          state TEXT NOT NULL,
+          reason TEXT,
+          checked_at TEXT NOT NULL,
+          catalog_digest TEXT,
+          revision INTEGER NOT NULL,
+          CHECK(state IN ('healthy','degraded','unavailable','unknown'))
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS delivery_reviews(
+          review_id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          state TEXT NOT NULL,
+          manifest_digest TEXT,
+          body TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK(state IN ('REQUESTED','APPROVED','REJECTED','SUPERSEDED'))
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS delivery_packages(
+          package_id TEXT PRIMARY KEY,
+          work_id TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          app_id TEXT NOT NULL,
+          state TEXT NOT NULL,
+          package_digest TEXT NOT NULL,
+          body TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK(state IN ('SEALED','DELIVERED','RECEIVED','WITHDRAWN','SUPERSEDED'))
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS evaluation_sets(
+          evaluation_set_id TEXT PRIMARY KEY,
+          app_id TEXT NOT NULL,
+          state TEXT NOT NULL,
+          body TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK(state IN ('ACTIVE','ARCHIVED'))
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS evaluation_runs(
+          evaluation_run_id TEXT PRIMARY KEY,
+          evaluation_set_id TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          app_id TEXT NOT NULL,
+          body TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        ) STRICT;
         PRAGMA application_id=${CONTROL_APPLICATION_ID};
         PRAGMA user_version=1;
         COMMIT;
@@ -508,7 +976,56 @@ export class PlatformStore {
       if (!artifactCols.some((column) => column.name === 'sealed_at')) {
         this.db.exec('ALTER TABLE run_artifacts ADD COLUMN sealed_at TEXT');
       }
+      // Additive migration for launch leases and audit correlation.
+      const attemptColsAfter = this.db.prepare('PRAGMA table_info(launch_attempts)').all() as Array<{ name: string }>;
+      for (const column of ['lease_owner', 'lease_expires_at', 'heartbeat_at', 'process_identity', 'process_mode'] as const) {
+        if (!attemptColsAfter.some((entry) => entry.name === column)) {
+          this.db.exec(`ALTER TABLE launch_attempts ADD COLUMN ${column} TEXT`);
+        }
+      }
+      if (!attemptColsAfter.some((entry) => entry.name === 'pid')) {
+        this.db.exec('ALTER TABLE launch_attempts ADD COLUMN pid INTEGER');
+      }
+      const auditCols = this.db.prepare('PRAGMA table_info(audit_events)').all() as Array<{ name: string }>;
+      if (!auditCols.some((column) => column.name === 'correlation_id')) {
+        this.db.exec('ALTER TABLE audit_events ADD COLUMN correlation_id TEXT');
+      }
+      // R5 additive migration: reviews requested before deliverable binding carry no manifest
+      // digest — they stay run-only facts and never match a deliverable manifest.
+      const reviewCols = this.db.prepare('PRAGMA table_info(delivery_reviews)').all() as Array<{ name: string }>;
+      if (!reviewCols.some((column) => column.name === 'manifest_digest')) {
+        this.db.exec('ALTER TABLE delivery_reviews ADD COLUMN manifest_digest TEXT');
+      }
       this.db.exec('CREATE INDEX IF NOT EXISTS runs_by_work ON runs(work_id, state)');
+      this.db.exec('CREATE INDEX IF NOT EXISTS outbox_due ON outbox_messages(state, next_attempt_at)');
+      this.db.exec('CREATE INDEX IF NOT EXISTS outbox_run ON outbox_messages(run_id)');
+      this.db.exec('CREATE INDEX IF NOT EXISTS attempts_open ON launch_attempts(state, lease_expires_at)');
+      this.db.exec('CREATE INDEX IF NOT EXISTS audit_by_target ON audit_events(target, sequence)');
+      this.db.exec('CREATE INDEX IF NOT EXISTS reviews_by_run ON delivery_reviews(run_id, created_at)');
+      this.db.exec('CREATE INDEX IF NOT EXISTS packages_by_work ON delivery_packages(work_id, created_at)');
+      this.db.exec('CREATE INDEX IF NOT EXISTS eval_runs_by_set ON evaluation_runs(evaluation_set_id, created_at)');
+      this.db.exec(`CREATE TABLE IF NOT EXISTS run_findings(
+        run_id TEXT NOT NULL,
+        finding_key TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        severity TEXT,
+        summary TEXT,
+        fields TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(run_id, finding_key)
+      ) STRICT`);
+      // E2-4 model governance: one approval record per catalog selection, mirroring the
+      // release-approval pattern (ACTIVE/REVOKED with revision, body kept as canonical JSON).
+      this.db.exec(`CREATE TABLE IF NOT EXISTS model_approvals(
+        selection_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(selection_id),
+        CHECK(state IN ('ACTIVE','REVOKED'))
+      ) STRICT`);
       // Hard admission rule in addition to the service check: one non-terminal Run per Work.
       this.db.exec(
         "CREATE UNIQUE INDEX IF NOT EXISTS runs_one_active_per_work ON runs(work_id) WHERE work_id IS NOT NULL AND state IN ('QUEUED','STARTING','RUNNING')",
@@ -523,6 +1040,32 @@ export class PlatformStore {
       this.db.close();
       this.closed = true;
     }
+  }
+  /** The absolute on-disk store location, for honest storage-topology labels (E0d). */
+  get location(): string {
+    return this.storeLocation;
+  }
+  /** SQLite's own consistency check plus a schema identity check; used by the doctor and backup. */
+  integrityCheck(): { ok: boolean; messages: string[] } {
+    const messages: string[] = [];
+    let ok = true;
+    try {
+      const quick = this.db.prepare('PRAGMA quick_check').all() as Array<{ quick_check?: string }>;
+      for (const row of quick) {
+        const message = String(row.quick_check ?? '');
+        if (message && message.toLowerCase() !== 'ok') { ok = false; messages.push(message) }
+      }
+      const version = Number((this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
+      const application = Number((this.db.prepare('PRAGMA application_id').get() as { application_id: number }).application_id);
+      if (version !== 1 || application !== CONTROL_APPLICATION_ID) {
+        ok = false;
+        messages.push(`schema identity mismatch (user_version=${version}, application_id=${application})`);
+      }
+    } catch (error) {
+      ok = false;
+      messages.push(error instanceof Error ? error.message : 'INTEGRITY_CHECK_FAILED');
+    }
+    return { ok, messages };
   }
   private transactionDepth = 0;
   transaction<T>(action: () => T): T {
@@ -599,9 +1142,17 @@ export class PlatformStore {
     });
   }
   audit(actor: string, action: string, target: string, details: unknown): void {
+    const correlation = currentCorrelation();
     this.db
-      .prepare('INSERT INTO audit_events(actor,action,target,details,created_at) VALUES(?,?,?,?,?)')
-      .run(actor, action, target, canonical(details), new Date().toISOString());
+      .prepare('INSERT INTO audit_events(actor,action,target,details,created_at,correlation_id) VALUES(?,?,?,?,?,?)')
+      .run(
+        actor,
+        action,
+        target,
+        canonical(details),
+        new Date().toISOString(),
+        correlation?.correlationId ?? null,
+      );
   }
   auditList(offset: number, limit: number): { items: AuditEntry[]; total: number } {
     const rows = this.db
@@ -610,17 +1161,20 @@ export class PlatformStore {
     const total = Number(
       (this.db.prepare('SELECT COUNT(*) AS count FROM audit_events').get() as { count: number }).count,
     );
-    return {
-      total,
-      items: rows.map((row) => ({
-        sequence: Number(row.sequence),
-        actor: String(row.actor),
-        action: String(row.action),
-        target: String(row.target),
-        details: JSON.parse(String(row.details)),
-        createdAt: String(row.created_at),
-      })),
-    };
+    return { total, items: rows.map(decodeAuditRow) };
+  }
+  /** Ascending audit pages for a verifiable export; never reorders or rewrites facts. */
+  auditRowsAfter(after: number, limit: number): AuditEntry[] {
+    const rows = this.db
+      .prepare('SELECT * FROM audit_events WHERE sequence>? ORDER BY sequence ASC LIMIT ?')
+      .all(after, limit) as Array<Record<string, unknown>>;
+    return rows.map(decodeAuditRow);
+  }
+  auditRowsForTarget(target: string, limit = 1000): AuditEntry[] {
+    const rows = this.db
+      .prepare('SELECT * FROM audit_events WHERE target=? ORDER BY sequence ASC LIMIT ?')
+      .all(target, limit) as Array<Record<string, unknown>>;
+    return rows.map(decodeAuditRow);
   }
   appGet(appId: string, appVersion?: string): AppRecord | undefined {
     const row = appVersion
@@ -651,6 +1205,69 @@ export class PlatformStore {
         "UPDATE app_releases SET state='REVOKED', revoked_at=?, revoke_reason=? WHERE app_id=? AND app_version=?",
       )
       .run(revokedAt, reason, appId, appVersion);
+  }
+  // ── Default release pointers (W2/R6) ───────────────────────────────────────
+  defaultReleaseGet(appId: string): AppDefaultReleaseRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM app_default_releases WHERE app_id=?').get(appId) as
+      | Record<string, unknown>
+      | undefined;
+    return row
+      ? {
+          appId: String(row.app_id),
+          appVersion: String(row.app_version),
+          releaseDigest: String(row.release_digest),
+          revision: Number(row.revision),
+          updatedBy: String(row.updated_by),
+          updatedAt: String(row.updated_at),
+        }
+      : undefined;
+  }
+  defaultReleaseList(): AppDefaultReleaseRecord[] {
+    const rows = this.db.prepare('SELECT * FROM app_default_releases ORDER BY app_id').all() as Array<
+      Record<string, unknown>
+    >;
+    return rows.map((row) => ({
+      appId: String(row.app_id),
+      appVersion: String(row.app_version),
+      releaseDigest: String(row.release_digest),
+      revision: Number(row.revision),
+      updatedBy: String(row.updated_by),
+      updatedAt: String(row.updated_at),
+    }));
+  }
+  /** CAS write of the default pointer. `expectedRevision: null` means "expect no existing
+   *  pointer" (initial selection); a number means "expect the pointer at exactly that
+   *  revision". Returns the new record, or null when the expectation does not hold — the
+   *  caller surfaces that as a conflict and the caller's transaction (if any) rolls back.
+   *  Must run inside a store transaction to be atomic against concurrent switches. */
+  defaultReleaseSet(
+    appId: string,
+    appVersion: string,
+    releaseDigest: string,
+    updatedBy: string,
+    updatedAt: string,
+    expectedRevision: number | null,
+  ): AppDefaultReleaseRecord | null {
+    return this.transaction(() => {
+      const current = this.defaultReleaseGet(appId);
+      if (current) {
+        if (expectedRevision === null || current.revision !== expectedRevision) return null;
+        this.db
+          .prepare(
+            `UPDATE app_default_releases SET app_version=?, release_digest=?, revision=revision+1,
+             updated_by=?, updated_at=? WHERE app_id=? AND revision=?`,
+          )
+          .run(appVersion, releaseDigest, updatedBy, updatedAt, appId, expectedRevision);
+      } else {
+        if (expectedRevision !== null) return null;
+        this.db
+          .prepare(
+            'INSERT INTO app_default_releases(app_id,app_version,release_digest,revision,updated_by,updated_at) VALUES(?,?,?,1,?,?)',
+          )
+          .run(appId, appVersion, releaseDigest, updatedBy, updatedAt);
+      }
+      return this.defaultReleaseGet(appId)!;
+    });
   }
   modelCatalogGet(): ModelCatalogRecord | undefined {
     const row = this.db.prepare('SELECT body FROM model_catalog WHERE singleton=1').get() as
@@ -713,9 +1330,19 @@ export class PlatformStore {
     const row = this.db.prepare('SELECT * FROM runs WHERE run_id=?').get(runId);
     return row ? this.decodeRun(row as Record<string, unknown>) : undefined;
   }
-  runList(appId: string | undefined, offset: number, limit: number): { items: RunRecord[]; total: number } {
-    const where = appId ? 'WHERE app_id=?' : '';
-    const args = appId ? [appId] : [];
+  runList(appId: string | undefined, offset: number, limit: number, projectIds?: string[]): { items: RunRecord[]; total: number } {
+    const clauses: string[] = [];
+    const args: Array<string | number> = [];
+    if (appId) { clauses.push('app_id=?'); args.push(appId); }
+    // R2 (W2): project visibility is a server-side filter, applied before pagination. Runs
+    // without a Work (work_id NULL) match no project and are hidden when a project filter is
+    // set — fail-closed, because their ownership cannot be resolved.
+    if (projectIds !== undefined) {
+      if (projectIds.length === 0) return { total: 0, items: [] };
+      clauses.push(`work_id IN (SELECT work_id FROM works WHERE project_id IN (${projectIds.map(() => '?').join(',')}))`);
+      args.push(...projectIds);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const rows = this.db
       .prepare(`SELECT * FROM runs ${where} ORDER BY updated_at DESC, run_id LIMIT ? OFFSET ?`)
       .all(...args, limit, offset) as Array<Record<string, unknown>>;
@@ -723,6 +1350,95 @@ export class PlatformStore {
       (this.db.prepare(`SELECT COUNT(*) AS count FROM runs ${where}`).get(...args) as { count: number }).count,
     );
     return { total, items: rows.map((row) => this.decodeRun(row)) };
+  }
+
+  // ── E4-3 server-side filtering + keyset pagination ─────────────────────────
+  /** Works matching a filter, newest first, keyed on (updated_at, work_id). The cursor is opaque
+   *  to clients; a null nextCursor means the end of the result set. */
+  workQuery(
+    filter: { projectId?: string; projectIds?: string[]; appId?: string; state?: WorkState; q?: string },
+    cursor: string | null,
+    limit: number,
+  ): { items: WorkRecord[]; nextCursor: string | null } {
+    const clauses: string[] = [];
+    const args: Array<string | number> = [];
+    if (filter.projectId !== undefined) { clauses.push('project_id=?'); args.push(filter.projectId); }
+    if (filter.projectIds !== undefined) {
+      if (filter.projectIds.length === 0) return { items: [], nextCursor: null };
+      clauses.push(`project_id IN (${filter.projectIds.map(() => '?').join(',')})`);
+      args.push(...filter.projectIds);
+    }
+    if (filter.appId !== undefined) { clauses.push('app_id=?'); args.push(filter.appId); }
+    if (filter.state !== undefined) { clauses.push('state=?'); args.push(filter.state); }
+    if (filter.q !== undefined) {
+      // Title search only (the title lives in the work's JSON body, not a column): the goal body
+      // can be 100k chars and is not a search index.
+      clauses.push("json_extract(body, '$.title') LIKE ? ESCAPE '\\'");
+      args.push(`%${filter.q.replace(/[\\%_]/g, (char) => `\\${char}`)}%`);
+    }
+    const key = cursor ? decodeCursor(cursor) : null;
+    if (cursor && !key) throw new PlatformError('WORK_PAGE_INVALID', 'cursor');
+    if (key) {
+      clauses.push('(updated_at < ? OR (updated_at = ? AND work_id > ?))');
+      args.push(key.t, key.t, key.id);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    // Lookahead by one row so a full page that is also the last page ends the walk with
+    // nextCursor=null instead of emitting a trailing empty page.
+    const rows = this.db
+      .prepare(`SELECT body FROM works ${where} ORDER BY updated_at DESC, work_id LIMIT ?`)
+      .all(...args, limit + 1) as Array<{ body: string }>;
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const items = page.map((row) => JSON.parse(row.body) as WorkRecord);
+    const last = hasMore ? items.at(-1) : undefined;
+    return { items, nextCursor: last ? encodeCursor(last.updatedAt, last.workId) : null };
+  }
+  /** Runs matching a filter, newest first, keyed on (updated_at, run_id). The optional q matches
+   *  the run's input goal via SQLite JSON — a real server-side filter, not a client shortcut. */
+  runQuery(
+    filter: { appId?: string; workId?: string; projectId?: string; projectIds?: string[]; state?: string; q?: string },
+    cursor: string | null,
+    limit: number,
+  ): { items: RunRecord[]; nextCursor: string | null } {
+    const clauses: string[] = [];
+    const args: Array<string | number> = [];
+    if (filter.appId !== undefined) { clauses.push('app_id=?'); args.push(filter.appId); }
+    if (filter.workId !== undefined) { clauses.push('work_id=?'); args.push(filter.workId); }
+    if (filter.projectId !== undefined) {
+      clauses.push('work_id IN (SELECT work_id FROM works WHERE project_id=?)');
+      args.push(filter.projectId);
+    }
+    // R2 (W2): server-resolved project visibility, intersected with any explicit filter.
+    // Work-less runs match no project and are hidden when a filter is set (fail-closed).
+    if (filter.projectIds !== undefined) {
+      if (filter.projectIds.length === 0) return { items: [], nextCursor: null };
+      clauses.push(
+        `work_id IN (SELECT work_id FROM works WHERE project_id IN (${filter.projectIds.map(() => '?').join(',')}))`,
+      );
+      args.push(...filter.projectIds);
+    }
+    if (filter.state !== undefined) { clauses.push('state=?'); args.push(filter.state); }
+    if (filter.q !== undefined) {
+      clauses.push("json_extract(input_body, '$.goal') LIKE ? ESCAPE '\\'");
+      args.push(`%${filter.q.replace(/[\\%_]/g, (char) => `\\${char}`)}%`);
+    }
+    const key = cursor ? decodeCursor(cursor) : null;
+    if (cursor && !key) throw new PlatformError('RUN_PAGE_INVALID', 'cursor');
+    if (key) {
+      clauses.push('(updated_at < ? OR (updated_at = ? AND run_id > ?))');
+      args.push(key.t, key.t, key.id);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    // Same one-row lookahead as workQuery: the last full page ends the walk.
+    const rows = this.db
+      .prepare(`SELECT * FROM runs ${where} ORDER BY updated_at DESC, run_id LIMIT ?`)
+      .all(...args, limit + 1) as Array<Record<string, unknown>>;
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const items = page.map((row) => this.decodeRun(row));
+    const last = hasMore ? items.at(-1) : undefined;
+    return { items, nextCursor: last ? encodeCursor(last.updatedAt, last.runId) : null };
   }
   /** Fair queue scan: oldest QUEUED first, independent of how many newer terminal rows exist. */
   queuedRuns(limit: number): RunRecord[] {
@@ -797,14 +1513,63 @@ export class PlatformStore {
   }
   attemptInsert(attempt: LaunchAttempt): void {
     this.db
-      .prepare('INSERT INTO launch_attempts(launch_id,run_id,fencing_token,state,started_at) VALUES(?,?,?,?,?)')
-      .run(attempt.launchId, attempt.runId, attempt.fencingToken, attempt.state, attempt.startedAt);
+      .prepare(
+        'INSERT INTO launch_attempts(launch_id,run_id,fencing_token,state,started_at,lease_owner,lease_expires_at,heartbeat_at,pid,process_identity,process_mode) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        attempt.launchId,
+        attempt.runId,
+        attempt.fencingToken,
+        attempt.state,
+        attempt.startedAt,
+        attempt.leaseOwner ?? null,
+        attempt.leaseExpiresAt ?? null,
+        attempt.heartbeatAt ?? null,
+        attempt.pid ?? null,
+        attempt.processIdentity ?? null,
+        attempt.processMode ?? null,
+      );
+  }
+  /** Record the host process that actually runs a launch; identity is never just a reusable pid. */
+  attemptSetProcess(launchId: string, process: {
+    pid?: number;
+    identity?: string;
+    mode?: 'in-process' | 'child-process';
+  }): void {
+    this.db
+      .prepare('UPDATE launch_attempts SET pid=?, process_identity=?, process_mode=? WHERE launch_id=?')
+      .run(process.pid ?? null, process.identity ?? null, process.mode ?? null, launchId);
+  }
+  attemptGet(launchId: string): LaunchAttempt | undefined {
+    const row = this.db.prepare('SELECT * FROM launch_attempts WHERE launch_id=?').get(launchId) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? decodeAttempt(row) : undefined;
   }
   attemptUpdate(launchId: string, state: AttemptState, detail?: string): void {
     const terminal = state === 'SUCCEEDED' || state === 'FAILED' || state === 'CANCELLED' || state === 'UNKNOWN';
     this.db
       .prepare('UPDATE launch_attempts SET state=?, ended_at=?, detail=? WHERE launch_id=?')
       .run(state, terminal ? new Date().toISOString() : null, detail ?? null, launchId);
+  }
+  /** Take or replace the supervision lease for an open launch. */
+  attemptSetLease(launchId: string, owner: string, expiresAt: string): boolean {
+    const result = this.db
+      .prepare('UPDATE launch_attempts SET lease_owner=?, lease_expires_at=?, heartbeat_at=? WHERE launch_id=?')
+      .run(owner, expiresAt, new Date().toISOString(), launchId);
+    return Number(result.changes) === 1;
+  }
+  /** Renew only when this owner still holds the lease; a stolen/expired lease is not silently kept. */
+  attemptHeartbeat(launchId: string, owner: string, expiresAt: string): boolean {
+    const result = this.db
+      .prepare(
+        'UPDATE launch_attempts SET lease_expires_at=?, heartbeat_at=? WHERE launch_id=? AND lease_owner=? AND state IN (\'STARTING\',\'RUNNING\')',
+      )
+      .run(expiresAt, new Date().toISOString(), launchId, owner);
+    return Number(result.changes) === 1;
+  }
+  attemptClearLease(launchId: string): void {
+    this.db.prepare('UPDATE launch_attempts SET lease_owner=NULL, lease_expires_at=NULL WHERE launch_id=?').run(launchId);
   }
   attemptSetExitProven(launchId: string, proven: boolean): void {
     this.db.prepare('UPDATE launch_attempts SET exit_proven=? WHERE launch_id=?').run(proven ? 1 : 0, launchId);
@@ -827,15 +1592,22 @@ export class PlatformStore {
     const rows = this.db
       .prepare('SELECT * FROM launch_attempts WHERE run_id=? ORDER BY started_at')
       .all(runId) as Array<Record<string, unknown>>;
-    return rows.map((row) => ({
-      launchId: String(row.launch_id),
-      runId: String(row.run_id),
-      fencingToken: Number(row.fencing_token),
-      state: String(row.state) as AttemptState,
-      startedAt: String(row.started_at),
-      ...(row.ended_at ? { endedAt: String(row.ended_at) } : {}),
-      ...(row.detail ? { detail: String(row.detail) } : {}),
-    }));
+    return rows.map(decodeAttempt);
+  }
+  /** Open launches whose lease has expired; these need reconciliation before anything restarts. */
+  expiredAttempts(now: string, limit = 100): LaunchAttempt[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM launch_attempts WHERE state IN ('STARTING','RUNNING') AND (lease_expires_at IS NULL OR lease_expires_at<=?) ORDER BY started_at LIMIT ?",
+      )
+      .all(now, limit) as Array<Record<string, unknown>>;
+    return rows.map(decodeAttempt);
+  }
+  openAttempts(limit = 100): LaunchAttempt[] {
+    const rows = this.db
+      .prepare("SELECT * FROM launch_attempts WHERE state IN ('STARTING','RUNNING') ORDER BY started_at LIMIT ?")
+      .all(limit) as Array<Record<string, unknown>>;
+    return rows.map(decodeAttempt);
   }
   inputInsert(commit: InputCommit): void {
     this.db
@@ -917,6 +1689,44 @@ export class PlatformStore {
   }
   artifactCount(): number {
     return Number((this.db.prepare('SELECT COUNT(*) AS count FROM run_artifacts').get() as { count: number }).count);
+  }
+  /** Replace one run's contributed findings wholesale (E1-4): the outcome arrives once, and a
+   *  re-observation must not double-insert. Runs inside one transaction so a partial set never
+   *  becomes readable. */
+  findingsReplace(runId: string, findings: RunFinding[]): void {
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM run_findings WHERE run_id=?').run(runId);
+      const insert = this.db.prepare(
+        'INSERT INTO run_findings(run_id,finding_key,kind,severity,summary,fields,created_at) VALUES(?,?,?,?,?,?,?)',
+      );
+      const now = new Date().toISOString();
+      for (const finding of findings) {
+        insert.run(
+          runId,
+          finding.key,
+          finding.kind,
+          finding.severity ?? null,
+          finding.summary ?? null,
+          finding.fields !== undefined ? canonical(finding.fields) : null,
+          now,
+        );
+      }
+    });
+  }
+  findings(runId: string): RunFinding[] {
+    const rows = this.db
+      .prepare('SELECT * FROM run_findings WHERE run_id=? ORDER BY kind ASC, finding_key ASC')
+      .all(runId) as Array<Record<string, unknown>>;
+    return rows.map((row) => {
+      const fields = row.fields ? JSON.parse(String(row.fields)) as Record<string, string | number | boolean> : undefined;
+      return {
+        key: String(row.finding_key),
+        kind: String(row.kind),
+        ...(row.severity ? { severity: row.severity as RunFinding['severity'] } : {}),
+        ...(row.summary ? { summary: String(row.summary) } : {}),
+        ...(fields !== undefined ? { fields } : {}),
+      };
+    });
   }
   interactionInsert(record: InteractionRecord): void {
     this.db
@@ -1069,9 +1879,17 @@ export class PlatformStore {
       | undefined;
     return row ? (JSON.parse(row.body) as WorkRecord) : undefined;
   }
-  workList(state: WorkState | undefined, offset: number, limit: number): { items: WorkRecord[]; total: number } {
-    const where = state ? 'WHERE state=?' : '';
-    const args = state ? [state] : [];
+  workList(state: WorkState | undefined, offset: number, limit: number, projectIds?: string[]): { items: WorkRecord[]; total: number } {
+    const clauses: string[] = [];
+    const args: Array<string | number> = [];
+    if (state) { clauses.push('state=?'); args.push(state); }
+    // R2 (W2): visibility filter applied before pagination, not after.
+    if (projectIds !== undefined) {
+      if (projectIds.length === 0) return { total: 0, items: [] };
+      clauses.push(`project_id IN (${projectIds.map(() => '?').join(',')})`);
+      args.push(...projectIds);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const rows = this.db
       .prepare(`SELECT body FROM works ${where} ORDER BY updated_at DESC, work_id LIMIT ? OFFSET ?`)
       .all(...args, limit, offset) as Array<{ body: string }>;
@@ -1230,5 +2048,465 @@ export class PlatformStore {
     this.db
       .prepare('INSERT INTO input_baselines(baseline_id,work_id,revision,body,created_at) VALUES(?,?,?,?,?)')
       .run(baseline.baselineId, baseline.workId, baseline.revision, canonical(baseline), baseline.createdAt);
+  }
+
+  // ── Durable dispatch outbox ────────────────────────────────────────────────
+  outboxEnqueue(runId: string, at: string): OutboxMessage {
+    const message: OutboxMessage = {
+      messageId: `dispatch-${runId}`,
+      runId,
+      kind: 'run.dispatch',
+      state: 'PENDING',
+      attempts: 0,
+      nextAttemptAt: at,
+      createdAt: at,
+      updatedAt: at,
+    };
+    this.db
+      .prepare(
+        'INSERT INTO outbox_messages(message_id,run_id,kind,state,attempts,next_attempt_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
+      )
+      .run(message.messageId, message.runId, message.kind, message.state, message.attempts, message.nextAttemptAt, at, at);
+    return message;
+  }
+  outboxGet(messageId: string): OutboxMessage | undefined {
+    const row = this.db.prepare('SELECT * FROM outbox_messages WHERE message_id=?').get(messageId) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? decodeOutbox(row) : undefined;
+  }
+  outboxForRun(runId: string): OutboxMessage | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM outbox_messages WHERE run_id=? ORDER BY created_at DESC LIMIT 1')
+      .get(runId) as Record<string, unknown> | undefined;
+    return row ? decodeOutbox(row) : undefined;
+  }
+  /** Atomic claim: stale claims return to the pool, then due PENDING rows are leased to one owner. */
+  outboxClaim(owner: string, nowIso: string, limit: number, claimTtlMs: number): OutboxMessage[] {
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          "UPDATE outbox_messages SET state='PENDING', claimed_by=NULL, claim_expires_at=NULL, updated_at=? WHERE state='CLAIMED' AND claim_expires_at IS NOT NULL AND claim_expires_at<=?",
+        )
+        .run(nowIso, nowIso);
+      const due = this.db
+        .prepare(
+          "SELECT * FROM outbox_messages WHERE state='PENDING' AND next_attempt_at<=? ORDER BY next_attempt_at, created_at LIMIT ?",
+        )
+        .all(nowIso, limit) as Array<Record<string, unknown>>;
+      const expires = new Date(Date.parse(nowIso) + claimTtlMs).toISOString();
+      const claimed: OutboxMessage[] = [];
+      const claim = this.db.prepare(
+        "UPDATE outbox_messages SET state='CLAIMED', claimed_by=?, claim_expires_at=?, attempts=attempts+1, updated_at=? WHERE message_id=? AND state='PENDING'",
+      );
+      for (const row of due) {
+        const result = claim.run(owner, expires, nowIso, String(row.message_id));
+        if (Number(result.changes) === 1) {
+          const claimedRow = this.db.prepare('SELECT * FROM outbox_messages WHERE message_id=?').get(String(row.message_id));
+          if (claimedRow) claimed.push(decodeOutbox(claimedRow as Record<string, unknown>));
+        }
+      }
+      return claimed;
+    });
+  }
+  outboxComplete(messageId: string): void {
+    this.db
+      .prepare(
+        "UPDATE outbox_messages SET state='DONE', claimed_by=NULL, claim_expires_at=NULL, updated_at=? WHERE message_id=?",
+      )
+      .run(new Date().toISOString(), messageId);
+  }
+  outboxRetry(messageId: string, error: string, nextAttemptAt: string): void {
+    this.db
+      .prepare(
+        "UPDATE outbox_messages SET state='PENDING', claimed_by=NULL, claim_expires_at=NULL, last_error=?, next_attempt_at=?, updated_at=? WHERE message_id=?",
+      )
+      .run(error.slice(0, 2000), nextAttemptAt, new Date().toISOString(), messageId);
+  }
+  /** Return a claimed message to the pool WITHOUT spending its attempt budget, recording why it
+   *  cannot start. A run whose registered artifact has no executor must stay due and visible
+   *  (last_error names the missing bundle) instead of retrying into a dead letter. */
+  outboxRelease(messageId: string, reason: string): void {
+    // Returning the claim refunds the attempt the claim charged (claim does attempts+1): a run
+    // whose registered artifact is missing must stay due and visible WITHOUT marching toward the
+    // dead letter while its executor is not configured yet.
+    this.db
+      .prepare(
+        "UPDATE outbox_messages SET state='PENDING', claimed_by=NULL, claim_expires_at=NULL, attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END, last_error=?, updated_at=? WHERE message_id=?",
+      )
+      .run(reason.slice(0, 2000), new Date().toISOString(), messageId);
+  }
+  outboxDeadLetter(messageId: string, error: string): void {
+    this.db
+      .prepare(
+        "UPDATE outbox_messages SET state='DEAD', claimed_by=NULL, claim_expires_at=NULL, last_error=?, updated_at=? WHERE message_id=?",
+      )
+      .run(error.slice(0, 2000), new Date().toISOString(), messageId);
+  }
+  /** A run that can no longer be dispatched (cancelled, terminal, archived) leaves the queue. */
+  outboxCancelRun(runId: string, reason: string): number {
+    const result = this.db
+      .prepare(
+        "UPDATE outbox_messages SET state='DONE', claimed_by=NULL, claim_expires_at=NULL, last_error=?, updated_at=? WHERE run_id=? AND state IN ('PENDING','CLAIMED')",
+      )
+      .run(reason.slice(0, 2000), new Date().toISOString(), runId);
+    return Number(result.changes);
+  }
+  outboxCounts(): Record<string, number> {
+    const rows = this.db.prepare('SELECT state, COUNT(*) AS count FROM outbox_messages GROUP BY state').all() as Array<{
+      state: string;
+      count: number;
+    }>;
+    return Object.fromEntries(rows.map((row) => [String(row.state), Number(row.count)]));
+  }
+
+  // ── Knowledge capture outbox (L3/T04)：先持久入队，泵投递；消费崩溃不丢失 ──────────────
+  /** 同一 (kind, eventId) 只占一条：重复终态/重投幂等；已 DONE 不复活，未 DONE 保持原状态与预算。 */
+  knowledgeOutboxEnqueue(kind: string, eventId: string, payload: unknown, at: string): 'new' | 'existing' | 'done' {
+    const messageId = `kcap:${kind}:${eventId}`;
+    const result = this.db
+      .prepare(
+        "INSERT OR IGNORE INTO knowledge_capture_outbox(message_id,kind,event_id,state,attempts,next_attempt_at,payload,created_at,updated_at) VALUES(?,?,?,'PENDING',0,?,?,?,?)",
+      )
+      .run(messageId, kind, eventId, at, JSON.stringify(payload ?? null), at, at);
+    if (Number(result.changes) === 1) return 'new';
+    const row = this.db.prepare('SELECT state FROM knowledge_capture_outbox WHERE message_id=?').get(messageId) as
+      | { state: string }
+      | undefined;
+    return row && row.state === 'DONE' ? 'done' : 'existing';
+  }
+  knowledgeOutboxReclaimStale(nowIso: string): void {
+    this.db
+      .prepare(
+        "UPDATE knowledge_capture_outbox SET state='PENDING', claimed_by=NULL, claim_expires_at=NULL, updated_at=? WHERE state='CLAIMED' AND claim_expires_at IS NOT NULL AND claim_expires_at<=?",
+      )
+      .run(nowIso, nowIso);
+  }
+  knowledgeOutboxClaim(nowIso: string, limit: number, claimTtlMs: number): KnowledgeOutboxMessage[] {
+    return this.transaction(() => {
+      this.knowledgeOutboxReclaimStale(nowIso);
+      const due = this.db
+        .prepare(
+          "SELECT * FROM knowledge_capture_outbox WHERE state='PENDING' AND next_attempt_at<=? ORDER BY next_attempt_at, created_at LIMIT ?",
+        )
+        .all(nowIso, limit) as Array<Record<string, unknown>>;
+      const expires = new Date(Date.parse(nowIso) + claimTtlMs).toISOString();
+      const claimed: KnowledgeOutboxMessage[] = [];
+      const claim = this.db.prepare(
+        "UPDATE knowledge_capture_outbox SET state='CLAIMED', claimed_by='knowledge-pump', claim_expires_at=?, attempts=attempts+1, updated_at=? WHERE message_id=? AND state='PENDING'",
+      );
+      for (const row of due) {
+        const result = claim.run(expires, nowIso, String(row.message_id));
+        if (Number(result.changes) === 1) {
+          const claimedRow = this.db.prepare('SELECT * FROM knowledge_capture_outbox WHERE message_id=?').get(String(row.message_id));
+          if (claimedRow) claimed.push(decodeKnowledgeOutbox(claimedRow as Record<string, unknown>));
+        }
+      }
+      return claimed;
+    });
+  }
+  knowledgeOutboxComplete(messageId: string): void {
+    this.db
+      .prepare(
+        "UPDATE knowledge_capture_outbox SET state='DONE', claimed_by=NULL, claim_expires_at=NULL, updated_at=? WHERE message_id=?",
+      )
+      .run(new Date().toISOString(), messageId);
+  }
+  knowledgeOutboxRetry(messageId: string, error: string, nextAttemptAt: string): void {
+    this.db
+      .prepare(
+        "UPDATE knowledge_capture_outbox SET state='PENDING', claimed_by=NULL, claim_expires_at=NULL, last_error=?, next_attempt_at=?, updated_at=? WHERE message_id=?",
+      )
+      .run(error.slice(0, 2000), nextAttemptAt, new Date().toISOString(), messageId);
+  }
+  knowledgeOutboxDeadLetter(messageId: string, error: string): void {
+    this.db
+      .prepare(
+        "UPDATE knowledge_capture_outbox SET state='DEAD', claimed_by=NULL, claim_expires_at=NULL, last_error=?, updated_at=? WHERE message_id=?",
+      )
+      .run(error.slice(0, 2000), new Date().toISOString(), messageId);
+  }
+  /** 人工重放（§5 故障语义）：死信回到队列并重置预算；证据不删（last_error 保留）。 */
+  knowledgeOutboxReplayDead(nowIso: string): number {
+    const result = this.db
+      .prepare(
+        "UPDATE knowledge_capture_outbox SET state='PENDING', attempts=0, next_attempt_at=?, claimed_by=NULL, claim_expires_at=NULL, updated_at=? WHERE state='DEAD'",
+      )
+      .run(nowIso, nowIso);
+    return Number(result.changes);
+  }
+  knowledgeOutboxCounts(): Record<string, number> {
+    const rows = this.db.prepare('SELECT state, COUNT(*) AS count FROM knowledge_capture_outbox GROUP BY state').all() as Array<{
+      state: string;
+      count: number;
+    }>;
+    return Object.fromEntries(rows.map((row) => [String(row.state), Number(row.count)]));
+  }
+  /** 发布撤回影响面（T06）：绑定该发布的 Run 待复核清单（不重写运行事实）。 */
+  runsBoundToRelease(releaseId: string): string[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT run_id FROM runs WHERE json_extract(body,'$.knowledge.release.releaseId')=? ORDER BY created_at DESC LIMIT 500",
+        )
+        .all(releaseId) as Array<{ run_id: string }>
+    ).map((row) => String(row.run_id));
+  }
+
+  // ── Release approvals ──────────────────────────────────────────────────────
+  approvalGet(appId: string, appVersion: string): ReleaseApprovalRecord | undefined {
+    const row = this.db
+      .prepare('SELECT body FROM release_approvals WHERE app_id=? AND app_version=?')
+      .get(appId, appVersion) as { body: string } | undefined;
+    return row ? (JSON.parse(row.body) as ReleaseApprovalRecord) : undefined;
+  }
+  approvalList(): ReleaseApprovalRecord[] {
+    return this.db.prepare('SELECT body FROM release_approvals ORDER BY created_at DESC').all()
+      .map((row) => JSON.parse(String((row as { body: string }).body)) as ReleaseApprovalRecord);
+  }
+  approvalPut(record: ReleaseApprovalRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO release_approvals(app_id,app_version,approval_id,release_digest,state,body,created_at,updated_at)
+         VALUES(?,?,?,?,?,?,?,?)
+         ON CONFLICT(app_id,app_version) DO UPDATE SET
+           approval_id=excluded.approval_id,
+           release_digest=excluded.release_digest,
+           state=excluded.state,
+           body=excluded.body,
+           updated_at=excluded.updated_at`,
+      )
+      .run(
+        record.appId,
+        record.appVersion,
+        record.approvalId,
+        record.releaseDigest,
+        record.state,
+        canonical(record),
+        record.approvedAt,
+        record.revokedAt ?? record.approvedAt,
+      );
+  }
+
+  // ── Model approvals (E2-4) ─────────────────────────────────────────────────
+  modelApprovalGet(selectionId: string): ModelApprovalRecord | undefined {
+    const row = this.db
+      .prepare('SELECT body FROM model_approvals WHERE selection_id=?')
+      .get(selectionId) as { body: string } | undefined;
+    return row ? (JSON.parse(row.body) as ModelApprovalRecord) : undefined;
+  }
+  modelApprovalList(): ModelApprovalRecord[] {
+    return this.db.prepare('SELECT body FROM model_approvals ORDER BY created_at DESC').all()
+      .map((row) => JSON.parse(String((row as { body: string }).body)) as ModelApprovalRecord);
+  }
+  modelApprovalPut(record: ModelApprovalRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO model_approvals(selection_id,approval_id,state,body,created_at,updated_at)
+         VALUES(?,?,?,?,?,?)
+         ON CONFLICT(selection_id) DO UPDATE SET
+           approval_id=excluded.approval_id,
+           state=excluded.state,
+           body=excluded.body,
+           updated_at=excluded.updated_at`,
+      )
+      .run(
+        record.selectionId,
+        record.approvalId,
+        record.state,
+        canonical(record),
+        record.approvedAt,
+        record.revokedAt ?? record.approvedAt,
+      );
+  }
+
+  // ── Quota counting (E2-3) ──────────────────────────────────────────────────
+  /** Runs created for one project on one UTC day (YYYY-MM-DD prefix). Quota counts every run
+   *  attempt — a failed run consumed the budget just like a succeeded one. */
+  runCountForProjectDay(projectId: string, dayPrefix: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM runs JOIN works ON runs.work_id=works.work_id
+         WHERE works.project_id=? AND runs.created_at LIKE ?`,
+      )
+      .get(projectId, `${dayPrefix}%`) as { count: number };
+    return Number(row.count);
+  }
+  /** Non-terminal runs of one project, for the concurrency quota. */
+  activeRunCountForProject(projectId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM runs JOIN works ON runs.work_id=works.work_id
+         WHERE works.project_id=? AND runs.state IN ('QUEUED','STARTING','RUNNING')`,
+      )
+      .get(projectId) as { count: number };
+    return Number(row.count);
+  }
+
+  // ── Model health facts ─────────────────────────────────────────────────────
+  modelHealthGet(selectionId: string): ModelHealthRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM model_health WHERE selection_id=?').get(selectionId) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? decodeModelHealth(row) : undefined;
+  }
+  modelHealthList(): ModelHealthRecord[] {
+    const rows = this.db.prepare('SELECT * FROM model_health ORDER BY selection_id').all() as Array<Record<string, unknown>>;
+    return rows.map(decodeModelHealth);
+  }
+  modelHealthPut(record: ModelHealthRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO model_health(selection_id,state,reason,checked_at,catalog_digest,revision) VALUES(?,?,?,?,?,?)
+         ON CONFLICT(selection_id) DO UPDATE SET
+           state=excluded.state,
+           reason=excluded.reason,
+           checked_at=excluded.checked_at,
+           catalog_digest=excluded.catalog_digest,
+           revision=excluded.revision`,
+      )
+      .run(
+        record.selectionId,
+        record.state,
+        record.reason ?? null,
+        record.checkedAt,
+        record.catalogDigest ?? null,
+        record.revision,
+      );
+  }
+
+  // ── Delivery reviews ───────────────────────────────────────────────────────
+  reviewGet(reviewId: string): ReviewRecord | undefined {
+    const row = this.db.prepare('SELECT body FROM delivery_reviews WHERE review_id=?').get(reviewId) as
+      | { body: string }
+      | undefined;
+    return row ? (JSON.parse(row.body) as ReviewRecord) : undefined;
+  }
+  reviewsForRun(runId: string): ReviewRecord[] {
+    return this.db.prepare('SELECT body FROM delivery_reviews WHERE run_id=? ORDER BY created_at').all(runId)
+      .map((row) => JSON.parse(String((row as { body: string }).body)) as ReviewRecord);
+  }
+  openReviewForRun(runId: string): ReviewRecord | undefined {
+    const row = this.db
+      .prepare("SELECT body FROM delivery_reviews WHERE run_id=? AND state='REQUESTED' ORDER BY created_at DESC LIMIT 1")
+      .get(runId) as { body: string } | undefined;
+    return row ? (JSON.parse(row.body) as ReviewRecord) : undefined;
+  }
+  /** Every open (REQUESTED) review, oldest first — the E3-4 unified-todo scan. */
+  openReviews(limit = 200): ReviewRecord[] {
+    return this.db
+      .prepare("SELECT body FROM delivery_reviews WHERE state='REQUESTED' ORDER BY created_at LIMIT ?")
+      .all(limit)
+      .map((row) => JSON.parse(String((row as { body: string }).body)) as ReviewRecord);
+  }
+  reviewInsert(record: ReviewRecord): void {
+    this.db
+      .prepare(
+        'INSERT INTO delivery_reviews(review_id,run_id,state,manifest_digest,body,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',
+      )
+      .run(
+        record.reviewId,
+        record.runId,
+        record.state,
+        record.deliverable?.manifestDigest ?? null,
+        canonical(record),
+        record.createdAt,
+        record.updatedAt,
+      );
+  }
+  /** CAS on revision so two reviewers cannot silently overwrite each other's decision. The
+   *  manifest digest column follows the record body: legacy run-only records stay NULL — a
+   *  decision never retrofits a manifest onto a record that has none. */
+  reviewUpdate(record: ReviewRecord, expectedRevision: number): boolean {
+    return this.transaction(() => {
+      const current = this.reviewGet(record.reviewId);
+      if (!current || current.state !== 'REQUESTED' || current.revision !== expectedRevision) return false;
+      const result = this.db
+        .prepare('UPDATE delivery_reviews SET state=?, manifest_digest=?, body=?, updated_at=? WHERE review_id=?')
+        .run(record.state, record.deliverable?.manifestDigest ?? null, canonical(record), record.updatedAt, record.reviewId);
+      return Number(result.changes) === 1;
+    });
+  }
+
+  // ── Delivery packages ──────────────────────────────────────────────────────
+  packageGet(packageId: string): DeliveryPackageRecord | undefined {
+    const row = this.db.prepare('SELECT body FROM delivery_packages WHERE package_id=?').get(packageId) as
+      | { body: string }
+      | undefined;
+    return row ? (JSON.parse(row.body) as DeliveryPackageRecord) : undefined;
+  }
+  packagesForWork(workId: string): DeliveryPackageRecord[] {
+    return this.db.prepare('SELECT body FROM delivery_packages WHERE work_id=? ORDER BY created_at DESC, package_id')
+      .all(workId)
+      .map((row) => JSON.parse(String((row as { body: string }).body)) as DeliveryPackageRecord);
+  }
+  /** Packages in one state, oldest first — the E3-4 delivery-receipt todo scan. */
+  packagesByState(state: DeliveryPackageRecord['state'], limit = 200): DeliveryPackageRecord[] {
+    return this.db.prepare('SELECT body FROM delivery_packages WHERE state=? ORDER BY created_at LIMIT ?')
+      .all(state, limit)
+      .map((row) => JSON.parse(String((row as { body: string }).body)) as DeliveryPackageRecord);
+  }
+  packageInsert(record: DeliveryPackageRecord): void {
+    this.db
+      .prepare(
+        'INSERT INTO delivery_packages(package_id,work_id,run_id,app_id,state,package_digest,body,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        record.packageId, record.workId, record.runId, record.appId, record.state,
+        record.packageDigest, canonical(record), record.createdAt, record.updatedAt,
+      );
+  }
+  /** CAS on revision so two operators cannot silently overwrite each other's delivery act. */
+  packageUpdate(record: DeliveryPackageRecord, expectedRevision: number): boolean {
+    return this.transaction(() => {
+      const current = this.packageGet(record.packageId);
+      if (!current || current.revision !== expectedRevision) return false;
+      const result = this.db
+        .prepare('UPDATE delivery_packages SET state=?, package_digest=?, body=?, updated_at=? WHERE package_id=?')
+        .run(record.state, record.packageDigest, canonical(record), record.updatedAt, record.packageId);
+      return Number(result.changes) === 1;
+    });
+  }
+
+  // ── Deterministic evaluation harness (E2-1 fallback) ──────────────────────
+  evaluationSetGet(evaluationSetId: string): EvaluationSetRecord | undefined {
+    const row = this.db.prepare('SELECT body FROM evaluation_sets WHERE evaluation_set_id=?').get(evaluationSetId) as
+      | { body: string }
+      | undefined;
+    return row ? (JSON.parse(row.body) as EvaluationSetRecord) : undefined;
+  }
+  evaluationSetsByApp(appId: string | undefined): EvaluationSetRecord[] {
+    const rows = (appId === undefined
+      ? this.db.prepare('SELECT body FROM evaluation_sets ORDER BY created_at').all()
+      : this.db.prepare('SELECT body FROM evaluation_sets WHERE app_id=? ORDER BY created_at').all(appId)) as
+      Array<{ body: string }>;
+    return rows.map((row) => JSON.parse(row.body) as EvaluationSetRecord);
+  }
+  evaluationSetInsert(record: EvaluationSetRecord): void {
+    this.db
+      .prepare('INSERT INTO evaluation_sets(evaluation_set_id,app_id,state,body,created_at,updated_at) VALUES(?,?,?,?,?,?)')
+      .run(record.evaluationSetId, record.appId, record.state, canonical(record), record.createdAt, record.updatedAt);
+  }
+  evaluationSetUpdate(record: EvaluationSetRecord): void {
+    this.db
+      .prepare('UPDATE evaluation_sets SET state=?, body=?, updated_at=? WHERE evaluation_set_id=?')
+      .run(record.state, canonical(record), record.updatedAt, record.evaluationSetId);
+  }
+  evaluationRunGet(evaluationRunId: string): EvaluationRunRecord | undefined {
+    const row = this.db.prepare('SELECT body FROM evaluation_runs WHERE evaluation_run_id=?').get(evaluationRunId) as
+      | { body: string }
+      | undefined;
+    return row ? (JSON.parse(row.body) as EvaluationRunRecord) : undefined;
+  }
+  evaluationRunsBySet(evaluationSetId: string): EvaluationRunRecord[] {
+    return this.db
+      .prepare('SELECT body FROM evaluation_runs WHERE evaluation_set_id=? ORDER BY created_at DESC, evaluation_run_id')
+      .all(evaluationSetId)
+      .map((row) => JSON.parse(String((row as { body: string }).body)) as EvaluationRunRecord);
+  }
+  evaluationRunInsert(record: EvaluationRunRecord): void {
+    this.db
+      .prepare('INSERT INTO evaluation_runs(evaluation_run_id,evaluation_set_id,run_id,app_id,body,created_at) VALUES(?,?,?,?,?,?)')
+      .run(record.evaluationRunId, record.evaluationSetId, record.runId, record.appId, canonical(record), record.createdAt);
   }
 }

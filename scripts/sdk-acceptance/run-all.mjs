@@ -1,7 +1,7 @@
 /**
  * SDK 最小接入验收套件（交付级）。
  *
- * 目标：在锁定 0.2.2-rc.1 + sdk-minimal + 一次性 overlay 上，把平台依赖的
+ * 目标：在锁定 0.2.2-rc.5 + sdk-minimal + 一次性 overlay 上，把平台依赖的
  * SDK 能力逐项真实实测：接入契约、工具执行、多轮记忆、用户提问（应答/取消）、
  * 并发会话隔离、缺失/占用恢复拒绝、崩溃接管恢复、截断语义、低层订阅排空、
  * 审批通道、事件粒度取证。每个用例独立隔离 DSH_HOME 与工作区，只使用合成数据。
@@ -28,7 +28,7 @@ mkdirSync(OUT, { recursive: true })
 const report = {
   startedAt: new Date().toISOString(),
   env: {
-    dshVersion: '0.2.2-rc.1 (local locked source)',
+    dshVersion: '0.2.2-rc.5 (local locked source)',
     profile: 'sdk-minimal + one-shot overlay',
     provider: 'zai-coding-cn / glm-5.3-flash',
     credentialsConfigured: Boolean(process.env.ZAI_CODING_CN_API_KEY),

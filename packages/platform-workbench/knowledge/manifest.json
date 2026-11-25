@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 2,
+  "pluginId": "ec-platform-workbench",
+  "owner": "工作台负责人",
+  "source": "src/knowledge-seeds.ts",
+  "taxonomy": {
+    "topics": ["operate", "recover", "governance", "release"]
+  },
+  "seeds": [
+    { "knowledgeId": "platform-workbench.session.binding", "topics": ["operate"] },
+    { "knowledgeId": "platform-workbench.run.pointer", "topics": ["operate", "governance"] },
+    { "knowledgeId": "platform-workbench.delivery.lifecycle", "topics": ["governance", "release"] },
+    { "knowledgeId": "platform-workbench.diff.incomparable", "topics": ["governance", "recover"] },
+    { "knowledgeId": "platform-workbench.identity.honest", "topics": ["governance"] },
+    { "knowledgeId": "platform-workbench.audit.provenance", "topics": ["governance", "recover"] }
+  ],
+  "validators": [],
+  "capabilities": [
+    { "tool": "platform_workbench_snapshot", "topics": ["operate", "release"] },
+    { "tool": "platform_workbench_create_work", "topics": ["operate"] },
+    { "tool": "platform_workbench_start_run", "topics": ["operate"] },
+    { "tool": "platform_workbench_history", "topics": ["recover"] },
+    { "tool": "platform_workbench_governance", "topics": ["governance"] }
+  ],
+  "noMethodKnowledge": [
+    { "tool": "platform_workbench_snapshot", "reason": "工作台状态快照读取；操作指引由 docs 语料提供" }
+  ],
+  "agent": {
+    "id": "ec-platform-workbench.agent",
+    "version": "1.0.0",
+    "owner": "工作台负责人",
+    "topics": ["operate", "recover", "governance", "release"],
+    "tools": [
+      { "tool": "platform_workbench_snapshot", "topics": ["operate", "release"] },
+      { "tool": "platform_workbench_create_work", "topics": ["operate"] },
+      { "tool": "platform_workbench_start_run", "topics": ["operate"] },
+      { "tool": "platform_workbench_history", "topics": ["recover"] },
+      { "tool": "platform_workbench_governance", "topics": ["governance"] }
+    ],
+    "noMethodTools": [
+      { "tool": "platform_workbench_snapshot", "reason": "状态读取；操作指引由 docs 语料提供" }
+    ]
+  },
+  "feedback": {
+    "events": ["run.failed", "run.succeeded", "business.clarified"],
+    "projectionVersion": "1"
+  },
+  "goldenSet": {
+    "id": "ec-platform-workbench.golden",
+    "version": "1",
+    "cases": [
+      { "query": "下载不等于接收", "expect": ["platform-workbench.delivery.lifecycle"] },
+      { "query": "APP_VERSION_MISMATCH", "expect": ["platform-workbench.diff.incomparable"] },
+      { "query": "单操作者", "expect": ["platform-workbench.identity.honest"] },
+      { "query": "完全不存在的黄金集探针词", "expect": [], "expectEmpty": true }
+    ]
+  },
+  "corpus": {
+    "source": "docs/",
+    "docPrefixes": ["docs/ENTERPRISE-WORKBENCH-UX-SOLUTION.md", "docs/WORKBENCH-ENTERPRISE-RENOVATION-PLAN-2026-11-17.md", "docs/ENTERPRISE-WORKBENCH-DSH-REMEDIATION-ADDENDUM.md", "docs/WORKBENCH-UX-RENOVATION-PLAN-2026-11-17.md"]
+  },
+  "scope": { "projects": "all" }
+}

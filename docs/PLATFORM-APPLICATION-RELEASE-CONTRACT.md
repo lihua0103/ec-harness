@@ -36,10 +36,10 @@ AppExecutor 使用 DSH 的原生插件/工具扩展，不重造 Agent 循环。�
 
 | 字段组 | 必要事实 |
 |---|---|
-| 计划身份 | contractVersion、planId、planDigest、appReleaseId、descriptorDigest |
+| 计划身份 | contractVersion、planId、planDigest、appId、appVersion、descriptorDigest；含 releaseDigest 的完整 appReleaseId 由发布封套绑定，不进入计划摘要 |
 | 引擎组合 | DSH/SDK/Adapter 的版本、产物摘要、平台/架构约束 |
 | 能力绑定 | capabilityId + capabilityVersion → provider package/version/digest + executorId + protocolVersion |
-| 数据合同 | inputSchemaId/version/digest、outputSchemaId/version/digest |
+| 数据合同 | 输入：`descriptor.inputSchema`（封闭子集正文，登记时拒绝子集外关键字）＋ `inputSchemaVersion`（缺省 '1'），以 `{version, digest}` 固定进计划 v2 身份；提交值在 Run 冻结入口校验（创建与换批共用）。输出：provider 的 `outputSchemaVersion`，随能力绑定进入计划 |
 | 依赖闭包 | 完整包集合、传递依赖、peer 兼容证据、配置贡献的确定顺序 |
 | 执行基线 | profileDigest、policyVersion、禁用入口、允许副作用类别、resourceClass |
 | 前端 | viewContractVersion、批准视图摘要或通用降级视图 |
@@ -48,7 +48,7 @@ policyVersion 描述执行限制，不授予任何用户访问项目的权利；
 
 公共能力在一个 bundle 内复用；同名能力出现多个提供者必须由计划显式选定，不能由插件注册先后决定。循环依赖、必需能力缺失、schema 不兼容、未批准提供者和配置覆盖冲突均阻止发布。若允许可选能力，须声明缺失时行为和缺失标记；不得悄悄替换实现。
 
-planDigest 对规范化清单计算，并覆盖所有受控子产物摘要。哈希只能发现变更，不能证明批准身份；还需要可信制品仓库和平台维护的发布批准记录。安装路径可变，但实际载入的字节和有效装配必须对应计划。
+先对规范化计划正文计算 `planDigest`，正文覆盖受控子产物摘要，但不含 `planDigest` 自身或完整发布回指。再由发布封套将描述符和 `planDigest`（以及适用的构建来源）绑定为 `releaseDigest`；读取和预检分别重算两级摘要并核对封套中的应用、版本与计划归属。批准记录绑定 `releaseDigest`，不是计划摘要。历史发布按其原有格式验证，不重写摘要。应用版本、能力版本和插件包版本独立登记，按计划明示映射，不假定相等。哈希只能发现变更，不能证明批准身份；还需要可信制品仓库和平台维护的发布批准记录。安装路径可变，但实际载入的字节和有效装配必须对应计划。
 
 ### 启动预检
 
@@ -80,7 +80,7 @@ Worker 在接收业务输入前核对计划批准状态、实际包/配置摘要
 
 ## 5. 发布、升级与撤权
 
-应用版本绑定已验证的 ExecutionPlan。普通升级只调整新 Run 路由，在途运行保持原锁；缺少兼容旧环境时停止恢复，不能临时用新版本碰碰运气。
+应用版本绑定已验证的 ExecutionPlan。工作台的普通升级或回退只调整新 Work 的默认发布；既有 Work 创建新 Run 时按原绑定重新核对批准、当前授权和原制品可用性，不读取当前默认版本。已接纳的 Run（含排队、执行中与待答）保持原锁；原制品不可用时阻断派发或恢复，不替换版本。仅支持原绑定的命令和交互，不因发布退出默认目录而关闭合规待答。
 
 安全撤权与普通升级分开：人员/项目授权撤销、制品紧急封禁时，平台立即停止新的输入/回答/下载授权，持久记录取消意图，通知监督器撤销执行访问并停止进程树。无法证明停止时保持 UNKNOWN，不能把“留在旧版本”作为继续执行的理由。已读取的数据不能凭撤权从模型或内存追回；已落地资料按保留政策处理，不自动删除证据。短期凭据、在线权限检查与隔离环境的撤销时效需要明确测试。
 
@@ -90,7 +90,7 @@ Worker 在接收业务输入前核对计划批准状态、实际包/配置摘要
 
 AppRegistration 是员工应用目录的数据源，不是每项都需一个独立微前端。目录查询在服务端按身份/项目过滤；搜索、收藏、最近使用和深链接使用 appId，不依赖数组下标。
 
-进入应用时加载该应用配置与已批准视图；提交时由服务端重新选择批准的 release/plan，并验证参数和资料引用。前端不能任意指定包、profile 路径、能力实现或 secretRef。工作创建后展示所绑定版本，切换应用建立新工作而非改掉旧上下文。
+进入应用时加载该应用配置与已批准视图；创建 Work 时服务端核对当前获准默认发布，客户端所见发布只作前置条件，不匹配则拒绝创建。发起 Run 时服务端按 Work 原绑定复核 release/plan，并验证参数和资料引用。前端不能任意指定包、profile 路径、能力实现或 secretRef。工作创建后展示所绑定版本，切换应用建立新工作而非改掉旧上下文。
 
 Listing 参数 schema 固定四个业务选项；DVP 不要求或保存无意义的 Listing type。领域表格、术语和工件逻辑归应用贡献；平台只认通用上下文、授权动作和版本化结果合同。跨应用交付需要输出引用、消费方兼容检查和权限校验，不因同属一个平台自动共享全部上下文。
 

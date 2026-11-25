@@ -1,9 +1,11 @@
 export * from './store.js';
 export * from './registry.js';
+export * from './release-manifest.js';
 export * from './runs.js';
 export * from './policy.js';
 export * from './service.js';
 export * from './config.js';
+export * from './bootstrap.js';
 export * from './worker.js';
 export * from './scheduler.js';
 export * from './session-bindings.js';
@@ -12,3 +14,4 @@ export * from './identity-access.js';
 export * from './workbench-deploy.js';
 export * from './input-baselines.js';
 export * from './migration.js';
+export * from './knowledge-seeds.js';

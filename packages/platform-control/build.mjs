@@ -7,6 +7,8 @@ for (const [entry, outfile] of [
   ['src/http.ts', 'lib/http.js'],
   ['src/api-cli.ts', 'lib/api-cli.js'],
   ['src/migration.ts', 'lib/migration.js'],
+  ['src/backup-cli.ts', 'lib/backup-cli.js'],
+  ['src/doctor-cli.ts', 'lib/doctor-cli.js'],
 ]) {
   await build({
     entryPoints: [entry], outfile, bundle: true, platform: 'node', format: 'esm',

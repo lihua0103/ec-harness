@@ -14,6 +14,7 @@ const setup = async () => {
   const root = await mkdtemp(join(tmpdir(), 'platform-binding-http-'));
   const service = new PlatformControlService(join(root, 'control.sqlite'));
   service.registerApp(draft(), operator);
+  service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
   const api = await startWorkbenchServer({ service, authenticate: () => operator });
   return { root, service, api };
 };

@@ -114,13 +114,17 @@ export function runTone(state: unknown): 'ok' | 'warn' | 'error' | 'muted' {
 
 /**
  * Short activity label for a recorded timestamp, relative to an explicit `now` so the rule is
- * testable without a clock. Only elapsed time is derived — an absent or unparseable value is
- * reported as unrecorded rather than shown as "just now".
+ * testable without a clock. Accepts an ISO string or a numeric epoch-millisecond value (the host
+ * session catalog reports `updatedAt` as a number). Only elapsed time is derived — an absent or
+ * unparseable value is reported as unrecorded rather than shown as "just now".
  */
 export function relativeTime(value: unknown, now: number): string {
-  if (typeof value !== 'string' || !value) return '时间未记录'
-  const time = new Date(value).getTime()
-  if (!Number.isFinite(time)) return '时间未记录'
+  const time = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value
+      ? new Date(value).getTime()
+      : Number.NaN
+  if (!Number.isFinite(time) || time <= 0) return '时间未记录'
   const elapsed = now - time
   if (elapsed < 0) return '刚刚'
   const minutes = Math.floor(elapsed / 60_000)

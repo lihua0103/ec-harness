@@ -80,15 +80,37 @@ export function chosenModel(
 }
 
 /**
- * The envelope one platform run receives. A Listing release declares its own scenarios; the
+ * The input batch a run started from (SC-03): the frozen identity of the batch — never the
+ * content — so the run's own frozen input digest covers which batch it belongs to. Kept as a
+ * separate envelope key instead of folding it into the goal text, so plugins that ignore it are
+ * unaffected and plugins that read it get structured facts.
+ */
+export interface RunInputBaseline {
+  baselineId: string;
+  revision: number;
+  sourceRef: string;
+  digest: string;
+}
+
+/**
+ * The envelope one platform run receives. A release declares its own scenarios; the
  * chosen one travels as `applicationOptions.listingType` so the Worker sees the business entry
  * instead of guessing it from the goal text. Without a scenario the input stays unchanged.
+ * `inputBaseline` records which input batch this run started from; it is frozen with the input,
+ * so a rerun on a new batch stays traceable to both the new and the previous batch.
  */
-export function runInput(goal: string, listingType?: string): { goal: string; applicationOptions?: { listingType: string } } {
+export function runInput(goal: string, listingType?: string, baseline?: RunInputBaseline): {
+  goal: string; applicationOptions?: { listingType: string }; inputBaseline?: RunInputBaseline;
+} {
   const text = goal.trim()
   if (!text) throw new Error('RUN_GOAL_REQUIRED')
-  if (typeof listingType !== 'string' || listingType.length === 0) return { goal: text }
-  return { goal: text, applicationOptions: { listingType } }
+  return {
+    goal: text,
+    ...(typeof listingType === 'string' && listingType.length > 0
+      ? { applicationOptions: { listingType } }
+      : {}),
+    ...(baseline ? { inputBaseline: baseline } : {}),
+  }
 }
 
 export interface NativeUserSubmission {

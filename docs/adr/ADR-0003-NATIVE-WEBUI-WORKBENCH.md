@@ -1,6 +1,7 @@
 # ADR-0003：原生 WebUI 作为企业工作台交互底座（替代"原生界面仅专家辅助入口"）
 
 日期：2026-11-12。状态：**已决策（T01）**；实施状态 T00 完成、T01–T11 未全部完成，见 `docs/native-workbench/STATUS.md`。
+修订：2026-11-25（R3 / P0-5 员工 Web 治理基线）。
 决策人：平台开发。依据：[原生 WebUI 与企业工作台实施任务书](../NATIVE-WEBUI-ENTERPRISE-WORKBENCH-IMPLEMENTATION.md)、[上游能力矩阵](../native-workbench/CONTRACT-MATRIX.md)。
 
 ## 背景
@@ -19,14 +20,10 @@
 
 ## 实施形态（2026-11-12 用户确认）
 
-- 企业外壳是**一个插件所有权的 keyed `main` 页**（`emerald-platform`）：页内渲染左侧企业导航
-  （项目空间/应用中心/我的工作/待处理/平台设置）、主内容与右侧上下文/成果；不再把导航拆成多个
-  global panel 图标。
-- 插件启动时选中该页，并在本浏览器首次装配时 `ctx.layout.toggleSidebar()` 收起原生侧栏，让平台页占满主列。
-- 打开工作时 `ctx.layout.selectPanel(null)` 切到原生 `conversation` 保留键；会话头部通过
-  `conversation.session.header.actions` 注册「返回工作台」。
-- 原生 `sidebar` 容器与 `conversation` 键由上游拥有，插件只填已声明 slot；不 iframe、不重画/复制聊天、
-  不设独立应用；`apps/enterprise-workbench` 仅作视觉/IA 基线。
+- 企业外壳使用上游声明的 `sidebar` 与 keyed `main` 两个位置。`platform-workbench` 分别提供唯一员工导航和 `emerald-platform` 工作页。企业导航保留工作、会话、项目、应用和待办入口。
+- **员工左栏装配修订（2026-11-21，待宿主验收）**：`platform-workbench` 仍由 Cordis 作为 DSH 插件加载。插件以 `priority: -1` 注册 `sidebar`，由 DSH 渲染企业导航。`main:emerald-platform` 承载页面内容、原生会话与工作上下文。员工 Web profile 可叠加配置停用默认 `ui-sidebar`。[单侧栏设计与验收](../WORKBENCH-SINGLE-SIDEBAR-ARCHITECTURE.md)
+- **2026-11-13 单页修订（现行）**：打开 Work 仍留在 `emerald-platform`，由插件持有明确的 Session 引用，交给 `SessionProvider`，在页内嵌入原生 `conversation.content`。详情与运行记录不替代中央原生会话。原 `ctx.layout.selectPanel(null)` 两页切换和会话头部的「返回工作台」仅属 11-12 历史实现，不再作为实施依据。见[单页装配证据](../native-workbench/evidence/NATIVE-ASSEMBLY.md)。
+- 上游拥有 `sidebar` 的声明与框架几何及保留的 `conversation` 键。企业 Client 在员工 profile 中提供 `sidebar` 的唯一内容，并通过 `conversation.content` 复用原生会话。`apps/enterprise-workbench` 仅作视觉与信息架构基线。
 - 证据：`docs/native-workbench/evidence/NATIVE-ASSEMBLY.md`、`t12-a-shell-browser.json`（17/17）。
 
 ## 被否决方案
@@ -55,3 +52,15 @@
 - 公开 slot 能否完整截获原生提交并关联企业执行记录（T02 最小实验）。
 - 非 owner 问答/审批参与接缝（当前 BLOCKED 风险）。
 - 跨部署原生连接路由、真实公司认证协议。
+
+## 修订 2026-11-25（R3 / P0-5 员工 Web 治理基线）
+
+**背景**：`employee-web.patch.yml` 仅禁 `ui-sidebar`；web 宿主 agent 仍可用 `tool-plugin-manager`/`tool-schedule`/`command-goal`/`tool-goal`（来自 `preset-standard` 的 preset 行），HMR 未关——员工可在中央原生会话装卸插件/定时任务/目标，变更落在共享 web profile，下次启动或 HMR 生效，所有员工与运维界面一起变，且不在 Run 治理内。
+
+**决策**：
+1. 员工 Web profile 与运维 Web profile 分离命名（`employee`/`ops`），不共用出厂 `web` profile 代表两个环境。
+2. 员工 Web 叠加层在 `ui-sidebar` 之外，追加禁用 `tool-plugin-manager`/`schedule`/`tool-schedule`/`goal`/`command-goal`/`tool-goal`/`hmr` 七行（agent 侧基线），`apply-employee-web-profile.cjs` 同步幂等合并/回滚。
+3. **UI 隐藏不充当服务端授权**：禁用行只降低默认可达面，服务端授权仍由控制面 policy 与 Run 治理承担；本 ADR 不声称员工 Web 已是安全边界。
+4. 保留中央原生 Chat、授权普通操作与问答体验；窄屏/设置入口由企业导航承载（后续 R3 浏览器实测 WEB-03 补证）。
+
+**后果**：员工 Web 默认不再能装卸插件/设定时任务/续跑 goal；运维 profile 不受影响。回退以移除叠加层行为单位（`--rollback`）。

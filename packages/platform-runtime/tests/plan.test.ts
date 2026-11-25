@@ -66,3 +66,73 @@ test('missing, conflicting, cyclic and version-mismatched providers fail at rele
     (error: unknown) => error instanceof PlanError && error.code === 'PLAN_PLUGIN_VERSION_CONFLICT',
   );
 });
+
+test('v2 identity fixes descriptor and contract facts; a missing view is recorded as explicit null', () => {
+  const base = release([provider('listing', '1.0.0')]);
+  const identity = {
+    descriptorDigest: 'c'.repeat(64),
+    input: { version: '2', digest: 'd'.repeat(64) },
+  };
+  const plan = resolveExecutionPlan({ ...base, identity });
+  assert.equal(plan.planContractVersion, '2');
+  assert.equal(plan.descriptorDigest, 'c'.repeat(64));
+  assert.deepEqual(plan.input, { version: '2', digest: 'd'.repeat(64) });
+  assert.equal(plan.roles, null);
+  assert.equal(plan.view, null, 'absent view is explicit null, not undefined');
+  assertPlanMatchesRelease({ ...base, identity }, plan);
+
+  // Every controlled identity fact moves the digest.
+  const mutatedDescriptor = resolveExecutionPlan({ ...base, identity: { ...identity, descriptorDigest: 'e'.repeat(64) } });
+  const mutatedInput = resolveExecutionPlan({ ...base, identity: { ...identity, input: { version: '2', digest: 'f'.repeat(64) } } });
+  const addedView = resolveExecutionPlan({ ...base, identity: { ...identity, view: { version: '1', digest: '1'.repeat(64) } } });
+  for (const other of [mutatedDescriptor, mutatedInput, addedView]) {
+    assert.notEqual(other.planDigest, plan.planDigest, 'a controlled declaration change moves planDigest');
+  }
+  assert.notEqual(plan.planDigest, resolveExecutionPlan(base).planDigest, 'identity presence itself changes the contract');
+
+  // Invalid identity facts are rejected at plan time.
+  assert.throws(
+    () => resolveExecutionPlan({ ...base, identity: { descriptorDigest: 'nothex' } }),
+    (error: unknown) => error instanceof PlanError && error.code === 'PLAN_IDENTITY_INVALID',
+  );
+});
+
+test('plan contract formats are mutually exclusive at verification', () => {
+  const base = release([provider('listing', '1.0.0')]);
+  const v1Plan = resolveExecutionPlan(base);
+  const identity = { descriptorDigest: 'c'.repeat(64) };
+  const v2Plan = resolveExecutionPlan({ ...base, identity });
+  assert.throws(
+    () => assertPlanMatchesRelease({ ...base, identity }, v1Plan),
+    (error: unknown) => error instanceof PlanError && error.code === 'PLAN_DIGEST_MISMATCH',
+  );
+  assert.throws(
+    () => assertPlanMatchesRelease(base, v2Plan),
+    (error: unknown) => error instanceof PlanError && error.code === 'PLAN_DIGEST_MISMATCH',
+  );
+  assertPlanMatchesRelease(base, v1Plan);
+  assertPlanMatchesRelease({ ...base, identity }, v2Plan);
+});
+
+test('three independent version axes assemble and each moves the plan identity', () => {
+  const capability = { ...provider('listing', '3.0.0'), pluginId: 'plugin-listing', pluginVersion: '4.0.0' };
+  const base: ApplicationRelease = {
+    appId: 'app-listing', version: '2.0.0',
+    identity: { descriptorDigest: 'c'.repeat(64) },
+    requiredCapabilities: [{ capabilityId: 'listing', version: '3.0.0' }],
+    providers: [capability],
+    runtimeBundleDigest: digest('a'),
+  };
+  assert.notEqual(base.version, base.providers[0].version);
+  assert.notEqual(base.providers[0].version, base.providers[0].pluginVersion);
+  const plan = resolveExecutionPlan(base);
+  assertPlanMatchesRelease(base, plan);
+  for (const mutated of [
+    { ...base, version: '2.1.0' },
+    { ...base, requiredCapabilities: [{ capabilityId: 'listing', version: '3.1.0' }], providers: [{ ...capability, version: '3.1.0' }] },
+    { ...base, providers: [{ ...capability, pluginVersion: '4.1.0' }] },
+    { ...base, identity: { descriptorDigest: 'e'.repeat(64) } },
+  ]) {
+    assert.notEqual(resolveExecutionPlan(mutated).planDigest, plan.planDigest, 'each version axis and the descriptor digest move the plan');
+  }
+});

@@ -4,6 +4,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { ToolExecution } from '@deepseek-ai/dsh-tools';
 import type {} from '@deepseek-ai/dsh-skill';
 import type {} from '@deepseek-ai/dsh-user-questions';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 const string_type = { type: 'string' as const };
 import { ListingService, type Item } from './service.js';
@@ -23,19 +24,37 @@ import {
   LISTING_PLUGIN_ID,
   LISTING_SEED_VERSION,
 } from './knowledge-seeds.js';
-import { listingMethodSuite } from './knowledge-validators.js';
+import { listingMethodSuites } from './knowledge-validators.js';
 import type { KnowledgeDraft } from '../../../packages/platform-knowledge/src/schema.js';
 import type {} from '../../../packages/platform-knowledge/src/cordis.js';
 
 export const name = 'ec-clinical-dm-listing';
 export const inject = ['tools', 'skills', 'userQuestions', 'clinicalKnowledge'];
+/** Reported version follows the shipped package.json; a hardcoded copy drifts on every release. */
+function readPackageVersion(): string {
+  try {
+    const manifest: unknown = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    return typeof manifest === 'object' && manifest !== null && 'version' in manifest && typeof manifest.version === 'string'
+      ? manifest.version
+      : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+export const LISTING_PLUGIN_VERSION = readPackageVersion();
 /** Platform knowledge is installed independently; Listing does not own/close its service. */
 export function apply(ctx: Context): void {
   const knowledge = ctx.clinicalKnowledge;
   const unregister = knowledge.registerContribution(listingKnowledgeContribution);
   ctx.effect(() => unregister);
-  // Activation requires this installed suite; model JSON cannot register or replace validators.
-  ctx.effect(() => knowledge.registerValidator(LISTING_PLUGIN_ID, listingMethodSuite));
+  // M2-01：注册本插件的知识智能体定义（随包发布锁定版本；卸载撤销注册并保留历史）。
+  ctx.effect(() =>
+    knowledge.registerAgentManifest(
+      JSON.parse(readFileSync(new URL('../knowledge/manifest.json', import.meta.url), 'utf8')),
+    ),
+  );
+  // Activation requires an installed suite; model JSON cannot register or replace validators.
+  for (const suite of listingMethodSuites) ctx.effect(() => knowledge.registerValidator(LISTING_PLUGIN_ID, suite));
   // A seed problem must degrade one capability, not kill plugin assembly; status reports it either way.
   let seedState: { version: string; result: unknown } | { version: string; error: string };
   try {
@@ -387,7 +406,7 @@ export function apply(ctx: Context): void {
       output,
       async execute() {
         return run(() => ({
-          version: '0.2.0',
+          version: LISTING_PLUGIN_VERSION,
           knowledgeVersion: KNOWLEDGE_VERSION,
           scenarios: SCENARIOS,
           profiles,
@@ -603,3 +622,6 @@ export function apply(ctx: Context): void {
     }),
   );
 }
+
+// KA15 黄金集需要的自持知识导出（平台种子单一来源仍是 knowledge-seeds.ts）。
+export { listingSeeds, listingKnowledgeContribution, LISTING_PLUGIN_ID, LISTING_SEED_VERSION } from './knowledge-seeds.js';

@@ -232,3 +232,182 @@ cd .runtime/worker-home/profiles/worker && pnpm install
   那是引擎/SDK 验收，不等于平台 Worker 稳定性或业务验收。
 
 本实现是控制面骨架，不是 Worker、企业身份或生产运行验收。
+## 2026-11-17 可靠性与企业治理增补
+
+本段只记录本轮实际实现与验证，不改变上文历史结论。范围：持久派发、启动租约、发布审批、模型健康、
+关联与指标、审计导出、一致备份恢复、知识跨进程回执、工作台体验。未接入企业身份/租户，与既有边界一致。
+
+### 持久派发 Outbox
+
+- 新增 `outbox_messages`（PENDING/CLAIMED/DONE/DEAD）与 `outbox_claim` 语义：Run 创建与派发意图
+  在同一事务提交（`RunRepository.create`），控制进程崩溃后重启可从队列恢复，不再出现“已创建但永远 QUEUED”。
+- `PlatformControlService.dispatchOutbox`：回收过期 claim → 领取到期消息 → 派发 → 完成/退避/死信。
+  退避为 15 s × 2ⁿ（上限 10 min），5 次后 DEAD；永久错误（发布撤销/未审批/工作归档/已取消）直接 DEAD。
+  `RUN_REVISION_STALE`/`RUN_DISPATCH_STATE_INVALID` 视为“另一监督者已推进”，完成而不重试。
+- 运行进入终态或取消时，同一事务把未结消息标为 DONE（保留原因），不会在终态后再次启动。
+- `RunScheduler` 改为：续租 → 对账过期租约 → 领取并派发 outbox；重叠 tick 跳过。
+- HTTP/工具：`platform_run_outbox` 读取单次运行的派发事实；`status().outbox` 输出各状态计数。
+
+### 启动租约与对账
+
+- `launch_attempts` 增加 `lease_owner`/`lease_expires_at`/`heartbeat_at`（增量迁移）。
+- 派发前持久化 launch intent 并带租约；`renewOpenLaunchLeases` 由同一控制进程的调度器续租
+  （SQLite 单写者假设；多进程部署必须替换为真实租约移交）。
+- `reconcileExpiredLaunches`：租约过期只说明“无人证明存活”，运行置 `UNKNOWN`（`LAUNCH_LEASE_EXPIRED`），
+  不自动重启、不重发已消费输入；`reconcileOrphans` 同时清理残留租约。
+- 仍未实现：独立 PID/进程树终止证明（SDK 在同进程内运行）、多监督者租约移交、容器/VM 级隔离。
+
+### 发布审批与模型健康
+
+- 新增 `release_approvals`：审批绑定**精确 releaseDigest**（摘要不一致拒绝），记录审批人、证据引用、
+  回滚目标与到期时间；撤销后新运行立即被拒绝。配置 `requireReleaseApproval=true` 时，创建/重试运行
+  必须存在 ACTIVE、未过期、摘要一致的审批；历史运行不回写。
+- 新增 `model_health`：部署探针写入 `healthy|degraded|unavailable|unknown`（unavailable 必须带原因）。
+  配置 `requireModelHealth=true` 时，创建、重试和派发都会重新校验；未探测保持 unknown，绝不猜测健康。
+  工作台设置页显示健康事实与探测时间。
+
+### 关联、指标与审计导出
+
+- `src/observability.ts`：请求级 correlation（`x-request-id`，非法值替换为新 id）、结构化 JSON 日志
+  （自动脱敏 input/prompt/token 等键）、进程内 metrics（counter/gauge/histogram）。
+- HTTP 全部请求记录 `platform_http_requests` 与 `platform_http_duration_ms`；`GET /api/metrics`
+  返回 JSON，`?format=prometheus` 返回文本；需要 `metrics.read`。
+- 审计新增 `correlation_id` 列；`GET /api/audit/export` 输出升序 NDJSON，每行带 `prevDigest`/`digest`
+  哈希链，响应头 `x-audit-head` 给出可签名头摘要。删除/改行会破坏链。它是完整性辅助，不是签名。
+
+### 一致备份与恢复
+
+- `src/backup.ts`：`VACUUM INTO` 生成一致快照，复制封存产物并对整棵目录做摘要清单；
+  `verifyBackup` 重算全部摘要；`restoreBackup` 先验证再暂存改名，失败不留半写库。
+- CLI：`npm run backup -- backup --store <control.sqlite> --out <dir> [--artifacts <dir>]`
+  以及 `verify` / `restore` 子命令。
+- 非空目标目录拒绝覆盖。
+
+### 知识跨进程验证回执
+
+- `KnowledgeService.createValidationRequestFor`：从 store 读取候选与套件摘要签发请求（候选 digest、
+  套件版本/digest、用例集 digest、executionEpoch）。
+- `validateWithReceipt`：校验请求绑定当前候选与已安装套件、执行器在白名单、用例数量/分组/期望摘要
+  逐项匹配；沿用同一 claims/coverage/evidence 激活规则。失败仍记录回执与事件，候选保持 CANDIDATE。
+  验证器被替换、候选已修订或回执来自其他 epoch 时拒绝激活。
+
+### 配置与接口新增
+
+- 配置键：`requireReleaseApproval`、`requireModelHealth`（均为布尔，缺省 false，保持既有部署行为）。
+- HTTP：`/api/metrics`、`/api/audit/export`、`/api/approvals`、
+  `/api/apps/:appId/:version/approval`（GET/POST）、`.../approval/revoke`；
+  `/api/models` 与工作台 bootstrap 增加 `health`；`status` 增加 `outbox`/`approvals`。
+- 工具：`platform_app_approve`、`platform_app_approval`、`platform_model_health_record`、
+  `platform_model_health`、`platform_run_outbox`。
+
+### 验证（2026-11-17）
+
+- platform-control：135/135 测试通过（新增 outbox 7、lease 4、governance 5、observability 3、backup 3），
+  typecheck 与 bundle 构建通过。
+- platform-knowledge：24/24 通过（新增跨进程回执 3 项），构建通过。
+- platform-workbench：69/69 通过（新增 i18n 4 项与体验契约断言），bundle 构建通过。
+- 全仓 `scripts/verify-all.cjs`：**18/18 验证命令通过**（2026-11-17 最终一轮，含包验证、规范检查与工具/原型检查）；
+  门禁只证明实际执行的检查。
+- 本轮未运行真实模型、未连接企业身份、未做多进程/OS 级进程树实测；不得据此宣称生产就绪。
+
+## 2026-11-17 第二批：发布溯源、回滚、交付复核与知识沉淀
+
+在上段基础上补齐的发布治理与交付事实，全部有对应测试。
+
+### 发布溯源与回滚
+
+- `AppReleaseDraft.provenance`（可选）：`sourceRevision`、`builder`、`builtAt`、`sbomDigest`、
+  `dependenciesDigest`。只接受这些键与摘要格式；未知键拒绝（`APP_PROVENANCE_INVALID`）。
+- `releaseDigest` 在声明 provenance 时把它计入身份（同样的代码不同构建方式即不同发布，需分别审批）；
+  未声明 provenance 时沿用原摘要公式，旧库记录保持可读与有效。
+- `rollbackRelease(appId, fromVersion, toVersion, reason)`：撤销 `fromVersion`，保持 `toVersion` 为
+  ACTIVE 目标；启用审批时目标必须已批准。不猜测版本顺序、不删除历史、不改写在途运行。
+  HTTP `POST /api/apps/:appId/:fromVersion/rollback`；工具 `platform_app_rollback`。
+
+### 交付复核（三轴分离）
+
+- 新表 `delivery_reviews`：每个运行最多一个未结 `REQUESTED`；决定 `APPROVED|REJECTED` 为终态。
+- `requestReview` 只接受 `SUCCEEDED` 运行；`recordReviewDecision` 以 revision CAS 绑定，
+  驳回必须写明原因；决定不可改写。复核不改变运行状态，也不等于交付批准。
+- HTTP：`GET/POST /api/runs/:id/reviews`、`POST /api/reviews/:id/decision`；
+  工具 `platform_run_review_request/decision/reviews`。
+- 工作台工作详情新增「业务复核」卡：显示运行状态与复核状态、发起复核、通过/驳回与最近意见。
+
+### 运行事件知识沉淀接缝
+
+- `PlatformControlService.setKnowledgeCaptureSink`：运行进入终态时，把可信事实
+  （kind、runId、workId、appId/version、projectId、inputDigest、artifactDigests、reason）交给部署注入的
+  sink，每运行最多一次。sink 只能创建 CANDIDATE，不能激活；异常只写审计
+  `KNOWLEDGE_CAPTURE_SINK_FAILED`，不改变运行结果。真实 KnowledgeService 绑定由部署装配。
+
+### 待办与移动端
+
+- 待办投影增加 `runState`；「待我处理」按项目分组并显示运行状态，未加载 Work 归入“未加载项目”，不丢失。
+- 窄屏（≤720px）补充：控制台动作换行、模式开关铺满、运行记录横幅纵向排列、复核/向导按钮自适应、
+  会话工具栏与搜索铺满；不改变桌面布局。
+- 并发上限：`maxConcurrentRuns`（0/缺省不限）在领取前检查容量；达到上限时消息保持 PENDING、
+  不消耗尝试次数，运行结算后自动继续。
+
+### 验证（本轮追加）
+
+- platform-control 143/143（新增 provenance/rollback/review/capture-sink/HTTP 复核 7 项、并发上限 1 项）。
+- platform-workbench 70/70（新增复核 API 客户端 1 项）。
+- 其余计数与全仓门禁以最终一轮 `verify-all` 为准。
+
+## 2026-11-17 第三批：本地自安装模式的执行与自检补全
+
+定位仍是员工本机自安装运行，因此不引入 PostgreSQL/分布式组件；补齐本地模式真正缺失的能力。
+
+### 独立 Worker 子进程（真实进程树）
+
+- 新增 `ChildProcessWorkerExecutor`（`src/child-worker.ts`）与 `scripts/worker-runner.mjs`：
+  SDK harness 在独立 Node 子进程中运行，控制面通过 NDJSON stdio 转发通知、提问与最终结果。
+- launch attempt 记录真实 `pid`、`processIdentity` 与 `processMode='child-process'`。
+- 取消/超时：先发 cancel，再终止整棵进程树（Windows `taskkill /T /F`；POSIX 进程组 SIGTERM→SIGKILL），
+  只有观察到真实退出事件才记 `exitProven`；超时内未退出则 `WORKER_EXIT_UNPROVEN`，不假报结算。
+- 子进程提问通过平台持久收件箱回答（stdin/stdout 往返），取消时未答问题按既有语义失效。
+- 配置：`worker.mode: 'in-process' | 'child-process'`（缺省 in-process，保持既有部署行为）、
+  `worker.runnerPath`、`worker.killTimeoutMs`。runner 缺失在派发前即报 `WORKER_RUNNER_MISSING`。
+- 仍未实现：容器/VM 级隔离、多控制进程之间的租约移交。
+
+### 本地安装自检
+
+- `src/doctor.ts` + `src/doctor-cli.ts`（`npm run doctor`）：检查 Node 版本、库目录可写、SQLite
+  `quick_check` 与 `application_id/user_version`、应用/工作/运行/Outbox/审批计数、Worker 路径/profile/
+  runner/SDK、Rscript/Rterm 可用性；警告与失败分开，退出码反映是否有失败。
+- `PlatformStore.integrityCheck()`：SQLite `quick_check` + schema 身份，供 doctor 与运维复用。
+
+### 界面国际化补全
+
+- 运行状态（QUEUED…UNKNOWN）走语言字典；导航、页面标题、打开会话、查看详情、请求停止、进入对话、
+  刷新、归档、复核发起/通过/驳回等主要控件均使用字典；英文表必须覆盖全部中文键（有测试）。
+  未识别的新状态原样显示，不伪装成成功。
+
+### 验证（本轮追加）
+
+- 新增 child-process 4 项（成功/提问往返/取消进程树/runner 缺失）与 doctor 4 项测试。
+- 最终计数：platform-control **151/151**、platform-knowledge **24/24**、platform-workbench **71/71**；
+  全仓 `verify-all` **18/18**（2026-11-17 第三批完成后实际运行）；`npm run doctor` 冒烟通过（识别 Node/R/库状态）。
+
+
+## 2026-11-17 真实员工路径 E2E（真实宿主/真实模型/真实 Worker）
+
+环境：DSH 原生 Web（3095）+ 平台控制面（3097，全新 SQLite 库）+ 真实 GLM 路由 + 真实 Worker profile；
+浏览器为系统 Edge（Playwright msedge 通道），全部在界面操作，不调用内部 API 代替点击。
+
+已验证（最终构建 22/22，0 页面错误、0 失败请求）：
+首页企业外壳 → 设置页中英切换与 UTC 时区 → 项目空间内新建项目 → 五步向导（项目/应用/目录/目标/确认）
+→ 工作详情自动绑定对话（四步状态条就绪）→ 原生 composer 真实模型流式回复 → 发起运行
+→ 运行在 10 分钟界内到达 SUCCEEDED → 界面刷新显示“已完成” → 成果卡显示已封存文件（14 B，可下载）
+→ 业务复核发起并通过 → 历史会话列出并如实报告无匹配 → 待我处理分组 → 390px 无水平溢出。
+
+专项（6/6）：运行记录模式显示“不是实时对话”横幅并可回到实时对话；复核决定在刷新后仍为已通过。
+真实产物核对：`employee-check.txt` 14 B，运行 SUCCEEDED 后封存并可在界面下载；复核记录 APPROVED；指标记录
+`platform_run_transition{to=STARTED/RUNNING/SUCCEEDED}`。
+
+本轮真实浏览器发现并修复：≤720px 时控制台动作区宽度 535px 超出 390px 视口被裁切（改为头部换行、
+动作区 `width:100%; min-width:0`、分段按钮 `flex:1 1 0`，实测 362px）；历史会话工具栏两个下拉在桌面端
+各占满一行（改为 `width:auto; min-width:150px`，实测同一行 150px）。
+
+证据（临时，不入库）：`.runtime/employee-ui-2026-11-17/shots/*.png`、`summary.json`、`focused-results.json`。
+该环境不是生产部署，也未覆盖企业身份、多用户并发或容器隔离。

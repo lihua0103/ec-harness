@@ -21,7 +21,7 @@ try {
   if (!process.env.ZAI_CODING_CN_API_KEY) throw new Error('TEST_PREREQUISITE_MISSING_ZAI_CODING_CN_API_KEY')
   if (!existsSync(resolve(root, 'upstream/deepseek-harness-git/apps/cli/lib/bin.js'))) throw new Error('TEST_PREREQUISITE_MISSING_DSH_BIN')
   if (!existsSync(resolve(root, 'upstream/deepseek-harness-git/packages/sdk/protocol/lib/index.js'))) throw new Error('TEST_PREREQUISITE_MISSING_PROTOCOL_BUILD')
-  report.facts.dshVersion = '0.2.2-rc.1 (local locked source)'
+  report.facts.dshVersion = '0.2.2-rc.5 (local locked source)'
   report.facts.profile = 'sdk-minimal + one-shot overlay'
   report.facts.credentialsConfigured = true
   harness = new DeepSeekHarness({

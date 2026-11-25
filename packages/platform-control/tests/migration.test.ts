@@ -74,6 +74,7 @@ test('the control store is opened read-only and its work/run digest is stable ac
   const service = new PlatformControlService(storePath);
   try {
     service.registerApp(draft(), operator);
+    service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
     service.createWork({ projectId: 'SYN-001', appId: 'listing', appVersion: '1.0.0', title: '迁移工作' }, operator);
     const first = summarizeControlStore(storePath);
     assert.equal(first.status, 'OK');
@@ -108,6 +109,7 @@ test('a dry-run report states what would migrate and what stays read-only', asyn
   const service = new PlatformControlService(storePath);
   try {
     service.registerApp(draft(), operator);
+    service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
     service.createWork({ projectId: 'SYN-001', appId: 'listing', appVersion: '1.0.0', title: '待迁移' }, operator);
     const report = summarizeMigration({ storePath, browserStorage: JSON.stringify(v4), now: '2026-11-12T00:00:00.000Z' });
     assert.equal(report.dryRun, true);
@@ -130,6 +132,7 @@ test('dry-run classifies each Work by verifiable Session, no Session, or unknown
   const service = new PlatformControlService(storePath);
   try {
     service.registerApp(draft(), operator);
+    service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
     const verified = service.createWork({ projectId: 'SYN-001', appId: 'listing', appVersion: '1.0.0', title: '可验证' }, operator);
     const unknown = service.createWork({ projectId: 'SYN-001', appId: 'listing', appVersion: '1.0.0', title: '未知会话' }, operator);
     const readOnly = service.createWork({ projectId: 'SYN-001', appId: 'listing', appVersion: '1.0.0', title: '无会话' }, operator);

@@ -2,6 +2,47 @@
 
 延续 dm-listing 的验证文化：不伪报测试通过、不把目标文档当已实现代码、生成物永远标注候选状态。
 
+## 2026-11-24 输入发现、通用工作簿读取与员工入口（v0.3.9）
+
+- **来源**：真实工作台会话（工作"dvp生成式训练"）里，用户要求"读取当前目录方案以及 ALS excel 生成 DVP"。
+  模型自行加载了 dm-dvp 技能并成功调用 dm_dvp_read_protocol / dm_dvp_methods / dm_dvp_overview，但随后连续调用
+  并不存在的 dm_dvp_read_als / dm_dvp_list_files / dm_dvp_scan（全部 UNKNOWN_TOOL），最后停下向操作者要路径。
+  同一会话的输入框只看得到 dm-listing 的入口（dm-dvp 此前没有客户端部分）。
+- **新增宿主工具**（`src/inputs.ts`；注册工具 12 → 14，README 工具表 11 → 13 行）：
+  - `dm_dvp_scan`：列出目录内方案 PDF / 可读工作簿 / 旧版或二进制工作簿的存在、大小、修改时间，不读内容；
+    其他类型按扩展名计数；不跟随符号链接，跳过点开头目录与 node_modules；`recursive` / `maxDepth` 控制范围；
+    相关文件 500 个、遍历 20000 项封顶并在 notices 标明。
+  - `dm_dvp_read_workbook`：读取非 DVP 模板工作簿（ALS / 数据库结构等）的任意 sheet；省略 sheetId 返回清单；
+    `startRow`/`endRow` 行窗口；单次过大返回 `SHEET_TOO_LARGE_USE_WINDOW`。
+- **边界不放松**（parse.ts 头注、DVP-TEMPLATE-SCHEMA §8）：含 DVP 规则 sheet（Edit Checks / Field Level / Manual Review*）
+  的工作簿一律 `DVP_TEMPLATE_USE_DEDICATED_TOOLS`，连清单也不给——Cover 永不读、Approval 不读、TEST CASE 只计数只由
+  overview / parse 保证；任何工作簿里名为 Cover / Approval 的 sheet `SHEET_CONTENT_NOT_READ`；dynamic / version history
+  名称单独出现不构成模板。`locateInsideDirectory` 从 parse.ts 导出共用；`.xls` 的 `WORKBOOK_NOT_XLSX` 现在带"另存为 .xlsx"
+  的说明（旧版二进制格式不在公共包 platform-workbook 的支持范围，属已知限制）。
+- **员工入口**：新增浏览器端 `src/client/index.ts`（`dsh.client.platform: web`、`exports["./client"]`），挂在公开的
+  `conversation.input.right` 列表槽位（`conversation.input.activity` 是单占位，已由 dm-listing 占用）。点击把 DVP 可用
+  能力清单插入输入框（zh/en 随宿主语言）；提示词里的工具名与 `dm_dvp_status.tools`、实际注册的一致性由测试锁定。
+  会话属于另一项应用时入口隐藏：工作台把"当前会话所属应用"作为平台事实经上游根标准工具包公开
+  （`useConversationApplication`：`slots.provideRoot` + `GlobalStandardProps` 声明合并），本插件只比较自己
+  application.json 的 appId；没有该事实（历史会话、不在工作台里运行）时照常显示。**未改上游 Harness 源码。**
+- **其他**：`dm_dvp_status` 的版本改为读随包 package.json（原硬编码 0.3.0）并导出 `DVP_PLUGIN_VERSION`；`tools` 清单
+  补齐两件新工具；技能正文补输入发现与读取能力及其边界；`knowledge/manifest.json` 为两件新工具声明 `noMethodKnowledge`
+  及理由（目录发现与通用读取没有 DVP 方法语义；"从 ALS 推导字段级规格"若有方法可另行沉淀为候选种子）。
+- **升版本原因**：lib 字节变化（新增 `lib/client.js`、host 重新构建）会改变发布 `artifactDigest`；0.3.8 已登记
+  （控制面库摘要 `962b798b…`），同版本换摘要重新登记会被 `APP_RELEASE_CONFLICT` 拒绝，因此升 0.3.9。
+- **构建与发布流水线**：`build.mjs` 增加客户端 client-module factory；`scripts/release-lib.mjs` 的候选包加入
+  `package/lib/client.js`（校验清单放行并要求它）。新增开发依赖（react、@types/react、五个 @deepseek-ai 客户端包，
+  均为指向 upstream 的 link，不打包）。
+- **验证**（2026-11-24，Node 24.9.0）：tsc 通过；测试 95/95（新增 `tests/inputs.test.ts` 9、`tests/client-entry.test.ts` 6）；
+  host/client bundle 构建；`scripts/check-development-standard.mjs` 通过；候选包 build → verify 通过
+  （CANDIDATE / NOT_APPROVED / 无分发阻断项；仅验证流水线，未批准、未入 `.runtime/candidates`）。
+  隔离环境浏览器实测（3091→3097，合成应用与数据）15/15：DVP 工作会话只显示「DM DVP」且可插入能力提示词、
+  不显示 DM Listing；Listing 工作只显示 DM Listing、不显示 DM DVP；历史会话两者并存；无页面报错。
+- **未执行**：真实模型用新工具完成一次 DVP 任务（目录扫描 → 读 ALS → 生成）；旧版 `.xls` 的读取（不支持，需转存）；
+  四应用重登记后的正式环境验证；临床验收。
+- **既有缺口（本轮未改）**：候选包不含 `application.json` 与 `knowledge/`，而 `apply` 会读 `knowledge/manifest.json`、
+  发布装配会读 `application.json`——当前部署经 link 使用源码目录所以无碍，候选包单独安装前需补齐。
+
 ## 2026-11-11 整改（v0.3.0）
 
 - **PDF ObjStm 修复**：对象流头是「对象号 偏移」，旧实现把偏移误当对象号，压缩页对象不可达；生产形态 PDF

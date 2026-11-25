@@ -16,48 +16,80 @@ export interface ChangeMark { action: 'Add' | 'Update' | 'Delete'; version: stri
 export interface CrossFieldRule {
   id: string;
   changeMark: ChangeMark | null;
+  /** 源模板变更标记原文；存在时写簿层不经过 mark/version 归一。 */
+  changeMarkRaw?: string;
   visits: string;
   formName: string;
   targetField: string;
   relatedFields: string[];
+  /** 源模板相关字段列原文透传；存在时写簿层原样写出，列表 IR 仍保留用于语义校验。 */
+  relatedFieldsRaw?: string;
+  /** Ordered source-cell projection for exact template transport; IR fields remain available for validation. */
+  sourceCells?: string[];
   queryType: QueryType | string;
   discrepancyText: string;
   logic: string;
+  /** DXP 实物形态：Testcase 两列的示例值（触发的用例值 / 未触发的用例值，由生成方按逻辑推导，
+   *  交付前由项目团队核对；UAT 三列留空纪律不涉及这两列——它们是规则行内的测试示例，不是行内 UAT 留档）。 */
+  testcaseFired?: string;
+  testcaseNotFired?: string;
   logicParse?: LogicParseResult;
   issues: string[];
 }
 
 export interface FieldLevelSpec {
   changeMark: ChangeMark | null;
+  /** 源模板变更标记原文；存在时写簿层不经过 mark/version 归一。 */
+  changeMarkRaw?: string;
   formOid: string; formName: string; fieldOid: string; preText: string;
   controlType: string; dataFormat: string;
   isLog: boolean | null; isRequired: boolean | null;
   queryFutureDate: boolean | null; queryNonConformance: boolean | null;
+  /** 源模板布尔列原值透传：传入字符串时写簿层原样输出；缺省仍按 boolText 归一。 */
+  isLogRaw?: string;
+  isRequiredRaw?: string;
+  queryFutureDateRaw?: string;
+  queryNonConformanceRaw?: string;
+  /** 源模板字段级规则 IR 之外的尾随列，按原序透传；缺省不生成尾列。 */
+  extra?: string[];
+  sourceCells?: string[];
   issues: string[];
 }
 
 export interface ManualReviewProgramming {
   assign: string; columnHeading: string;
-  /** 行内 UAT 用例与评审意见只记条数，不回传内容（用户既定边界：临床项目内容不外显）。 */
+  /** 脱敏模式下只记条数；条数在任何模式下都返回（用户既定边界：外部模型部署时临床项目内容不外显）。 */
   testCaseSubjectCount: number; dmCommentCount: number; dbdCommentCount: number;
+  /** 全量模式（模型目录全部为公司内部模型，data-boundary.ts）：TEST CASE / DM / DBD 评审意见原值。 */
+  testCase?: string; dmComment?: string; dbdComment?: string;
 }
 
 export interface ManualReviewRule {
   id: string;
   sheet?: string;
   changeMark: ChangeMark | null;
+  /** 源模板变更标记原文；存在时写簿层不经过 mark/version 归一。 */
+  changeMarkRaw?: string;
   visits: string; formName: string;
   relatedFields: string; reportDescription: string; discrepancyText: string;
   logic: string;
   programming: ManualReviewProgramming | null;
+  /** 附加单元格（对齐实物 MR 多出的列，如 Pass/Fail、核查结论等；由生成方按实物列形提供，候选内容）。 */
+  extra?: string[];
+  sourceCells?: string[];
   issues: string[];
 }
 
 export interface DynamicSpec {
   id: string;
   changeMark: ChangeMark | null;
+  /** 源模板变更标记原文；存在时写簿层不经过 mark/version 归一。 */
+  changeMarkRaw?: string;
   formName: string; fieldName: string; type: string;
   visits?: string; discrepancyText?: string; condition?: string;
+  /** 源模板中超出规则 IR 的尾随列，按原序写出；缺省不产生尾列。 */
+  extra?: string[];
+  sourceCells?: string[];
   issues: string[];
 }
 
@@ -163,13 +195,18 @@ export function coerceRuleInput(value: unknown): CrossFieldRule {
   const rule: CrossFieldRule = {
     id: asString(rec.id),
     changeMark,
+    changeMarkRaw: typeof rec.changeMarkRaw === 'string' ? rec.changeMarkRaw : undefined,
     visits: asString(rec.visits),
     formName: asString(rec.formName ?? rec.form),
     targetField: asString(rec.targetField ?? rec.targetedField) || fieldList[0] || '',
     relatedFields: relatedRaw === undefined ? fieldList.slice(1) : asStringArray(relatedRaw),
+    relatedFieldsRaw: typeof rec.relatedFieldsRaw === 'string' ? rec.relatedFieldsRaw : undefined,
+    sourceCells: Array.isArray(rec.sourceCells) ? rec.sourceCells.map(asString) : undefined,
     queryType: asString(rec.queryType),
     discrepancyText: asString(rec.discrepancyText ?? rec.message),
     logic: asString(rec.logic),
+    testcaseFired: rec.testcaseFired === undefined ? undefined : asString(rec.testcaseFired),
+    testcaseNotFired: rec.testcaseNotFired === undefined ? undefined : asString(rec.testcaseNotFired),
     issues: [],
   };
   return {...rule, issues: validateCrossFieldRule(rule)};

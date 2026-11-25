@@ -16,7 +16,6 @@
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-ui-renderer",
-        "@deepseek-ai/dsh-client-ui-sidebar",
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-workspace"
       ],
@@ -34,7 +33,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.1.0",
-    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.1"
+    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.5"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "link:../../upstream/deepseek-harness-git/vendor/cordis",
@@ -44,6 +43,7 @@
     "@deepseek-ai/dsh-client-ui-workspace": "link:../../upstream/deepseek-harness-git/packages/client/ui-workspace",
     "@deepseek-ai/dsh-client-ui-sidebar": "link:../../upstream/deepseek-harness-git/packages/client/ui-sidebar",
     "@deepseek-ai/dsh-client-ui-session": "link:../../upstream/deepseek-harness-git/packages/client/ui-session",
+    "@deepseek-ai/dsh-client-ui-primitives": "link:../../upstream/deepseek-harness-git/packages/client/ui-primitives",
     "@deepseek-ai/dsh-api-session-controller": "link:../../upstream/deepseek-harness-git/packages/api/session-controller",
     "@types/node": "22.20.1",
     "@types/react": "18.3.31",

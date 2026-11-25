@@ -1,5 +1,63 @@
 # Listing 开发接续记录
 
+## 2026-11-24 员工入口随会话所属应用显隐（仍在 v0.2.4，未登记）
+
+- **现象**：任何工作的会话输入框都出现「DM Listing」按钮（包括 DVP 工作）。入口无条件注册在
+  `conversation.input.activity`；这不是会话被绑定到 Listing，但会误导员工。
+- **改动**：工作台把"当前会话属于哪项应用"作为平台事实经上游根标准工具包公开（`useConversationApplication`，
+  `packages/platform-workbench/src/client/conversation-application.ts`）。本插件客户端在会话属于**另一项**应用时返回 null；
+  没有该事实（历史会话、不在工作台里运行）或属于 `ec.listing` 时照常显示。场景模式（Manual / Medical / PK / Report）
+  与 PK 子型（BE / SAD-MAD）、插入提示词的逻辑未改。规则抽为 `src/client/entry-visibility.ts`，
+  `tests/client-entry.test.ts` 锁定显隐规则与全部模式。未改上游 Harness 源码。
+- **验证**：`scripts/verify.mjs` tsc 通过、87/87（新增 4）、host/client bundle 构建。隔离环境浏览器实测（合成应用）：
+  Listing 工作会话显示入口，4 个场景 + PK 两个子型共 5 种选择逐一到达输入框；DVP 工作会话不显示；历史会话显示。
+- **未执行**：四应用重登记后的正式环境验证。
+
+## 2026-11-24 收口（v0.2.4）
+
+- **升版本原因**：上一节的比对改动落在已登记的 0.2.3 版本号下。控制面 2026-11-23 11:26 已登记 `ec.listing@0.2.3`
+  （artifactDigest `3e53bf29…`），比对改动重建后 `plugins/dm-listing/lib` 摘要为 `03ac3820…`；同版本换摘要重新登记会被
+  `APP_RELEASE_CONFLICT` 拒绝（`packages/platform-control/src/registry.ts` register），因此升 0.2.4。
+- **知识补缺**（对照备忘 §3.2/§5/§6 与 V2.R 终版，MD5 `275cc7f1…`）：
+  - 比对引擎线索：团队统一 Rcompare 包 `compare_data`，配置表列为 form_name/content_name/key/nokey/assign_subject
+    （已与 V2.R 内嵌表、`keyDataPointR_HXN6005.xlsx` 表头核对一致），写明是约定线索而非固定 schema。
+  - 退出码不证明比对件：比对段跳过或失败时主件照常交付、退出码为 0；核对以 (vs旧批次) 文件实际存在为准。
+  - 三行日志核对口径：V2.R 终版不打印“基线加载”行（仅基线缺失时提示），备忘预防表与实际不符。知识改为
+    “生成的程序应打印三行；核对不打印基线行的已交付程序时，以三类跳过/失败提示均未出现且后两行齐备为通过”。
+    `COMPARISON_CHECKPOINTS` 同步。
+  - xlsx 占用：预演期间用 Excel 打开输出目录内的 xlsx 会使保存静默失败。
+  - 主工作流 skill（`dm-listing`）正文补比对件与退出码一句。
+  - 版本：`MANUAL_METHODS_VERSION` 升 `2026.11.23.1`（上一节改了正文但未升）、`KNOWLEDGE_VERSION` 升 `2026.11.23.1`、
+    `LISTING_SEED_VERSION` 与 `BATCH_COMPARISON_METHODS_VERSION` 升 `2026.11.23.2`
+    （种子导入按版本绑定内容摘要，同版本改内容会触发 `KNOWLEDGE_SEED_VERSION_CHANGED`）。
+- **状态版本**：`dm_listing_status` 的 `version` 原为硬编码 `0.2.0`，改为读取随包 `package.json`；新增一致性用例。
+- **未改动**：V2.R 已交付，本轮不改其残留的“本程序不比对”旧注释（第 32、1692–1700、1726 行，仅注释、不影响运行）。
+  生成 V2.R 的用户级 skill `manual-listing-r` 未更新，仍把比对描述为独立 `cmp_export.R`。
+- **运行态（2026-11-24 09:20 核查）**：DSH Web（3095）与控制面（3096）均未运行。两套知识库
+  （`.runtime/dsh-home`、`.runtime/nw-platform-web`）的 listing 种子版本仍为 `2026.11.16.1`、无 batch-comparison 种子；
+  `.runtime/candidates` 无 0.2.3/0.2.4 候选包；浏览器验收与 DSH 装配未对本构建执行。
+- **重新登记的前置条件**：运行包摘要覆盖全部插件的 `name@version`（`scripts/workbench-deployment.cjs`），并进入每个应用的
+  planDigest/releaseDigest。任一插件升版本后，四个应用都要以新版本号重新登记，否则控制面启动时 `registerApp` 抛
+  `APP_RELEASE_CONFLICT`。控制面库里 dvp/participants/viz 相邻两版的制品摘要相同，与此一致。
+  待办：升其余三个插件版本，重建，重装配 release，启动后核对 Listing Run 可派发。
+- **验证**（2026-11-24，Node 24.9.0）：`scripts/verify.mjs` tsc 通过、83/83（含 comparison.test.ts 10、integration 新增版本一致性用例）、
+  host/client bundle 构建；`scripts/verify-all.cjs` 22/22，其中规范检查通过、应用登记检查 4/4（ec.listing@0.2.4）、
+  知识黄金集与智能体覆盖 7/7。未执行：真实/合成项目由插件生成带比对段的程序、浏览器验收、DSH 装配、临床验收。
+
+## 2026-11-23 批次新旧比对交付契约（v0.2.3）
+
+- **来源**：HXN6005-A1-201 Manual Listing「新旧比对异常问题说明与解决方案」（DM 20261123 批交付 FLAG 全 New）。
+  根因：主程序为单代生成（FLAG 占位 New）+ 独立比对脚本/静态键配置未部署执行 + 基线指向过期环境 + 服务器中间版本缺空表守卫。
+- **新增**：`src/comparison.ts` 纯引擎（键候选链 SUBJID→RECORDID→SUBTRID→CSN 两侧最大公共子集、CmpRowSeq 组内序号、
+  重复键计数、基线/引擎缺失就绪判定、三行日志检查点）；`src/comparison-methods.ts` 知识正文；
+  种子 `dm-listing.batch-comparison.methods`（claims 5 条）与验证器 `dm-listing.comparison-suite`（9 用例：正/反/边界）。
+  `manual-methods.ts` 输出合同段与纠错反例补占位 FLAG/空表守卫；`LISTING_SEED_VERSION` 升 `2026.11.23.1`；
+  manifest 同步（seeds/validators/golden 用例「静态键配置」）。
+- **语义边界**：插件沉淀交付契约与验证器；主程序尾部的比对段由模型按契约内嵌生成（真实 V2 已内嵌 Rcompare 比对段）。
+  本机未重跑真实临床 E2E；浏览器验收与真实 R 程序执行属操作者验证范围。
+- **验证**：dm-listing 82/82（含 comparison.test.ts 10、knowledge-loop 新增激活用例）、tsc、host/client bundle；
+  check-development-standard、golden 7 用例、coverage 7/7、verify-all 22/22 全绿。
+
 ## 2026-11-11 整改（v0.2.0）
 
 - **公共能力抽离**：Workbook读取迁至`packages/platform-workbook`（Listing `src/workbook.ts` 仅做兼容再导出）；

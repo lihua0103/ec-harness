@@ -1,0 +1,3 @@
+- insert:
+    - id: ec-platform-workbench
+      name: '@ec-clinical/platform-workbench'

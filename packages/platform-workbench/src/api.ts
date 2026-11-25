@@ -13,7 +13,16 @@ export interface WorkbenchItem {
   appId: string;
   appVersion: string;
   state: 'ACTIVE' | 'ARCHIVED';
+  /** The employee's recorded goal sentence (workbench bootstrap/list carry it verbatim). */
+  goal?: string;
   updatedAt?: string;
+}
+
+/** The model route frozen into a run at creation (control-plane ModelConfigSnapshot subset). */
+export interface RunModelSnapshot {
+  selectionId: string;
+  provider: string;
+  model: string;
 }
 
 export interface RunSummary {
@@ -23,6 +32,7 @@ export interface RunSummary {
   appVersion: string;
   createdAt: string;
   snapshot?: { state?: string; revision?: number; reason?: string; cancelRequested?: boolean };
+  model?: RunModelSnapshot | null;
 }
 
 export interface ArtifactItem {
@@ -32,6 +42,63 @@ export interface ArtifactItem {
   mediaType?: string;
   sealedAt?: string;
   createdAt?: string;
+}
+
+/** One live assistant message observed through public SDK notifications while a run executed.
+ *  These are projections: the control plane keeps them only for the current attempt and they
+ *  are absent after a control-plane restart. */
+export interface RunActivity {
+  kind: 'text' | 'reasoning' | 'tool-call' | 'tool-result' | 'status';
+  text: string;
+  detail?: string;
+  createdAt: string;
+}
+
+/** One deterministic check result (E2-1): recomputable from run records, no expert judgement. */
+export interface EvaluationRunItem {
+  evaluationRunId: string;
+  evaluationSetId: string;
+  runId: string;
+  state: 'COMPLETED';
+  results: Array<{ entryId: string; label: string; check: { kind: string }; pass: boolean; detail: string }>;
+  passed: number;
+  failed: number;
+  createdAt: string;
+}
+
+/** The transcript-shaped slice of one run record: last root-session assistant text plus the
+ *  observed activity window. Never a fabricated summary — absent fields stay absent. */
+export interface RunDetail {
+  result: { finalResponse: string; sessionId?: string; at: string } | null;
+  activities?: RunActivity[];
+  /** KA11/M1-03：Run 创建时绑定的知识快照；未绑定时缺省，工作台据此如实显示“未绑定”。 */
+  knowledge?: RunKnowledgeBinding;
+}
+
+/** The read-only knowledge snapshot a run was created with (never a live lookup).
+ *  LearningBinding（开发设计 §4）：release 为发布清单指针引用；preferences 为本人偏好的受限引用
+ *  （只有键与修订）——私有偏好值永不进入共享运行记录。 */
+export interface RunKnowledgeBinding {
+  snapshotDigest: string;
+  total: number;
+  pluginId: string;
+  projectId?: string;
+  boundAt: string;
+  records?: Array<{ knowledgeId: string; revision: number; contentDigest: string }>;
+  release?: { releaseId: string; version: number; manifestDigest: string };
+  preferences?: Array<{ key: string; pluginKey: string; revision: number }>;
+}
+
+/** L2 个人记忆（我的习惯）：服务端按主体持久化的类型化偏好。值是封闭注册表的标量。 */
+export interface PersonalPreferenceItem {
+  orgId?: string;
+  region?: string;
+  pluginKey: string;
+  key: string;
+  revision: number;
+  value: string | boolean | null;
+  state: 'ACTIVE' | 'PAUSED';
+  updatedAt: string;
 }
 
 export interface InputCommitItem {
@@ -50,6 +117,103 @@ export interface InputBaselineItem {
   sourceRef: string;
   digest: string;
   createdBy: string;
+  createdAt: string;
+}
+
+/** One delivery package (E1-3): a frozen manifest of a run's sealed artifacts plus the review
+ *  snapshot taken at seal time. 封存(SEAL) ≠ 交付(DELIVER) ≠ 接收(RECEIVED) are three separate,
+ *  separately audited facts; WITHDRAWN and SUPERSEDED are explicit operator acts, never silent. */
+export interface DeliveryPackageItem {
+  packageId: string;
+  workId: string;
+  runId: string;
+  state: 'SEALED' | 'DELIVERED' | 'RECEIVED' | 'WITHDRAWN' | 'SUPERSEDED';
+  manifest: {
+    runId: string;
+    appId: string;
+    appVersion: string;
+    artifacts: Array<{ name: string; digest: string; bytes: number }>;
+    review: { reviewId: string; state: ReviewItem['state']; updatedAt: string } | null;
+  };
+  packageDigest: string;
+  note?: string;
+  deliveredAt?: string;
+  deliveredNote?: string;
+  receivedAt?: string;
+  receivedNote?: string;
+  withdrawnAt?: string;
+  withdrawReason?: string;
+  supersededBy?: string;
+  sealedBy: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One app-contributed result fact with a stable business key (E1-4). */
+export interface FindingItem {
+  key: string;
+  kind: string;
+  severity?: 'info' | 'warning' | 'error';
+  summary?: string;
+  fields?: Record<string, string | number | boolean>;
+}
+
+/** Key-aligned finding diff between two runs (E1-4). Different apps or app versions answer
+ *  `comparable: false` — the platform declares that instead of guessing an alignment. */
+export interface FindingsDiff {
+  comparable: boolean;
+  reason?: string;
+  appId?: string;
+  fromRunId: string;
+  toRunId: string;
+  kinds?: Array<{
+    kind: string;
+    added: number;
+    resolved: number;
+    changed: number;
+    unchanged: number;
+    items: Array<{ key: string; state: 'added' | 'resolved' | 'changed' | 'unchanged'; before?: FindingItem; after?: FindingItem }>;
+  }>;
+}
+
+/** Declarative result view (E1-5) contributed by the app descriptor; the platform renders it
+ *  generically and never branches on which application it is. */
+export interface ResultViewDecl {
+  viewId: string;
+  title: string;
+  kind: 'table' | 'metrics';
+  findingKind: string;
+  columns?: Array<{ field: string; label: string }>;
+  metrics?: Array<{ field: string; label: string; unit?: string; stat: 'count' | 'sum' | 'avg' }>;
+}
+
+/** One durable audit entry; the export adds the SHA-256 chain links (prevDigest/digest) per line. */
+export interface AuditEntryItem {
+  sequence: number;
+  actor: string;
+  action: string;
+  target: string;
+  details?: unknown;
+  createdAt: string;
+  correlationId?: string;
+  prevDigest?: string;
+  digest?: string;
+}
+
+export interface AuditExportResult {
+  entries: AuditEntryItem[];
+  headDigest: string;
+  lastSequence: number;
+  count: number;
+}
+
+/** One durable run-ledger event (state transition), distinct from the live activity window. */
+export interface RunEventItem {
+  sequence: number;
+  revision: number;
+  event: { type: string; [key: string]: unknown };
+  actor: string;
   createdAt: string;
 }
 
@@ -77,6 +241,16 @@ export interface ModelCatalog {
   runtimeBundleDigest: string;
   defaultSelectionId: string | null;
   entries: ModelEntry[];
+}
+
+/** 数据安全开关状态（GET/PUT /api/data-boundary）。dataSecurity=true：脱敏边界生效。 */
+export interface DataBoundaryState {
+  dataSecurity: boolean;
+  file: string;
+  /** 开关文件是否存在；不存在时按开启处理。 */
+  exists: boolean;
+  /** 改后需重启 WebUI，插件工具的说明才完全随开关更新。 */
+  restartRequired: boolean;
 }
 
 /** Saved default model preference of the authenticated employee. */
@@ -148,6 +322,127 @@ export interface InteractionItem {
   answer?: unknown;
 }
 
+/** One business review of one succeeded execution. Technical success, sealed artifacts and this
+ *  review are independent facts. A bound record additionally carries the server-frozen deliverable
+ *  manifest (W4/R5): decisions must echo `deliverable.manifestDigest`, so an approval can never
+ *  silently migrate to a different deliverable. Records without `deliverable` are legacy
+ *  run-only reviews — they stay decidable by revision alone and are labelled as unbound. */
+export interface ReviewItem {
+  reviewId: string;
+  runId: string;
+  state: 'REQUESTED' | 'APPROVED' | 'REJECTED' | 'SUPERSEDED';
+  requestedBy: string;
+  reviewer?: string;
+  note?: string;
+  deliverable?: {
+    manifestDigest: string;
+    manifest: { runId: string; artifacts: Array<{ name: string; digest: string; bytes: number }> };
+  };
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One creatable release in a project's approved catalog (W2/R2): a bounded summary the control
+ *  plane only returns when this release is the app's ACTIVE default pointer and passes the policy
+ *  and approval gates. Never carries the descriptor, result views or input schema — the detail
+ *  read (`catalogRelease`) serves the full declaration after a release has been selected. */
+export interface CatalogSummary {
+  appId: string;
+  appVersion: string;
+  displayName: string;
+  releaseDigest: string;
+  planDigest: string;
+  listingTypes?: string[];
+  revision: number;
+  updatedAt: string;
+}
+
+/** The full declaration of one approved release, resolved through the server-owned default
+ *  pointer (W2): the browser never picks a version for itself. `app.descriptor` is the optional
+ *  declaration (scenarios, result views, input schema) the bounded catalog omits. */
+export interface CatalogReleaseDetail {
+  app: {
+    appId: string;
+    appVersion: string;
+    state: 'ACTIVE' | 'REVOKED';
+    descriptor?: { displayName?: string; description?: string; listingTypes?: string[]; resultViews?: ResultViewDecl[]; inputSchema?: unknown };
+    requiredCapabilities?: string[];
+    runtimeBundleDigest?: string;
+    planDigest: string;
+    releaseDigest: string;
+  };
+  catalog: { appId: string; appVersion: string; releaseDigest: string; revision: number; updatedBy: string; updatedAt: string };
+}
+
+/** Last recorded model health fact for one catalog selection. Absence means "not probed", never
+ *  "healthy". */
+export interface ModelHealthItem {
+  selectionId: string;
+  state: 'healthy' | 'degraded' | 'unavailable' | 'unknown';
+  reason?: string;
+  checkedAt: string;
+  revision: number;
+}
+
+/** Honest storage/recovery topology (E0d): what the control plane persists and what backup
+ *  covers — explicitly including what it does NOT cover. `false` never means "unknown". */
+export interface StorageFacts {
+  controlStorePath: string;
+  backupCoverage: {
+    controlStore: boolean;
+    sealedArtifacts: boolean;
+    knowledgeStore: boolean;
+    nativeSessionHomes: boolean;
+  };
+  /** Whether recovery restrictions persist as machine-readable markers. False today. */
+  recoveryRestrictionMarkers: boolean;
+}
+
+/** Model-governance record (E2-4): one catalog selection's approval lifecycle. */
+export interface ModelApprovalItem {
+  approvalId: string;
+  selectionId: string;
+  state: 'ACTIVE' | 'REVOKED';
+  approvedBy: string;
+  approvedAt: string;
+  expiresAt?: string;
+  revokedAt?: string;
+  revokeReason?: string;
+  revision: number;
+}
+
+/** Per-project run budget facts (E2-3). A cap of 0 means "not enforced", never "unlimited
+ *  headroom"; the counting boundary is stated so the panel cannot imply full coverage. */
+export interface QuotaFacts {
+  maxConcurrentRunsPerProject: number;
+  maxRunsPerDayPerProject: number;
+  scope: { counted: string; notCounted: string[] };
+  dayBoundary: string;
+}
+
+/** E3-1 operations panel payload: measurements plus the deployment's doctor probe. `slo.targets`
+ *  is null until the deployment defines targets — the panel says so instead of implying success. */
+export interface OpsPanel {
+  generatedAt: string;
+  metrics: {
+    startedAt: string;
+    counters: Record<string, number>;
+    gauges: Record<string, number>;
+    histograms: Record<string, { count: number; p50: number; p95: number; p99: number; max: number }>;
+  };
+  status?: { executor?: string; runs?: Record<string, number>; outbox?: Record<string, number>; approvals?: { active: number; revoked: number } };
+  storage?: StorageFacts;
+  quotas?: QuotaFacts;
+  doctor: {
+    ok: boolean;
+    generatedAt: string;
+    checks: Array<{ name: string; status: 'ok' | 'warn' | 'fail'; detail: string }>;
+  } | null;
+  doctorNote: string;
+  slo: { targets: null; note: string };
+}
+
 export interface WorkbenchBootstrap {
   projects: Array<{ projectId: string; name: string; code?: string }>;
   apps: Array<{
@@ -155,8 +450,11 @@ export interface WorkbenchBootstrap {
     appVersion: string;
     displayName?: string;
     state: 'ACTIVE' | 'REVOKED';
-    /** The release descriptor as the control plane publishes it; Listing declares its scenarios here. */
-    descriptor?: { displayName?: string; description?: string; listingTypes?: string[] };
+    /** Bounded availability digests (W2/R2): the bootstrap never ships descriptor, result views
+     *  or input schema. The approved per-project catalog and its detail read serve those. */
+    listingTypes?: string[];
+    planDigest?: string;
+    releaseDigest?: string;
   }>;
   works: { total: number; items: WorkbenchItem[] };
   runs?: { total: number; items: RunSummary[] };
@@ -168,9 +466,27 @@ export interface WorkbenchBootstrap {
     sessionId: string;
     createdAt: string;
     questions: number;
+    runState?: string;
   }>;
-  models?: { catalog: ModelCatalog | null; preference: ModelPreference };
-  status?: { executor?: string; runs?: Record<string, number> };
+  models?: {
+    catalog: ModelCatalog | null;
+    preference: ModelPreference;
+    health?: ModelHealthItem[];
+    approvals?: ModelApprovalItem[];
+  };
+  /** E3-4 unified todos: distinct sources on one read surface, each keeping its own kind and verb. */
+  todos?: Array<{
+    kind: 'question' | 'review' | 'delivery-receipt' | 'model-approval';
+    id: string;
+    runId: string | null;
+    workId: string | null;
+    createdAt: string;
+    summary: string;
+    resolveHint: string;
+  }>;
+  status?: { executor?: string; runs?: Record<string, number>; outbox?: Record<string, number>; approvals?: { active: number; revoked: number } };
+  storage?: StorageFacts;
+  quotas?: QuotaFacts;
 }
 
 export class PlatformApiError extends Error {
@@ -178,6 +494,14 @@ export class PlatformApiError extends Error {
     super(detail ? `${code}: ${detail}` : code);
     this.name = 'PlatformApiError';
   }
+}
+
+/** One human message for any failure a shell surface reports: a control-plane error carries its
+ *  own code, anything else is a generic unavailable — never a fabricated success. Shared by the
+ *  page shell and the work-index hook so both name failures the same way. */
+export function errorText(reason: unknown): string {
+  if (reason instanceof PlatformApiError) return reason.message;
+  return reason instanceof Error ? reason.message : 'WORKBENCH_UNAVAILABLE';
 }
 
 export interface FetchLike {
@@ -236,6 +560,32 @@ export class WorkbenchApi {
     return parseWorkContext(raw);
   }
 
+  /** The project's approved, creatable releases (W2/R2): only ACTIVE default-pointer releases
+   *  that pass the policy and approval gates, keyset-paginated. The formal create flow is
+   *  catalog → detail → POST /api/works with the pointer's own appVersion. */
+  catalogSummaries(
+    projectId: string,
+    params: { cursor?: string | null; limit?: number } = {},
+    signal?: AbortSignal,
+  ): Promise<{ items: CatalogSummary[]; nextCursor: string | null }> {
+    const query = new URLSearchParams();
+    query.set('projectId', projectId);
+    if (params.cursor) query.set('cursor', params.cursor);
+    if (params.limit !== undefined) query.set('limit', String(params.limit));
+    return this.call('GET', `/api/catalog?${query.toString()}`, undefined, signal) as Promise<{ items: CatalogSummary[]; nextCursor: string | null }>;
+  }
+
+  /** The full declaration of one approved release, resolved through the server-owned default
+   *  pointer for the given project — never a browser-chosen version. */
+  catalogRelease(appId: string, projectId: string, signal?: AbortSignal): Promise<CatalogReleaseDetail> {
+    return this.call(
+      'GET',
+      `/api/catalog/${encodeURIComponent(appId)}?projectId=${encodeURIComponent(projectId)}`,
+      undefined,
+      signal,
+    ) as Promise<CatalogReleaseDetail>;
+  }
+
   /** Works visible to the caller. Paging is explicit so a large catalogue is never silently cut. */
   listWorks(
     state?: 'ACTIVE' | 'ARCHIVED',
@@ -250,6 +600,104 @@ export class WorkbenchApi {
     }
     const suffix = query.toString() ? `?${query.toString()}` : '';
     return this.call('GET', `/api/works${suffix}`, undefined, signal) as Promise<{ total: number; items: WorkbenchItem[] }>;
+  }
+
+  /** E4-3 server-side filtered, cursor-paginated Works. The q filter matches titles server-side. */
+  queryWorks(
+    params: { projectId?: string; appId?: string; state?: 'ACTIVE' | 'ARCHIVED'; q?: string; cursor?: string | null },
+    signal?: AbortSignal,
+  ): Promise<{ items: WorkbenchItem[]; nextCursor: string | null }> {
+    const query = new URLSearchParams();
+    if (params.projectId) query.set('projectId', params.projectId);
+    if (params.appId) query.set('appId', params.appId);
+    if (params.state) query.set('state', params.state);
+    if (params.q) query.set('q', params.q);
+    if (params.cursor) query.set('cursor', params.cursor);
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return this.call('GET', `/api/works/query${suffix}`, undefined, signal) as Promise<{ items: WorkbenchItem[]; nextCursor: string | null }>;
+  }
+
+  /** E4-3 server-side filtered, cursor-paginated Runs. The q filter matches the input goal server-side. */
+  queryRuns(
+    params: { appId?: string; workId?: string; projectId?: string; state?: string; q?: string; cursor?: string | null },
+    signal?: AbortSignal,
+  ): Promise<{ items: RunSummary[]; nextCursor: string | null }> {
+    const query = new URLSearchParams();
+    if (params.appId) query.set('appId', params.appId);
+    if (params.workId) query.set('workId', params.workId);
+    if (params.projectId) query.set('projectId', params.projectId);
+    if (params.state) query.set('state', params.state);
+    if (params.q) query.set('q', params.q);
+    if (params.cursor) query.set('cursor', params.cursor);
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return this.call('GET', `/api/runs/query${suffix}`, undefined, signal) as Promise<{ items: RunSummary[]; nextCursor: string | null }>;
+  }
+
+  /** E4-6 global search: one query across works, runs, projects and apps. */
+  async search(q: string, signal?: AbortSignal): Promise<Array<{
+    kind: 'work' | 'run' | 'project' | 'app';
+    id: string;
+    title: string;
+    detail: string;
+    workId?: string;
+    runId?: string;
+  }>> {
+    // The control plane answers with a page envelope ({items}); the palette wants the bare list.
+    const page = await this.call('GET', `/api/search?q=${encodeURIComponent(q)}`, undefined, signal) as {
+      items: Array<{
+        kind: 'work' | 'run' | 'project' | 'app';
+        id: string;
+        title: string;
+        detail: string;
+        workId?: string;
+        runId?: string;
+      }>;
+    };
+    return page.items;
+  }
+
+  /** E2-1 deterministic evaluation sets: checks that need no expert gold set. */
+  async listEvaluationSets(appId?: string, signal?: AbortSignal): Promise<Array<{
+    evaluationSetId: string;
+    appId: string;
+    name: string;
+    description: string;
+    state: 'ACTIVE' | 'ARCHIVED';
+    entries: Array<{ entryId: string; label: string; checks: Array<{ kind: string }> }>;
+  }>> {
+    const suffix = appId ? `?appId=${encodeURIComponent(appId)}` : '';
+    // The control plane answers with a page envelope ({items}); unwrap to the bare list.
+    const page = await this.call('GET', `/api/evaluations${suffix}`, undefined, signal) as {
+      items: Array<{
+        evaluationSetId: string;
+        appId: string;
+        name: string;
+        description: string;
+        state: 'ACTIVE' | 'ARCHIVED';
+        entries: Array<{ entryId: string; label: string; checks: Array<{ kind: string }> }>;
+      }>;
+    };
+    return page.items;
+  }
+
+  /** Run every deterministic check of one set against one run; pure recomputation, no model. */
+  evaluateSet(evaluationSetId: string, runId: string, signal?: AbortSignal): Promise<EvaluationRunItem> {
+    return this.call(
+      'POST',
+      `/api/evaluations/${encodeURIComponent(evaluationSetId)}/evaluate`,
+      { runId },
+      signal,
+    ) as Promise<EvaluationRunItem>;
+  }
+
+  /** Recorded evaluation runs of one set, newest first. */
+  evaluationRuns(evaluationSetId: string, signal?: AbortSignal): Promise<{ items: EvaluationRunItem[] }> {
+    return this.call(
+      'GET',
+      `/api/evaluations/${encodeURIComponent(evaluationSetId)}/runs`,
+      undefined,
+      signal,
+    ) as Promise<{ items: EvaluationRunItem[] }>;
   }
 
   /** Durable execution records for one Work, newest first as the control plane orders them. */
@@ -272,9 +720,90 @@ export class WorkbenchApi {
     ) as Promise<Page<InputBaselineItem>>;
   }
 
+  /** Append one input batch (SC-03): the actor is the server-side principal, never a body field. */
+  appendInputBaseline(workId: string, draft: { sourceRef: string; digest: string }, signal?: AbortSignal): Promise<InputBaselineItem> {
+    return this.call(
+      'POST',
+      `/api/works/${encodeURIComponent(workId)}/input-baselines`,
+      { sourceRef: draft.sourceRef, digest: draft.digest },
+      signal,
+    ) as Promise<InputBaselineItem>;
+  }
+
+  /** Delivery packages of one Work, newest first; every lifecycle state stays visible. */
+  workDeliveryPackages(workId: string, page: { offset: number; limit: number }, signal?: AbortSignal): Promise<Page<DeliveryPackageItem>> {
+    return this.call(
+      'GET',
+      `/api/works/${encodeURIComponent(workId)}/delivery-packages?offset=${page.offset}&limit=${page.limit}`,
+      undefined,
+      signal,
+    ) as Promise<Page<DeliveryPackageItem>>;
+  }
+
+  /** Seal a SUCCEEDED run's artifacts into a delivery package (review snapshot frozen at seal). */
+  sealDeliveryPackage(workId: string, draft: { runId: string; note?: string }, signal?: AbortSignal): Promise<DeliveryPackageItem> {
+    return this.call(
+      'POST',
+      `/api/works/${encodeURIComponent(workId)}/delivery-packages`,
+      draft.note ? draft : { runId: draft.runId },
+      signal,
+    ) as Promise<DeliveryPackageItem>;
+  }
+
+  /** SEALED → DELIVERED: record the handover. CAS on revision keeps concurrent edits honest. */
+  deliverDeliveryPackage(packageId: string, body: { note?: string; expectedRevision: number }, signal?: AbortSignal): Promise<DeliveryPackageItem> {
+    return this.call('POST', `/api/delivery-packages/${encodeURIComponent(packageId)}/deliver`, body, signal) as Promise<DeliveryPackageItem>;
+  }
+
+  /** DELIVERED → RECEIVED: a declared counterpart fact; the platform does not verify receipt. */
+  acknowledgeDeliveryPackage(packageId: string, body: { note?: string; expectedRevision: number }, signal?: AbortSignal): Promise<DeliveryPackageItem> {
+    return this.call('POST', `/api/delivery-packages/${encodeURIComponent(packageId)}/acknowledge`, body, signal) as Promise<DeliveryPackageItem>;
+  }
+
+  /** SEALED/DELIVERED → WITHDRAWN with a mandatory reason; history stays. */
+  withdrawDeliveryPackage(packageId: string, body: { reason: string; expectedRevision: number }, signal?: AbortSignal): Promise<DeliveryPackageItem> {
+    return this.call('POST', `/api/delivery-packages/${encodeURIComponent(packageId)}/withdraw`, body, signal) as Promise<DeliveryPackageItem>;
+  }
+
+  /** Active → SUPERSEDED by another live package of the same Work; never automatic. */
+  supersedeDeliveryPackage(packageId: string, body: { supersededBy: string; expectedRevision: number }, signal?: AbortSignal): Promise<DeliveryPackageItem> {
+    return this.call('POST', `/api/delivery-packages/${encodeURIComponent(packageId)}/supersede`, body, signal) as Promise<DeliveryPackageItem>;
+  }
+
   /** Sealed and metadata-only artifacts of one execution. */
   runArtifacts(runId: string, signal?: AbortSignal): Promise<{ items: ArtifactItem[] }> {
     return this.call('GET', `/api/runs/${encodeURIComponent(runId)}/artifacts`, undefined, signal) as Promise<{ items: ArtifactItem[] }>;
+  }
+
+  /** App-contributed result facts of one succeeded run (E1-4); empty until an app contributes. */
+  runFindings(runId: string, signal?: AbortSignal): Promise<{ items: FindingItem[] }> {
+    return this.call('GET', `/api/runs/${encodeURIComponent(runId)}/findings`, undefined, signal) as Promise<{ items: FindingItem[] }>;
+  }
+
+  /** Key-aligned finding diff, `from = runId`, `to = against` (E1-4). */
+  runFindingsDiff(runId: string, against: string, signal?: AbortSignal): Promise<FindingsDiff> {
+    return this.call(
+      'GET',
+      `/api/runs/${encodeURIComponent(runId)}/findings-diff?against=${encodeURIComponent(against)}`,
+      undefined,
+      signal,
+    ) as Promise<FindingsDiff>;
+  }
+
+  /** The transcript-shaped slice of one run record (result text + observed activities). */
+  runDetail(runId: string, signal?: AbortSignal): Promise<RunDetail> {
+    return this.call('GET', `/api/runs/${encodeURIComponent(runId)}`, undefined, signal).then((record) => {
+      const source = record as {
+        result?: RunDetail['result'];
+        activities?: RunActivity[];
+        knowledge?: RunKnowledgeBinding;
+      };
+      return {
+        ...(source.result !== undefined ? { result: source.result } : { result: null }),
+        ...(source.activities !== undefined ? { activities: source.activities } : {}),
+        ...(source.knowledge !== undefined ? { knowledge: source.knowledge } : {}),
+      };
+    }) as Promise<RunDetail>;
   }
 
   /** Input commits accepted for one execution, paged by the control plane. */
@@ -285,6 +814,55 @@ export class WorkbenchApi {
       undefined,
       signal,
     ) as Promise<Page<InputCommitItem>>;
+  }
+
+  /** Durable run-ledger events (state transitions), newest first; survives a control-plane restart. */
+  runEvents(runId: string, page: { offset: number; limit: number }, signal?: AbortSignal): Promise<Page<RunEventItem>> {
+    return this.call(
+      'GET',
+      `/api/runs/${encodeURIComponent(runId)}/events?offset=${page.offset}&limit=${page.limit}`,
+      undefined,
+      signal,
+    ) as Promise<Page<RunEventItem>>;
+  }
+
+  /** Verifiable audit export (NDJSON with a SHA-256 chain). The body is newline-delimited JSON, not
+   *  one JSON document, so it is parsed line by line; the chain head/last sequence come from the
+   *  lines themselves (the proxy does not forward the X-Audit response headers). */
+  async auditExport(
+    options: { target?: string; after?: number; limit?: number } = {},
+    signal?: AbortSignal,
+  ): Promise<AuditExportResult> {
+    const query = new URLSearchParams();
+    if (options.target) query.set('target', options.target);
+    if (options.after !== undefined) query.set('after', String(options.after));
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    const response = await this.fetchImpl(`${this.baseUrl}/api/audit/export${suffix}`, {
+      method: 'GET',
+      headers: { accept: 'application/x-ndjson' },
+      ...(signal ? { signal } : {}),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      let code = 'PLATFORM_OPERATION_FAILED';
+      try { code = (JSON.parse(text) as { code?: string }).code ?? code; } catch { /* non-JSON error body */ }
+      throw new PlatformApiError(code, response.status);
+    }
+    const entries = text.split('\n').filter((line) => line.trim().length > 0).map((line) => JSON.parse(line) as AuditEntryItem);
+    const last = entries[entries.length - 1];
+    return {
+      entries,
+      headDigest: last?.digest ?? '0'.repeat(64),
+      lastSequence: last?.sequence ?? (options.after ?? 0),
+      count: entries.length,
+    };
+  }
+
+  /** E3-1 operations panel: measured latency distribution (p50/p95/p99), outbox depth, run
+   *  counts, doctor probe and the honest "no SLO targets defined yet" statement. */
+  opsPanel(signal?: AbortSignal): Promise<OpsPanel> {
+    return this.call('GET', '/api/ops/panel', undefined, signal) as Promise<OpsPanel>;
   }
 
   /** Record one enterprise submission intent for an already-bound native Session.
@@ -315,6 +893,16 @@ export class WorkbenchApi {
     return this.call('GET', `/api/works/${encodeURIComponent(workId)}/submissions`, undefined, signal) as Promise<{ items: SubmissionItem[] }>;
   }
 
+  /** 数据安全开关（与模型无关，由用户自己决定开/关）。restartRequired：插件工具的说明在插件加载时选定，
+   *  改后需重启 WebUI 才完全生效。文件 `.runtime/data-boundary.json` 与 dm-dvp 插件、命令行脚本共用。 */
+  dataBoundary(signal?: AbortSignal): Promise<DataBoundaryState> {
+    return this.call('GET', '/api/data-boundary', undefined, signal) as Promise<DataBoundaryState>;
+  }
+
+  setDataBoundary(dataSecurity: boolean, signal?: AbortSignal): Promise<DataBoundaryState> {
+    return this.call('PUT', '/api/data-boundary', { dataSecurity }, signal) as Promise<DataBoundaryState>;
+  }
+
   /** Model catalog and the signed-in employee's saved default preference. */
   models(signal?: AbortSignal): Promise<{ catalog: ModelCatalog | null; preference: ModelPreference }> {
     return this.call('GET', '/api/models', undefined, signal) as Promise<{ catalog: ModelCatalog | null; preference: ModelPreference }>;
@@ -323,6 +911,34 @@ export class WorkbenchApi {
   /** Persist the caller's own default model; it never changes another employee's default. */
   setModelPreference(selectionId: string, signal?: AbortSignal): Promise<ModelPreference> {
     return this.call('PUT', '/api/models/preference', { selectionId }, signal) as Promise<ModelPreference>;
+  }
+
+  // ── L2 个人记忆（我的习惯）：owner 由服务端从登录身份派生，API 没有 owner 参数 ──
+  preferences(signal?: AbortSignal): Promise<{ items: PersonalPreferenceItem[] }> {
+    return this.call('GET', '/api/preferences', undefined, signal) as Promise<{ items: PersonalPreferenceItem[] }>;
+  }
+
+  /** 保存偏好（版本比较更新）：expectedRevision 过期时服务端返回 409 PREFERENCE_REVISION_STALE。 */
+  setPreference(
+    key: string,
+    value: unknown,
+    options: { pluginId?: string; expectedRevision?: number } = {},
+    signal?: AbortSignal,
+  ): Promise<PersonalPreferenceItem> {
+    return this.call('PUT', `/api/preferences/${encodeURIComponent(key)}`, {
+      value,
+      ...(options.pluginId !== undefined ? { pluginId: options.pluginId } : {}),
+      expectedRevision: options.expectedRevision ?? 0,
+    }, signal) as Promise<PersonalPreferenceItem>;
+  }
+
+  pausePreference(key: string, pluginId?: string, signal?: AbortSignal): Promise<PersonalPreferenceItem> {
+    return this.call('POST', `/api/preferences/${encodeURIComponent(key)}/pause`, pluginId ? { pluginId } : {}, signal) as Promise<PersonalPreferenceItem>;
+  }
+
+  deletePreference(key: string, pluginId?: string, signal?: AbortSignal): Promise<PersonalPreferenceItem> {
+    const query = pluginId ? `?pluginId=${encodeURIComponent(pluginId)}` : '';
+    return this.call('DELETE', `/api/preferences/${encodeURIComponent(key)}${query}`, undefined, signal) as Promise<PersonalPreferenceItem>;
   }
 
   projectWorkspaces(projectId: string, signal?: AbortSignal): Promise<{ items: WorkspaceItem[] }> {
@@ -408,6 +1024,36 @@ export class WorkbenchApi {
       total: number;
       items: InteractionItem[];
     }>;
+  }
+
+  /** Business review records for one execution. */
+  runReviews(runId: string, signal?: AbortSignal): Promise<{ items: ReviewItem[] }> {
+    return this.call('GET', `/api/runs/${encodeURIComponent(runId)}/reviews`, undefined, signal) as Promise<{
+      items: ReviewItem[];
+    }>;
+  }
+
+  /** Request a business review of a succeeded run; the server refuses anything else. */
+  requestReview(runId: string, note?: string, signal?: AbortSignal): Promise<ReviewItem> {
+    return this.call('POST', `/api/runs/${encodeURIComponent(runId)}/reviews`, note ? { note } : {}, signal) as Promise<ReviewItem>;
+  }
+
+  /** Record a review decision with CAS on the review revision (W4/R5). A bound record requires
+   *  `expectedManifestDigest` — echo the digest the record froze; a legacy run-only record must
+   *  not send one (the server rejects a digest it cannot bind). */
+  decideReview(
+    reviewId: string,
+    decision: 'APPROVED' | 'REJECTED',
+    expectedRevision: number,
+    target: { expectedManifestDigest?: string; note?: string } = {},
+    signal?: AbortSignal,
+  ): Promise<ReviewItem> {
+    return this.call('POST', `/api/reviews/${encodeURIComponent(reviewId)}/decision`, {
+      decision,
+      expectedRevision,
+      ...(target.expectedManifestDigest ? { expectedManifestDigest: target.expectedManifestDigest } : {}),
+      ...(target.note ? { note: target.note } : {}),
+    }, signal) as Promise<ReviewItem>;
   }
 
   /** Answer one native question. A late, duplicate or post-terminal answer is rejected by the server. */

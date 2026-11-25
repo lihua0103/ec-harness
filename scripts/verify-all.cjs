@@ -64,11 +64,16 @@ function discover(root) {
   for (const [file, args, name] of [
     ['scripts/check-development-standard.mjs', [], 'development standard check'],
     ['scripts/check-development-standard.mjs', ['--self-test'], 'development standard checker self-test'],
+    ['scripts/verify-applications.mjs', [], 'application registration check'],
+    ['scripts/verify-knowledge-golden.mjs', [], 'knowledge golden retrieval check'],
+    ['scripts/verify-knowledge-coverage.mjs', [], 'knowledge agent coverage check'],
+    ['scripts/verify-knowledge-coverage.test.mjs', [], 'knowledge coverage gate self-test'],
+    ['scripts/accept-knowledge-roles.mjs', [], 'knowledge acceptance by real roles'],
     ['scripts/verify-all.test.cjs', [], 'verification aggregator self-test'],
   ]) {
     const entry = path.join(root, file);
     if (!isFile(entry)) failures.push(`${file} missing (required check)`);
-    else targets.push({ name, directory: root, kind: 'node', args: file.endsWith('.test.cjs') ? ['--test', entry] : [entry, ...args] });
+    else targets.push({ name, directory: root, kind: 'node', args: file.endsWith('.test.cjs') || file.endsWith('.test.mjs') ? ['--test', entry] : [entry, ...args] });
   }
   for (const name of directories(path.join(root, 'prototypes'))) {
     const directory = path.join(root, 'prototypes', name);

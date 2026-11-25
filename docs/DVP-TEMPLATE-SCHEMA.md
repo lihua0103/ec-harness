@@ -82,5 +82,63 @@ Type 8 枚举：Dynamic Field(303) / Dynamic Search list(99) / Dynamic Page(77) 
 ## 8. 数据边界（用户指示，长期有效）
 
 - Cover sheet 与受试者级/原始数据：禁读。
+- **2026-11-24 起本节边界由数据安全开关控制**（`plugins/dm-dvp/src/data-boundary.ts`，与模型无关）：开关文件 `.runtime/data-boundary.json` 的 `dataSecurity=false`（关闭，命令 `node .runtime/data-boundary.cjs off [--restart]`）时——`dm_dvp_overview / parse_workbook / read_workbook` 对 Cover、Approval、TEST CASE 受试者号与 DM/DBD 评审意见**原值返回**；`dataSecurity=true`（开启，默认；文件缺失或损坏也按开启）即回到上述禁读（插件测试默认锁定开启时的行为）。
 - 规则原文、质疑文案、访视/表单清单等临床项目内容：只做本地聚合分析，不写入对话上下文、不复制入本项目仓库。
 - 本模板 schema 文档只含列语义、枚举与统计惯例，可安全用于插件开发。
+
+## 9. 真实实例对照与生成惯例（2026-11-21，第二份实物 V6.0 对照蒸馏）
+
+第二份公司实物（V6.0，10 sheet）对照本模板所据实例（V2.0，12 sheet）：**公司内不同项目形态有差量**，下列为跨实例不变量与 V6.0 差量，是生成器与提示词的接地依据。统计口径：V6.0 Edit Checks 866 条全量分析（本节只录惯例与统计，不录规则原文）。
+
+### 9.1 跨实例不变量（生成必须遵守）
+
+状态标注（2026-11-21 知识沉淀，依 §9.4 v1.1 对标回写）：**【已实证】**=v1.1 复跑量化达标；**【差距】**=残留未收敛；**【开放】**=口径未定待收敛。已实证项已沉淀为种子（`dm-dvp.conventions.evidence` 等，见 plugins/dm-dvp）。
+
+- 【已实证】治理三页在前：Approval Form（**首个 sheet**）/ Cover / Version History。**实物中 Cover 值列与版本日期列全空（人类填）**——生成器只写有输入证据的行，禁止编造日期、历史版本、签署人（v1.1 Version History 仅证据行，零编造达成）。
+- 【差距】Edit Checks = 跨字段定制检查；Logic 用公司 `fire when` 方言：`<>`/`=`/`AND`/`OR` + `注：` + `【表单.字段】` 跨表引用记法（V6.0 频次：`<>`×428、`AND`×606、`OR`×68、`注：`×69、`【`×75）；字段名用 ALS PreText 中文原文。方言算子/连接词主体已实证；**记法密度未收敛**（【】v1.1×2009 vs 标准×75，全局包裹漂移；`注：`×0）→ 见种子 `dm-dvp.text.density`。
+- 【已实证】【差距】差异文本范式（频次即规范，占位符记法）：**97%（843/866）以"请核实"结尾**——v1.1 853/849 行≈100% 达标；三型模板频次对齐（已提供，但 144 vs 138、晚于 18=18、早于 34≈33）；**「请核查」变体未覆盖**（标准 23、v1.1 0）→ 句尾主形态与三型模板见种子 `dm-dvp.conventions.evidence`，变体与密度见 `dm-dvp.text.density`。
+- 【已实证】字段级表 = Rave 字段配置元数据（FormOID/FormName/FieldOID/PreText/ControlType/DataFormat/Is Required/Query Future Date/Query Non-Conformance），ControlType 含 CheckBox 与 Dynamic SearchList。三旗标（IsRequired/QueryFutureDate/QueryNonConformance）是**系统原生检查层**，与定制检查分列两 sheet，勿混（v1.1 709=709 且枚举分布逐项相同）。
+- 【已实证】Add/Delete/Update 列在基线版全空（866/866；v1.1 双方 0% 填充）。
+- 【已实证】【开放】ID 跟随表单缩写：EditCheck=`表单缩写_序号`（跨周期访视可带矩阵后缀 `XX_10_C3_C80`）；Listing=`表单缩写_序号`；Dynamic=`DYN_FIELD_/DSL_/DYN_PAGE_` 前缀 + 表单缩写。主体已实证；**矩阵后缀为开放问题**（标准 49 条、v1.1 命中 10，EX 前缀多 23）→ 见种子 `dm-dvp.id.matrix-suffix`。
+- 【已实证】访视列用 `ALL`（实物 99+87 次）与方案真实访视名（筛选期/肿瘤评估/周期访视），**不用"所有访视"**（v1.1 ALL×638、"所有访视"×0）。
+- 【已实证】规模纪律：真实 DVP 是**全量清单**（V6.0：Edit Checks 866 / 字段级 709 / Manual Review 92 / Dynamic 216；对照 V2.0：710/1042）——ALS 元数据应机械全量物化，抽样精选即不合格（v1.1 849/866=98%，逐表单计数精确命中）。
+- 【差距】访视-表单条目的跨页归类口径：矩阵区放访视展开 + 条件数据表单（标准 44 行、`DYN_VISIT_*`），动态区 Dynamic Visit 严格少用（标准 4 条）；v1.1 把 253 条 Dynamic Visit 塞进动态区、矩阵区 130 行几乎全是访视表单 → 见种子 `dm-dvp.classification.visit-matrix`。Manual Review 列形（标准 29 列 vs v1.1 8 列通用形）为插件配置面迭代，不属于知识沉淀。
+
+### 9.2 V6.0 相对本模板（V2.0 实例）的差量
+
+- **无 Query Type 列**（Edit Checks 9 列中不含）；Query Type 是模板实例的列，非公司不变量——生成器应把该列做成可配置。
+- **无 Manual Review for Programming**：单 Manual Review（29 列：Listing ID/Name/Version/CRF Name/Field Name/Visits/Report Description/Discrepancy Text/Review group/Condition/Column Heading + 尾部 UAT/Comments 稀疏列），Review group 区分人群（V6.0 全 DM）。
+- 字段级表名 = **Edit Checks Rave**（709 行，无 IsLog 列）。
+- **新增 Subject Status**（受试者状态定义：状态名 + `【表单.字段】` 条件记法）与 **Matrix**（`DYN_VISIT_*` × 访视 → 各亚组显示表单矩阵）两 sheet。
+- Dynamic 六类全谱：Dynamic Field / Dynamic Page / Dynamic Searchlist / Dynamic Visit / Add Event / Derivation（V6.0: 134/46/24/4/3/3）。
+
+### 9.3 生成器差距与对策（2026-11-21 v1.0 CANDIDATE 实测）
+
+| 维度 | 生成 | 标准（V6.0） | 根因→对策 |
+|---|---|---|---|
+| Edit Checks 规模 | 68 | 866 | write_workbook 内联 JSON 限单轮吞吐 → 插件加 **bulk 写入路径**（工具从文件/NDJSON 引用展开，模型只产映射不逐条抄写） |
+| Version History | 编造 2019–2022 假日期 | 日期列全空 | 零编造违规 → 只写有证据行（协议版本/日期 + 本次生成行） |
+| Sheet 清单 | 8 页（自创 Programming 页） | 9 页 | 按 §9.2 实物清单，sheet 集可配置 |
+| 访视命名 | "所有访视"×61 | ALL + 真实访视名 | §9.1 惯例注入提示词/种子 |
+| ID 约定 | 表单缩写_序号 | 同 + 矩阵后缀 | 已对齐，补后缀规则 |
+| 差异文本范式 | "请核实"68/68 | 97% | 基本对齐，补缺失/一致性/时序三型模板 |
+
+对策落点：① 插件 bulk 写入；② sheet 集与列配置化（Query Type 可关、Subject Status/Matrix 可开）；③ §9.1 惯例进会话提示词与知识种子；④ 复跑后与本节量化基线再对比；⑤ 旋钮决策显式汇报——六个 template 旋钮（governanceOrder/editChecksQueryType/fieldLevelSheetName/includeProgramming/includeSubjectStatus/includeMatrix）最终取值与依据须写进交付汇报（识别到哪份实物形态，或「未识别，用默认」），静默套默认视为缺陷。
+
+### 9.4 v1.1 复跑对比（2026-11-21，bulk+模板旋钮升级后，插件写簿实证：mtime 与最后一次 write 调用差 108ms，SHA-256 2AE4D2AB…4B70DAB）
+
+| 维度 | v1.0 | **v1.1** | 标准（V6.0） | 结论 |
+|---|---|---|---|---|
+| Edit Checks 规模 | 68 | **849** | 866 | 98% 覆盖；逐表单计数精确命中（LB 101=101、TM 91=91、TH 79=79、TE 54=54、FH 52=52） |
+| Version History | 编造假日期 | **仅证据行**（V5.0=ALS CopySource 文件名 2023-05-18、V6.0=标准文件名 2025-01-13、两条 CANDIDATE；Modified By 留空） | 日期列全空 | 零编造达成 |
+| Query Type 列 | 9 列含 | **8 列不含（模型自选 editChecksQueryType=false）** | 8 列不含 | 旋钮按实物形态正确使用 |
+| 访视命名 | "所有访视"×61 | **ALL×638 + 真实访视名，"所有访视"×0** | ALL/All + 真实访视名 | 对齐 |
+| ID 约定 | 表单缩写_序号 | 同左 | 同 + 矩阵后缀（SV_×49） | 主体对齐；**SV_ 后缀仅 10 条（缺约 39 条跨周期矩阵规则）、EX 多 23 条**——残留差距 |
+| 差异文本范式 | 请核实 68/68 | **请核实 853/849 行、已提供，但×144（标 138）、未提供×522（标 503）、晚于 18=18、早于 34≈33** | 97% 请核实 | 对齐；缺「请核查」变体（标 23/0）与 Logic「注：」注释（标 69/0）；【】记法密度高于标准（2009 vs 75） |
+| Edit Checks Rave | — | **709=709 行；ControlType/IsRequired/QueryFutureDate/QueryNonConformance 枚举分布逐项相同（257/142/109/96/53/52、592/117、611/98、514/195）** | 709 行 | 字段级重建精确命中 |
+| Manual Review | — | **92=92 行**；列形 8 列通用 | 92 行；29 列（Ver/CRF/Review group/UAT…） | 行数命中，**列形差距未解** |
+| Subject Status | 无 | **4=4 行**，【表单.字段】条件记法 | 4 行 | 对齐（我方中文状态 vs 标准英文状态，小差） |
+| Matrix / Dynamic 归类 | 无 | Matrix 130 行（forms 几乎全 SV）、Dynamic 715 行（Dynamic Visit 253） | Matrix 44 行（条件表单 CA125/KPS 等）、Dynamic 216（Dynamic Visit 4） | **主要残留差距：访视矩阵条目的跨页归类与条件表单映射口径不同** |
+| Sheet 清单 | 8 页自创 | 9 页 | 9 页（含杂项 Sheet2；Rave 在 Edit Checks 前） | 主体一致；页序与杂页属实例差异 |
+
+bulk 路径实测：8 个 NDJSON 规则文件（crossField 849/fieldLevel 709/dynamic 715/matrix 130/manualReview 16/subjectStatus 4/versionHistory 6）经文件引用传入，5 次 write 调用 documentJson 仅 0.8–0.9KB；两次误传非清单参数 `templateDirectory` 后模型自行修正。manualReviewProgramming 区 8 条规则识别标准无此页后未写入（NDJSON 留存，未丢失）。

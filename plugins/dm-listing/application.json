@@ -2,8 +2,24 @@
   "appId": "ec.listing",
   "displayName": "Listing 开发与复跑",
   "description": "根据项目需求、ALS 和数据开发或修改 Listing 程序，检查结果，并在更换数据后继续同一项工作。",
-  "listingTypes": ["Manual", "Medical", "PK", "Report"],
-  "materialRoles": ["需求说明", "ALS / 数据结构", "数据批次", "已有程序（可选）"],
-  "resultTypes": ["程序", "Listing 结果", "检查证据"],
-  "capabilityId": "ec.listing.develop"
+  "listingTypes": [
+    "Manual",
+    "Medical",
+    "PK",
+    "Report"
+  ],
+  "materialRoles": [
+    "需求说明",
+    "ALS / 数据结构",
+    "数据批次",
+    "已有程序（可选）"
+  ],
+  "resultTypes": [
+    "程序",
+    "Listing 结果",
+    "检查证据"
+  ],
+  "capabilityId": "ec.listing.develop",
+  "knowledgePluginId": "dm-listing",
+  "capabilityVersion": "1.0.0"
 }

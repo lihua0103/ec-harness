@@ -73,6 +73,7 @@ const setup = async (factory: WorkerHarnessFactory) => {
     requireArtifacts: true,
   });
   service.registerApp(draft(), operator);
+  service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
   return { root, service };
 };
 
@@ -200,6 +201,7 @@ test('a worker whose process exit cannot be proven never reaches a terminal succ
   });
   try {
     service.registerApp(draft(), operator);
+    service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
     const run = service.createRun('listing', '1.0.0', {}, operator);
     await service.dispatchRun(run.runId, run.snapshot.revision, supervisor);
     await waitForTerminal(service, run.runId);
@@ -225,6 +227,7 @@ test('dispatch rejects a worker environment whose runtime bundle differs from th
   const service = new PlatformControlService(join(root, 'control.sqlite'), executor);
   try {
     service.registerApp(draft(), operator);
+    service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
     const run = service.createRun('listing', '1.0.0', {}, operator);
     await assert.rejects(
       service.dispatchRun(run.runId, run.snapshot.revision, supervisor),
@@ -259,6 +262,7 @@ test('cancel without proven exit evidence returns false (close-failure and unkno
   const service = new PlatformControlService(join(root, 'control.sqlite'), executor);
   try {
     service.registerApp(draft(), operator);
+    service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
     const run = service.createRun('listing', '1.0.0', {}, operator);
     const bound = await service.dispatchRun(run.runId, run.snapshot.revision, supervisor);
     const launchId = bound.snapshot.launchId!;
@@ -288,6 +292,7 @@ test('exit evidence is durable: a restarted executor settles cancel from launch_
   const config = { profile: 'worker', dshHome, workspace, runtimeBundleDigest: 'b'.repeat(64) };
   try {
     service.registerApp(draft(), operator);
+    service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
     // Proven exit: a normal worker close records true and survives a new executor instance.
     const okExec = new DshProfileExecutor(
       config,
@@ -379,6 +384,7 @@ test('the run model snapshot is passed to the worker harness', async () => {
   const service = new PlatformControlService(join(root, 'control.sqlite'), executor);
   try {
     service.registerApp(draft(), operator);
+    service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
     service.registerModelCatalog(
       {
         catalogId: 'deployment.default',
@@ -419,6 +425,7 @@ test('dispatch rejects a run model route implemented by a different worker adapt
   const service = new PlatformControlService(join(root, 'control.sqlite'), executor);
   try {
     service.registerApp(draft(), operator);
+    service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
     service.registerModelCatalog(
       {
         catalogId: 'deployment.default',
@@ -483,6 +490,7 @@ test('a bound project workspace is the cwd and keeps this run artifacts inside i
   const service = new PlatformControlService(join(root, 'control.sqlite'), executor, undefined, { requireArtifacts: true });
   try {
     service.registerApp(draft(), operator);
+    service.setDefaultRelease('listing', '1.0.0', { expectedRevision: null }, operator);
     service.registerModelCatalog({
       catalogId: 'deployment.default', runtimeBundleDigest: 'b'.repeat(64),
       defaultSelectionId: 'model.flash', entries: [modelEntry],

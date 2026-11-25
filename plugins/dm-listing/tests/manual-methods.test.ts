@@ -22,6 +22,9 @@ test('registered method text contains correction distinctions without carrying o
   assert.match(MANUAL_METHODS_VERSION,/^2026\./);
   for(const required of ['Output if','flag=duplicated','Column Heading','Report Description','NA','class/label','单文件自包含'])assert(manualMethods.includes(required),required);
   assert(manualMethods.includes('不属于所有Manual项目默认'));assert(manualMethods.includes('当前spec'));
-  assert(listingWorkflow.includes('dm-listing-manual-methods'));
+  // 2026-11-23 批次比对备忘：占位FLAG与空表守卫进入方法与反例。
+  assert(manualMethods.includes('(vs旧批次)'));assert(manualMethods.includes("object 'SUBJID' not found"));
+  assert(manualMethods.includes('被占用'));
+  assert(listingWorkflow.includes('dm-listing-manual-methods'));assert(listingWorkflow.includes('(vs旧批次)'));assert(listingWorkflow.includes('退出码'));
   assert(clinicalMethods.includes('Cover也可按需读取'));assert(!listingWorkflow.includes('Cover 内容禁读'));
 });

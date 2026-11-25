@@ -1,0 +1,266 @@
+{
+  "schemaVersion": 2,
+  "pluginId": "ec-clinical-dm-viz",
+  "owner": "dm-viz 维护者",
+  "source": "src/knowledge-seeds.ts",
+  "taxonomy": {
+    "topics": [
+      "selection",
+      "style",
+      "acceptance",
+      "pipeline"
+    ]
+  },
+  "seeds": [
+    {
+      "knowledgeId": "dm-viz.chart.selection",
+      "topics": [
+        "selection"
+      ]
+    },
+    {
+      "knowledgeId": "dm-viz.chart.style",
+      "topics": [
+        "style"
+      ]
+    },
+    {
+      "knowledgeId": "dm-viz.chart.acceptance",
+      "topics": [
+        "acceptance"
+      ]
+    },
+    {
+      "knowledgeId": "dm-viz.design.pipeline",
+      "topics": [
+        "pipeline"
+      ]
+    },
+    {
+      "knowledgeId": "dm-viz.rbqm.render-forensics",
+      "topics": [
+        "acceptance"
+      ]
+    },
+    {
+      "knowledgeId": "dm-viz.rbqm.config-residue",
+      "topics": [
+        "style"
+      ]
+    },
+    {
+      "knowledgeId": "dm-viz.rbqm.ingest-coordination",
+      "topics": [
+        "pipeline"
+      ]
+    }
+  ],
+  "validators": [],
+  "capabilities": [
+    {
+      "tool": "dm_viz_define_dataset",
+      "topics": [
+        "pipeline"
+      ]
+    },
+    {
+      "tool": "dm_viz_import_xlsx",
+      "topics": [
+        "pipeline"
+      ]
+    },
+    {
+      "tool": "dm_viz_describe_dataset",
+      "topics": [
+        "pipeline"
+      ]
+    },
+    {
+      "tool": "dm_viz_design_extract",
+      "topics": [
+        "pipeline"
+      ]
+    },
+    {
+      "tool": "dm_viz_design_pair",
+      "topics": [
+        "pipeline"
+      ]
+    },
+    {
+      "tool": "dm_viz_design_compile",
+      "topics": [
+        "pipeline"
+      ]
+    },
+    {
+      "tool": "dm_viz_plan",
+      "topics": [
+        "selection",
+        "pipeline"
+      ]
+    },
+    {
+      "tool": "dm_viz_build",
+      "topics": [
+        "selection",
+        "pipeline"
+      ]
+    },
+    {
+      "tool": "dm_viz_render",
+      "topics": [
+        "pipeline"
+      ]
+    },
+    {
+      "tool": "dm_viz_verify",
+      "topics": [
+        "acceptance"
+      ]
+    },
+    {
+      "tool": "dm_viz_deliver",
+      "topics": [
+        "acceptance"
+      ]
+    },
+    {
+      "tool": "dm_viz_rbqm_apply",
+      "topics": [
+        "pipeline"
+      ]
+    },
+    {
+      "tool": "dm_viz_target_plan",
+      "topics": [
+        "pipeline"
+      ]
+    },
+    {
+      "tool": "dm_viz_methods",
+      "topics": [
+        "selection",
+        "style",
+        "acceptance",
+        "pipeline"
+      ]
+    }
+  ],
+  "noMethodKnowledge": [
+    {
+      "tool": "dm_viz_status",
+      "reason": "状态报告，无方法语义"
+    }
+  ],
+  "agent": {
+    "id": "dm-viz.agent",
+    "version": "1.0.0",
+    "owner": "dm-viz 维护者",
+    "topics": [
+      "selection",
+      "style",
+      "acceptance",
+      "pipeline"
+    ],
+    "tools": [
+      {
+        "tool": "dm_viz_methods",
+        "topics": [
+          "selection",
+          "style",
+          "acceptance",
+          "pipeline"
+        ]
+      },
+      {
+        "tool": "dm_viz_design_compile",
+        "topics": [
+          "pipeline"
+        ]
+      },
+      {
+        "tool": "dm_viz_build",
+        "topics": [
+          "selection",
+          "pipeline"
+        ]
+      },
+      {
+        "tool": "dm_viz_verify",
+        "topics": [
+          "acceptance"
+        ]
+      },
+      {
+        "tool": "dm_viz_deliver",
+        "topics": [
+          "acceptance"
+        ]
+      },
+      {
+        "tool": "dm_viz_rbqm_apply",
+        "topics": [
+          "pipeline"
+        ]
+      }
+    ],
+    "noMethodTools": [
+      {
+        "tool": "dm_viz_status",
+        "reason": "状态报告，无方法语义"
+      }
+    ]
+  },
+  "feedback": {
+    "events": [
+      "run.failed",
+      "business.clarified",
+      "qc.completed"
+    ],
+    "projectionVersion": "1"
+  },
+  "goldenSet": {
+    "id": "dm-viz.golden",
+    "version": "1",
+    "cases": [
+      {
+        "query": "确定性管线",
+        "expect": [
+          "dm-viz.design.pipeline"
+        ]
+      },
+      {
+        "query": "lineStyle.color",
+        "expect": [
+          "dm-viz.chart.style"
+        ]
+      },
+      {
+        "query": "并排证据",
+        "expect": [
+          "dm-viz.chart.acceptance"
+        ]
+      },
+      {
+        "query": "完全不存在的黄金集探针词",
+        "expect": [],
+        "expectEmpty": true
+      },
+      {
+        "query": "残留组件",
+        "expect": [
+          "dm-viz.rbqm.config-residue"
+        ]
+      },
+      {
+        "query": "入排标准",
+        "expect": [],
+        "expectEmpty": true
+      }
+    ]
+  },
+  "scope": {
+    "projects": "all"
+  }
+}

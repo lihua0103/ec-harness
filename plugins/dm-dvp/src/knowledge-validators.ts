@@ -21,18 +21,43 @@ const ruleFor = (logic: string) => coerceRuleInput({
 
 const changeMarkSeed = dvpSeeds.find((seed) => seed.knowledgeId === 'dm-dvp.changemark.format');
 if (!changeMarkSeed) throw new Error('DVP_CHANGEMARK_SEED_MISSING');
+const fireWhenSeed = dvpSeeds.find((seed) => seed.knowledgeId === 'dm-dvp.firewhen.dialect');
+if (!fireWhenSeed) throw new Error('DVP_FIREWHEN_SEED_MISSING');
+const uatSeed = dvpSeeds.find((seed) => seed.knowledgeId === 'dm-dvp.uat.boundaries');
+if (!uatSeed) throw new Error('DVP_UAT_SEED_MISSING');
+/** 窄声明：仅由下列固定用例逐条复现；宽方法正文不在验证范围。 */
+const FIREWHEN_CLAIMS = [
+  'fire-when structured vs freeform detection',
+  'narrative logic degrades to freeform',
+  'is missing renders IsMissing operator',
+  'is not missing renders IsPopulated operator',
+  'mixed and/or grouping flagged NEEDS_MANUAL_GROUPING',
+];
+const UAT_CLAIMS = ['test case subject count forced to zero'];
 
 export const dvpMethodSuite: ValidationSuite = {
   id: 'dm-dvp.methods-suite',
-  version: '1.0.0',
+  version: '1.1.0',
   knowledgeIds: dvpSeeds.map((s) => s.knowledgeId),
-  // Only the change-mark seed declares machine-reproducible claims; all other seeds stay CANDIDATE
-  // because their wide method text is not reproduced by these helper cases.
+  // 仅窄声明可被本套件逐条复现；template/protocol/cases 种子的宽正文保持 CANDIDATE（仅参考）。
   coverage: [
     {
       knowledgeId: 'dm-dvp.changemark.format',
       candidateDigest: digest(normalizeDraft(changeMarkSeed)),
       claims: ['change-mark action/version', 'change-mark unknown action'],
+      evidence: [{ suiteId: 'dm-dvp.methods-suite', suiteVersion: '1.1.0', caseIds: ['change-mark-add', 'change-mark-delete', 'change-mark-unknown-action'] }],
+    },
+    {
+      knowledgeId: 'dm-dvp.firewhen.dialect',
+      candidateDigest: digest(normalizeDraft(fireWhenSeed)),
+      claims: FIREWHEN_CLAIMS,
+      evidence: [{ suiteId: 'dm-dvp.methods-suite', suiteVersion: '1.1.0', caseIds: ['firewhen-structured', 'firewhen-freeform', 'null-missing-operator', 'null-populated-operator', 'mixed-logic-grouping-flag'] }],
+    },
+    {
+      knowledgeId: 'dm-dvp.uat.boundaries',
+      candidateDigest: digest(normalizeDraft(uatSeed)),
+      claims: UAT_CLAIMS,
+      evidence: [{ suiteId: 'dm-dvp.methods-suite', suiteVersion: '1.1.0', caseIds: ['programming-counts-forced-zero'] }],
     },
   ],
   cases: [

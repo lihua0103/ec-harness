@@ -1,6 +1,6 @@
 # DM Listing 插件
 
-更新：2026-11-11 · 包版本0.2.0。当前阶段：**真实项目工作流、加密数据包读取、学习闭环激活链路已实现；全量回归70/70、tsc、host/client bundle通过；知识服务已迁为独立平台bundle；DSH Web装配烟测通过（平台、Listing、DVP三包均安装并启用），未执行业务会话或临床验收。**
+更新：2026-11-24 · 包版本0.2.4。当前阶段：**真实项目工作流、加密数据包读取、学习闭环激活链路已实现；批次新旧比对交付契约（2026-11-23 HXN6005 备忘沉淀）已接入方法与验证器；全量回归83/83、tsc、host/client bundle通过；知识服务为独立平台bundle；本构建尚未经平台重新登记，也未在运行中的宿主加载；DSH Web装配烟测通过是2026-11-11旧构建的结果，本构建未重跑；未执行业务会话或临床验收。**
 
 ## 现行开发方向
 
@@ -29,6 +29,8 @@
 ## 经验知识状态
 
 平台应统一管理shared/plugin/project作用域和插件/场景/EDC/主题分类。Listing贡献领域种子与验证器，不自己再建知识数据库。Manual/Medical共用review方法；PK共同/BE/SAD-MAD按前提分类，项目常量和业务裁定不自动跨项目推广。
+
+批次新旧比对（New/Modified/Old）为 Manual/Medical 输出合同的一部分：`dm-listing.batch-comparison.methods`（种子版本 2026.11.23.2）沉淀自包含集成、内嵌键配置（SUBJID→RECORDID→SUBTRID→CSN 最大公共子集 + CmpRowSeq）、键唯一性硬校验、基线/引擎缺失优雅跳过、空表守卫、退出码不证明比对件已生成与 xlsx 占用，由 `dm-listing.comparison-suite` 9 个固定用例（正/反/边界）复现声明后激活；纯引擎在 `src/comparison.ts`。用例复现的是这些 TypeScript 辅助函数的推算；模型生成的主程序按该契约在尾部内嵌比对段，这一点尚无真实或合成项目的生成结果验证。
 
 知识服务已迁至独立平台包`packages/platform-knowledge`（自带Cordis bundle与patch），Listing/DVP均只通过`clinicalKnowledge`注入使用，不再由Listing安装或拥有服务生命周期。Workbook读取迁至`packages/platform-workbook`，业务插件间不再引用源码。当前检索为scope先过滤的Unicode子串，不是已实现FTS；项目业务裁定激活、推广、真实运行事件学习及上下文自动绑定尚未完整实现。历史静态方法作为种子迁移来源，尚无结构化JSON/Markdown种子manifest。
 

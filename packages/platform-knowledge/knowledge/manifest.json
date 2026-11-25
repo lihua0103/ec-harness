@@ -1,0 +1,286 @@
+{
+  "schemaVersion": 2,
+  "pluginId": "ec-platform-knowledge",
+  "owner": "平台知识服务负责人",
+  "source": "src/knowledge-seeds.ts",
+  "taxonomy": {
+    "topics": [
+      "retrieval",
+      "governance",
+      "validate",
+      "degrade"
+    ]
+  },
+  "seeds": [
+    {
+      "knowledgeId": "platform-knowledge.scope.trusted",
+      "topics": [
+        "retrieval",
+        "governance"
+      ]
+    },
+    {
+      "knowledgeId": "platform-knowledge.snapshot.pinned",
+      "topics": [
+        "retrieval",
+        "governance",
+        "degrade"
+      ]
+    },
+    {
+      "knowledgeId": "platform-knowledge.evidence.status",
+      "topics": [
+        "retrieval",
+        "degrade",
+        "governance"
+      ]
+    },
+    {
+      "knowledgeId": "platform-knowledge.validation.receipt",
+      "topics": [
+        "validate",
+        "governance"
+      ]
+    },
+    {
+      "knowledgeId": "platform-knowledge.activation.policy",
+      "topics": [
+        "governance",
+        "validate"
+      ]
+    },
+    {
+      "knowledgeId": "platform-knowledge.projection.idempotent",
+      "topics": [
+        "governance",
+        "degrade"
+      ]
+    }
+  ],
+  "validators": [],
+  "capabilities": [
+    {
+      "tool": "platform_knowledge_search",
+      "topics": [
+        "retrieval"
+      ]
+    },
+    {
+      "tool": "platform_knowledge_search_pinned",
+      "topics": [
+        "retrieval"
+      ]
+    },
+    {
+      "tool": "platform_knowledge_search_run",
+      "topics": [
+        "retrieval",
+        "governance"
+      ]
+    },
+    {
+      "tool": "platform_knowledge_get",
+      "topics": [
+        "retrieval"
+      ]
+    },
+    {
+      "tool": "platform_knowledge_capture",
+      "topics": [
+        "governance"
+      ]
+    },
+    {
+      "tool": "platform_knowledge_validate",
+      "topics": [
+        "validate"
+      ]
+    },
+    {
+      "tool": "platform_knowledge_check_snapshot",
+      "topics": [
+        "degrade"
+      ]
+    },
+    {
+      "tool": "platform_knowledge_cite",
+      "topics": [
+        "retrieval",
+        "governance"
+      ]
+    },
+    {
+      "tool": "platform_knowledge_docs_search",
+      "topics": [
+        "retrieval"
+      ]
+    },
+    {
+      "tool": "platform_knowledge_status",
+      "topics": [
+        "governance"
+      ]
+    },
+    {
+      "tool": "platform_knowledge_agent",
+      "topics": [
+        "governance"
+      ]
+    },
+    {
+      "tool": "platform_knowledge_projections",
+      "topics": [
+        "governance"
+      ]
+    }
+  ],
+  "noMethodKnowledge": [
+    {
+      "tool": "platform_knowledge_status",
+      "reason": "服务状态与检索模式读取；本体的方法与合同在 docs 语料中检索"
+    }
+  ],
+  "agent": {
+    "id": "ec-platform-knowledge.agent",
+    "version": "1.1.0",
+    "owner": "平台知识服务负责人",
+    "topics": [
+      "retrieval",
+      "governance",
+      "validate",
+      "degrade"
+    ],
+    "tools": [
+      {
+        "tool": "platform_knowledge_search",
+        "topics": [
+          "retrieval"
+        ]
+      },
+      {
+        "tool": "platform_knowledge_search_pinned",
+        "topics": [
+          "retrieval"
+        ]
+      },
+      {
+        "tool": "platform_knowledge_search_run",
+        "topics": [
+          "retrieval",
+          "governance"
+        ]
+      },
+      {
+        "tool": "platform_knowledge_get",
+        "topics": [
+          "retrieval"
+        ]
+      },
+      {
+        "tool": "platform_knowledge_capture",
+        "topics": [
+          "governance"
+        ]
+      },
+      {
+        "tool": "platform_knowledge_validate",
+        "topics": [
+          "validate"
+        ]
+      },
+      {
+        "tool": "platform_knowledge_check_snapshot",
+        "topics": [
+          "degrade"
+        ]
+      },
+      {
+        "tool": "platform_knowledge_cite",
+        "topics": [
+          "retrieval",
+          "governance"
+        ]
+      },
+      {
+        "tool": "platform_knowledge_docs_search",
+        "topics": [
+          "retrieval"
+        ]
+      },
+      {
+        "tool": "platform_knowledge_status",
+        "topics": [
+          "governance"
+        ]
+      },
+      {
+        "tool": "platform_knowledge_agent",
+        "topics": [
+          "governance"
+        ]
+      },
+      {
+        "tool": "platform_knowledge_projections",
+        "topics": [
+          "governance"
+        ]
+      }
+    ],
+    "noMethodTools": [
+      {
+        "tool": "platform_knowledge_status",
+        "reason": "服务状态读取；方法合同由 docs 语料提供"
+      }
+    ]
+  },
+  "feedback": {
+    "events": [
+      "run.failed",
+      "run.succeeded",
+      "business.clarified"
+    ],
+    "projectionVersion": "1"
+  },
+  "goldenSet": {
+    "id": "ec-platform-knowledge.golden",
+    "version": "1",
+    "cases": [
+      {
+        "query": "KNOWLEDGE_SCOPE_ESCALATION",
+        "expect": [
+          "platform-knowledge.scope.trusted"
+        ]
+      },
+      {
+        "query": "searchPinned",
+        "expect": [
+          "platform-knowledge.snapshot.pinned"
+        ]
+      },
+      {
+        "query": "KNOWLEDGE_RECEIPT_ALREADY_APPLIED",
+        "expect": [
+          "platform-knowledge.validation.receipt"
+        ]
+      },
+      {
+        "query": "完全不存在的黄金集探针词",
+        "expect": [],
+        "expectEmpty": true
+      }
+    ]
+  },
+  "corpus": {
+    "source": "docs/",
+    "docPrefixes": [
+      "docs/KNOWLEDGE-AGENT-CONTRACT.md",
+      "docs/PLATFORM-KNOWLEDGE-VALIDATION-CONTRACT.md",
+      "docs/DSH-ENTERPRISE-KNOWLEDGE-SYSTEM.md",
+      "docs/DSH-ENTERPRISE-KNOWLEDGE-DELIVERY-PLAN.md",
+      "docs/ENTERPRISE-KNOWLEDGE-ARCHITECTURE.md"
+    ]
+  },
+  "scope": {
+    "projects": "all"
+  }
+}
